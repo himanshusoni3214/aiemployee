@@ -1,15 +1,7 @@
-'use client';
-import { useEffect, useState } from 'react';
-import { api } from '../../lib/api';
+import { serverApi } from '../../lib/serverApi';
 
-export default function Reports() {
-  const [activity, setActivity] = useState<any[]>([]);
-
-  async function load() {
-    try { setActivity(await api('/activity')); } catch { location.href = '/login'; }
-  }
-
-  useEffect(() => { load(); const id = setInterval(load, 20000); return () => clearInterval(id); }, []);
+export default async function Reports() {
+  const activity = await serverApi<any[]>('/activity', []);
 
   return (
     <div className="space-y-5">

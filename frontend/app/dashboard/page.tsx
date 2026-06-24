@@ -1,6 +1,4 @@
-'use client';
-import { useEffect, useState } from 'react';
-import { api } from '../../lib/api';
+import { serverApi } from '../../lib/serverApi';
 
 const metricLabels: Record<string, string> = {
   todays_leads: "Today's Leads",
@@ -18,30 +16,19 @@ function statusColor(status?: string) {
   return '#71717a';
 }
 
-export default function Dashboard() {
-  const [report, setReport] = useState<any>();
-  const [workers, setWorkers] = useState<any>();
-  const [health, setHealth] = useState<any>();
-
-  async function load() {
-    try {
-      const [reportData, workerData, healthData] = await Promise.all([api('/reports/ceo'), api('/workers/status'), api('/system/health')]);
-      setReport(reportData);
-      setWorkers(workerData);
-      setHealth(healthData);
-    } catch {
-      location.href = '/login';
-    }
-  }
-
-  useEffect(() => { load(); const id = setInterval(load, 20000); return () => clearInterval(id); }, []);
+export default async function Dashboard() {
+  const [report, workers, health] = await Promise.all([
+    serverApi<Record<string, number>>('/reports/ceo', {}),
+    serverApi<any>('/workers/status', { employees: [], job_counts: {} }),
+    serverApi<any>('/system/health', { status: 'unknown', checks: {} }),
+  ]);
   const cards = Object.keys(metricLabels);
 
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">CEO Dashboard</h1>
-        <div className="text-sm text-zinc-400">System: <span style={{ color: statusColor(health?.status) }}>{health?.status || 'loading'}</span></div>
+        <div className="text-sm text-zinc-400">System: <span style={{ color: statusColor(health?.status) }}>{health?.status || 'unknown'}</span></div>
       </div>
       <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
         {cards.map((key) => <div className="card" key={key}><p className="text-sm text-zinc-400">{metricLabels[key]}</p><p className="mt-2 text-3xl font-semibold">{report?.[key] ?? 0}</p></div>)}

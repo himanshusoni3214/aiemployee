@@ -1,6 +1,4 @@
-'use client';
-import { useEffect, useState } from 'react';
-import { api } from '../../lib/api';
+import { serverApi } from '../../lib/serverApi';
 
 function color(status?: string) {
   if (status === 'ok') return 'text-emerald-300';
@@ -8,30 +6,19 @@ function color(status?: string) {
   return 'text-red-300';
 }
 
-export default function SystemPage() {
-  const [health, setHealth] = useState<any>();
-  const [workers, setWorkers] = useState<any>();
-  const [hermesLive, setHermesLive] = useState<any>();
-
-  async function load() {
-    try {
-      const [healthData, workerData, hermesData] = await Promise.all([api('/system/health'), api('/workers/status'), api('/hermes/live')]);
-      setHealth(healthData);
-      setWorkers(workerData);
-      setHermesLive(hermesData);
-    } catch {
-      location.href = '/login';
-    }
-  }
-
-  useEffect(() => { load(); const id = setInterval(load, 15000); return () => clearInterval(id); }, []);
+export default async function SystemPage() {
+  const [health, workers, hermesLive] = await Promise.all([
+    serverApi<any>('/system/health', { status: 'unknown', checks: {} }),
+    serverApi<any>('/workers/status', { employees: [] }),
+    serverApi<any>('/hermes/live', { status: 'unknown', jobs: [], outreach: {}, outputs: {} }),
+  ]);
   const checks = Object.entries(health?.checks || {});
 
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">System Health</h1>
-        <div className={`text-sm ${color(health?.status)}`}>{health?.status || 'loading'}</div>
+        <div className={`text-sm ${color(health?.status)}`}>{health?.status || 'unknown'}</div>
       </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         {checks.map(([name, check]: [string, any]) => <div className="card" key={name}><p className="text-sm capitalize text-zinc-400">{name}</p><p className={`mt-2 text-xl font-semibold ${color(check?.status)}`}>{check?.status || 'unknown'}</p><pre className="mt-3 max-h-36 overflow-auto text-xs text-zinc-500">{JSON.stringify(check, null, 2)}</pre></div>)}
@@ -54,7 +41,7 @@ export default function SystemPage() {
             <h2 className="font-semibold">Hermes Live Schedules</h2>
             <p className="text-sm text-zinc-400">{hermesLive?.data_path || hermesLive?.reason || 'Waiting for Hermes data mount'}</p>
           </div>
-          <div className={`text-sm ${color(hermesLive?.status)}`}>{hermesLive?.status || 'loading'}</div>
+          <div className={`text-sm ${color(hermesLive?.status)}`}>{hermesLive?.status || 'unknown'}</div>
         </div>
         <div className="grid gap-3 md:grid-cols-4">
           <div className="border border-zinc-800 p-3"><p className="text-sm text-zinc-400">Jobs</p><p className="text-2xl font-semibold">{hermesLive?.job_count ?? 0}</p></div>
