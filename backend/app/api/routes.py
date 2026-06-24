@@ -1,5 +1,6 @@
 from datetime import datetime, date
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 from redis import Redis
@@ -15,9 +16,12 @@ from app.services.connectors import get_connector
 from app.services.hermes_live import HermesLiveMonitor
 
 router = APIRouter()
-oauth2 = OAuth2PasswordBearer(tokenUrl='/api/auth/login')
+oauth2 = OAuth2PasswordBearer(tokenUrl='/api/auth/login', auto_error=False)
 
-def current_user(token: str = Depends(oauth2), db: Session = Depends(get_db)):
+def current_user(request: Request, token: str|None = Depends(oauth2), db: Session = Depends(get_db)):
+    token = token or request.cookies.get('voryx_token')
+    if not token:
+        raise HTTPException(401, 'Missing token')
     try: payload = jwt.decode(token, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
     except JWTError: raise HTTPException(401, 'Invalid token')
     user = db.get(User, payload.get('sub'))
@@ -58,6 +62,22 @@ def login(data: LoginIn, db: Session=Depends(get_db)):
     user = db.scalar(select(User).where(User.email == data.email))
     if not user or not verify_password(data.password, user.password_hash): raise HTTPException(401, 'Bad credentials')
     return TokenOut(access_token=create_token(user.id, user.role.value))
+
+@router.post('/auth/login-form')
+def login_form(email: str=Form(...), password: str=Form(...), db: Session=Depends(get_db)):
+    user = db.scalar(select(User).where(User.email == email))
+    if not user or not verify_password(password, user.password_hash): raise HTTPException(401, 'Bad credentials')
+    response = RedirectResponse(url='/dashboard', status_code=303)
+    response.set_cookie(
+        'voryx_token',
+        create_token(user.id, user.role.value),
+        max_age=settings.access_token_expire_minutes * 60,
+        httponly=True,
+        secure=True,
+        samesite='lax',
+        path='/',
+    )
+    return response
 
 @router.post('/auth/password-reset')
 def password_reset(): return {'message': 'Password reset workflow placeholder: connect SMTP provider in credential vault.'}
