@@ -1,0 +1,96 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - internal
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    networks:
+      - internal
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    env_file: ${PRODUCTION_ENV_FILE:-.env.production}
+    volumes:
+      - /docker/hermes-agent-yepj/data:/hermes-data:ro
+    depends_on:
+      - db
+      - redis
+    networks:
+      - internal
+      - proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.voryx-ops-api.rule=Host(`${APP_HOST}`) && (PathPrefix(`/api`) || Path(`/health`))
+      - traefik.http.routers.voryx-ops-api.entrypoints=websecure
+      - traefik.http.routers.voryx-ops-api.tls=true
+      - traefik.http.routers.voryx-ops-api.tls.certresolver=${TRAEFIK_CERT_RESOLVER}
+      - traefik.http.services.voryx-ops-api.loadbalancer.server.port=8000
+
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    env_file: ${PRODUCTION_ENV_FILE:-.env.production}
+    depends_on:
+      - db
+      - redis
+      - backend
+    command: python -m app.workers.job_runner
+    networks:
+      - internal
+      - proxy
+
+  scheduler:
+    build: ./backend
+    restart: unless-stopped
+    env_file: ${PRODUCTION_ENV_FILE:-.env.production}
+    depends_on:
+      - db
+      - redis
+      - backend
+    command: python -m app.workers.scheduler
+    networks:
+      - internal
+
+  frontend:
+    build:
+      context: ./frontend
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    restart: unless-stopped
+    environment:
+      NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL}
+    depends_on:
+      - backend
+    networks:
+      - internal
+      - proxy
+    labels:
+      - traefik.enable=true
+      - traefik.docker.network=${TRAEFIK_NETWORK}
+      - traefik.http.routers.voryx-ops.rule=Host(`${APP_HOST}`)
+      - traefik.http.routers.voryx-ops.entrypoints=websecure
+      - traefik.http.routers.voryx-ops.tls=true
+      - traefik.http.routers.voryx-ops.tls.certresolver=${TRAEFIK_CERT_RESOLVER}
+      - traefik.http.services.voryx-ops.loadbalancer.server.port=3000
+
+volumes:
+  postgres_data:
+
+networks:
+  internal:
+    name: voryx_ops_internal
+  proxy:
+    external: true
+    name: ${TRAEFIK_NETWORK}

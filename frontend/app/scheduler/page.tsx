@@ -1,0 +1,1 @@
+import CrudPage from '../../components/CrudPage';export default function Page(){return <CrudPage title="Schedules" path="/schedules" defaults={{employee_id:'',name:'7 AM Generate Leads',cron:'0 7 * * *',task_type:'Generate Leads',payload:{},is_paused:false}}/>}

@@ -1,0 +1,1 @@
+import CrudPage from '../../components/CrudPage';export default function Page(){return <CrudPage title="Companies" path="/companies" defaults={{name:'',logo:'',website:'',industry:'',status:'Active'}}/>}
