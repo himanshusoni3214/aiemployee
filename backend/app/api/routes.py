@@ -1,6 +1,4 @@
 from datetime import datetime, date
-import time
-from threading import Lock
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
@@ -15,35 +13,13 @@ from app.models.entities import *
 from app.schemas.common import *
 from app.services.audit import log
 from app.services.connectors import get_connector
-from app.services.hermes_import import HermesImportService
+from app.services.hermes_control import HermesControlError, HermesControlService
 from app.services.hermes_live import HermesLiveMonitor
+from app.services.hermes_sync import sync_hermes_snapshot as _sync_hermes_snapshot
 
 router = APIRouter()
 oauth2 = OAuth2PasswordBearer(tokenUrl='/api/auth/login', auto_error=False)
 HERMES_SYNCED_LABELS = {'companies', 'employees', 'campaigns', 'schedules'}
-HERMES_SYNC_TTL_SECONDS = 10
-_hermes_sync_lock = Lock()
-_hermes_sync_last_at = 0.0
-_hermes_sync_last_result = None
-
-def _sync_hermes_snapshot(db: Session, user_id: str | None = None):
-    global _hermes_sync_last_at, _hermes_sync_last_result
-    now = time.monotonic()
-    if _hermes_sync_last_result and now - _hermes_sync_last_at < HERMES_SYNC_TTL_SECONDS:
-        return _hermes_sync_last_result
-    try:
-        with _hermes_sync_lock:
-            now = time.monotonic()
-            if _hermes_sync_last_result and now - _hermes_sync_last_at < HERMES_SYNC_TTL_SECONDS:
-                return _hermes_sync_last_result
-            _hermes_sync_last_result = HermesImportService().sync(db, user_id=user_id)
-            _hermes_sync_last_at = time.monotonic()
-            return _hermes_sync_last_result
-    except Exception as exc:
-        db.rollback()
-        _hermes_sync_last_result = {'status': 'error', 'error': str(exc)}
-        _hermes_sync_last_at = time.monotonic()
-        return _hermes_sync_last_result
 
 def current_user(request: Request, token: str|None = Depends(oauth2), db: Session = Depends(get_db)):
     token = token or request.cookies.get('voryx_token')
@@ -58,6 +34,60 @@ def current_user(request: Request, token: str|None = Depends(oauth2), db: Sessio
 def require_write(user: User = Depends(current_user)):
     if user.role == Role.viewer: raise HTTPException(403, 'Viewer is read-only')
     return user
+
+def _employee_hermes_job_id(employee: AIEmployee) -> str | None:
+    limits = employee.daily_limits if isinstance(employee.daily_limits, dict) else {}
+    value = limits.get('hermes_job_id')
+    return str(value) if value else None
+
+def _schedule_hermes_job_id(schedule: Schedule) -> str | None:
+    payload = schedule.payload if isinstance(schedule.payload, dict) else {}
+    value = payload.get('hermes_job_id')
+    return str(value) if value else None
+
+def _control_hermes_job(hermes_job_id: str, action: str) -> dict:
+    try:
+        return HermesControlService().control(hermes_job_id, action)
+    except HermesControlError as exc:
+        raise HTTPException(502, f'Hermes control failed: {exc}') from exc
+
+def _force_hermes_sync(db: Session, user_id: str) -> dict:
+    result = _sync_hermes_snapshot(db, user_id, force=True)
+    if result.get('status') != 'ok':
+        raise HTTPException(502, f"Hermes import failed after control action: {result.get('error') or result.get('reason') or result.get('status')}")
+    return result
+
+def _campaign_id_for_employee(db: Session, employee_id: str) -> str | None:
+    return db.scalar(
+        select(Job.campaign_id)
+        .where(Job.employee_id == employee_id, Job.campaign_id.is_not(None))
+        .order_by(Job.created_at.desc())
+        .limit(1)
+    )
+
+def _record_manual_run(db: Session, schedule: Schedule, user: User, control_result: dict | None) -> Job:
+    now = datetime.utcnow()
+    payload = dict(schedule.payload or {})
+    payload.update({'source': payload.get('source') or 'dashboard', 'manual_action': 'run', 'requested_by': user.id})
+    job = Job(
+        employee_id=schedule.employee_id,
+        campaign_id=_campaign_id_for_employee(db, schedule.employee_id),
+        connector='hermes',
+        task_type=schedule.task_type,
+        status=JobStatus.completed,
+        payload=payload,
+        result={'hermes_control': control_result or {'status': 'local'}},
+        logs=['Manual Hermes run requested from dashboard; importer will attach external outputs when Hermes writes them.'],
+        attempts=1,
+        max_attempts=1,
+        started_at=now,
+        ended_at=now,
+        created_at=now,
+    )
+    db.add(job)
+    db.flush()
+    log(db, 'Manual Hermes Run Requested', 'Job', job.id, user_id=user.id)
+    return job
 
 def crud(model, schema, label: str):
     @router.get(f'/{label}')
@@ -117,20 +147,67 @@ crud(Company, CompanyIn, 'companies'); crud(AIEmployee, EmployeeIn, 'employees')
 def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
     emp = db.get(AIEmployee, employee_id)
     if not emp: raise HTTPException(404, 'Not found')
-    mapping = {'start': EmployeeStatus.running, 'pause': EmployeeStatus.paused, 'stop': EmployeeStatus.stopped, 'restart': EmployeeStatus.running}
+    action = action.lower()
+    mapping = {'start': EmployeeStatus.running, 'resume': EmployeeStatus.running, 'pause': EmployeeStatus.paused, 'stop': EmployeeStatus.stopped, 'restart': EmployeeStatus.running}
     if action == 'duplicate':
         copy = AIEmployee(company_id=emp.company_id, name=f'{emp.name} Copy', employee_type=emp.employee_type, prompt=emp.prompt, daily_limits=emp.daily_limits, rate_limit_per_hour=emp.rate_limit_per_hour, daily_email_limit=emp.daily_email_limit, status=EmployeeStatus.stopped)
         db.add(copy); db.flush(); log(db, 'Employee Duplicated', 'AIEmployee', copy.id, emp.company_id, user.id); db.commit(); return copy
-    if action not in mapping: raise HTTPException(400, 'Unsupported action')
-    emp.status = mapping[action]
-    if action in {'start', 'restart'}:
-        emp.circuit_breaker_open = False
-        emp.paused_reason = None
-        emp.last_error = None
-        emp.failure_count = 0
-    if action in {'pause', 'stop'}:
-        emp.paused_reason = f'Manual {action} by {user.email}'
-    log(db, f'Employee {action.title()}', 'AIEmployee', emp.id, emp.company_id, user.id); db.commit(); return emp
+    if action not in mapping and action != 'run': raise HTTPException(400, 'Unsupported action')
+
+    hermes_id = _employee_hermes_job_id(emp)
+    control_result = None
+    control_action = {'start': 'resume', 'resume': 'resume', 'restart': 'resume', 'pause': 'pause', 'stop': 'pause', 'run': 'run'}.get(action)
+    if hermes_id and control_action:
+        control_result = _control_hermes_job(hermes_id, control_action)
+        _force_hermes_sync(db, user.id)
+        db.expire_all()
+        emp = db.get(AIEmployee, employee_id)
+        if not emp: raise HTTPException(404, 'Not found after Hermes sync')
+    elif action != 'run':
+        emp.status = mapping[action]
+        if action in {'start', 'resume', 'restart'}:
+            emp.circuit_breaker_open = False
+            emp.paused_reason = None
+            emp.last_error = None
+            emp.failure_count = 0
+        if action in {'pause', 'stop'}:
+            emp.paused_reason = f'Manual {action} by {user.email}'
+
+    if action == 'run':
+        schedule = db.scalar(select(Schedule).where(Schedule.employee_id == emp.id).order_by(Schedule.name).limit(1))
+        if not schedule:
+            raise HTTPException(400, 'Employee has no schedule to run')
+        _record_manual_run(db, schedule, user, control_result)
+    log(db, f'Employee {action.title()}', 'AIEmployee', emp.id, emp.company_id, user.id, {'hermes_control': control_result} if control_result else None)
+    db.commit(); db.refresh(emp); return emp
+
+@router.post('/schedules/{schedule_id}/{action}')
+def schedule_action(schedule_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    schedule = db.get(Schedule, schedule_id)
+    if not schedule: raise HTTPException(404, 'Not found')
+    action = action.lower()
+    if action not in {'pause', 'resume', 'run'}: raise HTTPException(400, 'Unsupported action')
+
+    hermes_id = _schedule_hermes_job_id(schedule)
+    control_result = None
+    if hermes_id:
+        control_result = _control_hermes_job(hermes_id, action)
+        _force_hermes_sync(db, user.id)
+        db.expire_all()
+        schedule = db.get(Schedule, schedule_id)
+        if not schedule: raise HTTPException(404, 'Not found after Hermes sync')
+    else:
+        if action == 'pause':
+            schedule.is_paused = True
+        elif action == 'resume':
+            schedule.is_paused = False
+
+    job_id = None
+    if action == 'run':
+        job_id = _record_manual_run(db, schedule, user, control_result).id
+    log(db, f'Schedule {action.title()}', 'Schedule', schedule.id, user_id=user.id, metadata={'hermes_control': control_result, 'job_id': job_id})
+    db.commit()
+    return {'ok': True, 'schedule_id': schedule.id, 'job_id': job_id, 'hermes_control': control_result}
 
 @router.post('/jobs')
 def create_job(data: JobIn, db: Session=Depends(get_db), user: User=Depends(require_write)):

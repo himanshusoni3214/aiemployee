@@ -1,4 +1,5 @@
 import { serverApi } from '../../lib/serverApi';
+import { ScheduleActions } from '../../components/ActionButtons';
 
 type Employee = { id: string; name: string; status: string };
 type Schedule = {
@@ -43,7 +44,7 @@ export default async function SchedulerPage() {
       </div>
       <div className="table-wrap">
         <table className="ops-table">
-          <thead><tr><th>Schedule</th><th>Employee</th><th>Task</th><th>Cron</th><th>Status</th><th>Last Run</th><th>Next Run</th><th>Hermes ID</th></tr></thead>
+          <thead><tr><th>Schedule</th><th>Employee</th><th>Task</th><th>Cron</th><th>Status</th><th>Last Run</th><th>Next Run</th><th>Hermes ID</th><th>Actions</th></tr></thead>
           <tbody>
             {schedules.map((schedule) => (
               <tr key={schedule.id}>
@@ -55,9 +56,10 @@ export default async function SchedulerPage() {
                 <td>{formatDate(schedule.last_run_at)}</td>
                 <td>{formatDate(schedule.next_run_at)}</td>
                 <td className="text-zinc-400">{hermesId(schedule)}</td>
+                <td><ScheduleActions id={schedule.id} isPaused={schedule.is_paused} /></td>
               </tr>
             ))}
-            {!schedules.length ? <tr><td colSpan={8} className="text-zinc-400">No schedules imported from Hermes yet</td></tr> : null}
+            {!schedules.length ? <tr><td colSpan={9} className="text-zinc-400">No schedules imported from Hermes yet</td></tr> : null}
           </tbody>
         </table>
       </div>

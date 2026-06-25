@@ -100,10 +100,10 @@ def _campaign_name(name: str) -> str:
 
 
 def _employee_status(job: dict[str, Any]) -> EmployeeStatus:
-    if job.get("last_status") == "error":
-        return EmployeeStatus.error
     if not job.get("enabled") or job.get("state") in {"paused", "disabled"}:
         return EmployeeStatus.paused
+    if job.get("last_status") == "error":
+        return EmployeeStatus.error
     if job.get("state") in {"running", "scheduled"}:
         return EmployeeStatus.running
     return EmployeeStatus.stopped

@@ -1,4 +1,5 @@
 import { serverApi } from '../../lib/serverApi';
+import { EmployeeActions } from '../../components/ActionButtons';
 
 type Company = { id: string; name: string };
 type Employee = {
@@ -45,7 +46,7 @@ export default async function EmployeesPage() {
       </div>
       <div className="table-wrap">
         <table className="ops-table">
-          <thead><tr><th>Name</th><th>Company</th><th>Type</th><th>Status</th><th>Limits</th><th>Circuit</th><th>Last Heartbeat</th><th>Reason</th></tr></thead>
+          <thead><tr><th>Name</th><th>Company</th><th>Type</th><th>Status</th><th>Limits</th><th>Circuit</th><th>Last Heartbeat</th><th>Reason</th><th>Actions</th></tr></thead>
           <tbody>
             {employees.map((employee) => (
               <tr key={employee.id}>
@@ -57,9 +58,10 @@ export default async function EmployeesPage() {
                 <td>{employee.circuit_breaker_open ? 'Open' : 'Closed'} ({employee.failure_count ?? 0})</td>
                 <td>{formatDate(employee.last_heartbeat_at)}</td>
                 <td className="max-w-sm truncate text-zinc-400">{reason(employee)}</td>
+                <td><EmployeeActions id={employee.id} status={employee.status} /></td>
               </tr>
             ))}
-            {!employees.length ? <tr><td colSpan={8} className="text-zinc-400">No workers imported from Hermes yet</td></tr> : null}
+            {!employees.length ? <tr><td colSpan={9} className="text-zinc-400">No workers imported from Hermes yet</td></tr> : null}
           </tbody>
         </table>
       </div>

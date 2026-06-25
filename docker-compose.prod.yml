@@ -22,7 +22,7 @@ services:
     restart: unless-stopped
     env_file: ${PRODUCTION_ENV_FILE:-.env.production}
     volumes:
-      - /docker/hermes-agent-yepj/data:/hermes-data:ro
+      - /docker/hermes-agent-yepj/data:/hermes-data:rw
     depends_on:
       - db
       - redis
