@@ -139,9 +139,9 @@ def create_job(data: JobIn, db: Session=Depends(get_db), user: User=Depends(requ
     job = Job(**payload); db.add(job); db.flush(); log(db, 'Job Queued', 'Job', job.id, user_id=user.id); db.commit(); db.refresh(job); return job
 
 @router.get('/jobs')
-def list_jobs(status: str|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):
+def list_jobs(status: str|None=None, limit: int=Query(500, ge=1, le=1000), db: Session=Depends(get_db), user: User=Depends(current_user)):
     _sync_hermes_snapshot(db, user.id)
-    stmt = select(Job).order_by(Job.created_at.desc()).limit(100)
+    stmt = select(Job).order_by(Job.created_at.desc()).limit(limit)
     if status:
         status_filter = next((s for s in JobStatus if s.value == status or s.name == status.lower()), None)
         if not status_filter: raise HTTPException(400, 'Unsupported job status')
@@ -215,10 +215,12 @@ async def system_health(db: Session=Depends(get_db), user: User=Depends(current_
     checks['hermes'] = await get_connector('hermes').health()
     checks['hermes_live'] = HermesLiveMonitor().summary()
     checks['platform_import'] = platform_import
+    failed_jobs = db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.failed)) or 0
     checks['jobs'] = {
+        'status': 'degraded' if failed_jobs else 'ok',
         'queued': db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.queued)) or 0,
         'running': db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.running)) or 0,
-        'failed': db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.failed)) or 0,
+        'failed': failed_jobs,
     }
     blocking = [name for name, check in checks.items() if isinstance(check, dict) and check.get('status') == 'error']
     hermes_status = checks['hermes'].get('status') if isinstance(checks.get('hermes'), dict) else 'unknown'
