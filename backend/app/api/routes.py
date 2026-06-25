@@ -1,4 +1,6 @@
 from datetime import datetime, date
+import time
+from threading import Lock
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
@@ -13,10 +15,35 @@ from app.models.entities import *
 from app.schemas.common import *
 from app.services.audit import log
 from app.services.connectors import get_connector
+from app.services.hermes_import import HermesImportService
 from app.services.hermes_live import HermesLiveMonitor
 
 router = APIRouter()
 oauth2 = OAuth2PasswordBearer(tokenUrl='/api/auth/login', auto_error=False)
+HERMES_SYNCED_LABELS = {'companies', 'employees', 'campaigns', 'schedules'}
+HERMES_SYNC_TTL_SECONDS = 10
+_hermes_sync_lock = Lock()
+_hermes_sync_last_at = 0.0
+_hermes_sync_last_result = None
+
+def _sync_hermes_snapshot(db: Session, user_id: str | None = None):
+    global _hermes_sync_last_at, _hermes_sync_last_result
+    now = time.monotonic()
+    if _hermes_sync_last_result and now - _hermes_sync_last_at < HERMES_SYNC_TTL_SECONDS:
+        return _hermes_sync_last_result
+    try:
+        with _hermes_sync_lock:
+            now = time.monotonic()
+            if _hermes_sync_last_result and now - _hermes_sync_last_at < HERMES_SYNC_TTL_SECONDS:
+                return _hermes_sync_last_result
+            _hermes_sync_last_result = HermesImportService().sync(db, user_id=user_id)
+            _hermes_sync_last_at = time.monotonic()
+            return _hermes_sync_last_result
+    except Exception as exc:
+        db.rollback()
+        _hermes_sync_last_result = {'status': 'error', 'error': str(exc)}
+        _hermes_sync_last_at = time.monotonic()
+        return _hermes_sync_last_result
 
 def current_user(request: Request, token: str|None = Depends(oauth2), db: Session = Depends(get_db)):
     token = token or request.cookies.get('voryx_token')
@@ -35,6 +62,8 @@ def require_write(user: User = Depends(current_user)):
 def crud(model, schema, label: str):
     @router.get(f'/{label}')
     def list_items(db: Session=Depends(get_db), user: User=Depends(current_user), q: str|None=Query(None)):
+        if label in HERMES_SYNCED_LABELS:
+            _sync_hermes_snapshot(db, user.id)
         stmt = select(model)
         if q and hasattr(model, 'name'): stmt = stmt.where(model.name.ilike(f'%{q}%'))
         return db.scalars(stmt).all()
@@ -111,6 +140,7 @@ def create_job(data: JobIn, db: Session=Depends(get_db), user: User=Depends(requ
 
 @router.get('/jobs')
 def list_jobs(status: str|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    _sync_hermes_snapshot(db, user.id)
     stmt = select(Job).order_by(Job.created_at.desc()).limit(100)
     if status:
         status_filter = next((s for s in JobStatus if s.value == status or s.name == status.lower()), None)
@@ -132,10 +162,13 @@ def retry_job(job_id: str, db: Session=Depends(get_db), user: User=Depends(requi
     db.commit(); db.refresh(job); return job
 
 @router.get('/activity')
-def activity(db: Session=Depends(get_db), user: User=Depends(current_user)): return db.scalars(select(ActivityLog).order_by(ActivityLog.created_at.desc()).limit(200)).all()
+def activity(db: Session=Depends(get_db), user: User=Depends(current_user)):
+    _sync_hermes_snapshot(db, user.id)
+    return db.scalars(select(ActivityLog).order_by(ActivityLog.created_at.desc()).limit(200)).all()
 
 @router.get('/workers/status')
 def worker_status(db: Session=Depends(get_db), user: User=Depends(current_user)):
+    _sync_hermes_snapshot(db, user.id)
     employees = db.scalars(select(AIEmployee).order_by(AIEmployee.name)).all()
     job_counts = {status.value: db.scalar(select(func.count(Job.id)).where(Job.status == status)) or 0 for status in JobStatus}
     return {
@@ -160,11 +193,14 @@ def worker_status(db: Session=Depends(get_db), user: User=Depends(current_user))
     }
 
 @router.get('/hermes/live')
-def hermes_live(user: User=Depends(current_user)):
-    return HermesLiveMonitor().summary()
+def hermes_live(db: Session=Depends(get_db), user: User=Depends(current_user)):
+    summary = HermesLiveMonitor().summary()
+    summary['platform_import'] = _sync_hermes_snapshot(db, user.id)
+    return summary
 
 @router.get('/system/health')
 async def system_health(db: Session=Depends(get_db), user: User=Depends(current_user)):
+    platform_import = _sync_hermes_snapshot(db, user.id)
     checks = {}
     try:
         db.execute(text('select 1'))
@@ -178,6 +214,7 @@ async def system_health(db: Session=Depends(get_db), user: User=Depends(current_
         checks['redis'] = {'status': 'error', 'error': str(exc)}
     checks['hermes'] = await get_connector('hermes').health()
     checks['hermes_live'] = HermesLiveMonitor().summary()
+    checks['platform_import'] = platform_import
     checks['jobs'] = {
         'queued': db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.queued)) or 0,
         'running': db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.running)) or 0,
@@ -191,6 +228,7 @@ async def system_health(db: Session=Depends(get_db), user: User=Depends(current_
 
 @router.get('/reports/ceo')
 def ceo_report(db: Session=Depends(get_db), user: User=Depends(current_user)):
+    _sync_hermes_snapshot(db, user.id)
     today = datetime.combine(date.today(), datetime.min.time())
     return {
       'todays_leads': db.scalar(select(func.count(Lead.id)).where(Lead.created_at >= today)) or 0,

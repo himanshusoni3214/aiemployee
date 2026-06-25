@@ -1,80 +1,72 @@
-'use client';
-import { useEffect, useState } from 'react';
-import { api } from '../../lib/api';
+import { serverApi } from '../../lib/serverApi';
 
-const statuses = ['', 'Queued', 'Running', 'Completed', 'Failed'];
+type Employee = { id: string; name: string };
+type Campaign = { id: string; name: string };
+type Job = {
+  id: string;
+  employee_id?: string | null;
+  campaign_id?: string | null;
+  connector: string;
+  task_type: string;
+  status: string;
+  logs?: string[];
+  error_message?: string | null;
+  attempts?: number;
+  max_attempts?: number;
+  duration_seconds?: number | null;
+  created_at?: string;
+};
 
-export default function JobsPage() {
-  const [jobs, setJobs] = useState<any[]>([]);
-  const [employees, setEmployees] = useState<any[]>([]);
-  const [campaigns, setCampaigns] = useState<any[]>([]);
-  const [status, setStatus] = useState('');
-  const [error, setError] = useState('');
-  const [form, setForm] = useState({ employee_id: '', campaign_id: '', connector: 'hermes', task_type: 'Generate Leads', payload: {}, max_attempts: 1 });
+const statuses = ['Queued', 'Running', 'Completed', 'Failed'];
 
-  async function load(nextStatus = status) {
-    try {
-      const query = nextStatus ? `?status=${encodeURIComponent(nextStatus)}` : '';
-      const [jobRows, employeeRows, campaignRows] = await Promise.all([api(`/jobs${query}`), api('/employees'), api('/campaigns')]);
-      setJobs(jobRows);
-      setEmployees(employeeRows);
-      setCampaigns(campaignRows);
-      setError('');
-    } catch {
-      location.href = '/login';
-    }
-  }
+function formatDate(value?: string) {
+  return value ? new Date(value).toLocaleString() : '-';
+}
 
-  useEffect(() => { load(); const id = setInterval(() => load(), 15000); return () => clearInterval(id); }, []);
+function lastLog(job: Job) {
+  return job.error_message || job.logs?.[job.logs.length - 1] || '-';
+}
 
-  async function create() {
-    try {
-      await api('/jobs', { method: 'POST', body: JSON.stringify({ ...form, employee_id: form.employee_id || null, campaign_id: form.campaign_id || null }) });
-      await load();
-    } catch (err: any) {
-      setError(err.message || 'Request failed');
-    }
-  }
-
-  async function retry(id: string) {
-    await api(`/jobs/${id}/retry`, { method: 'POST' });
-    await load();
-  }
+export default async function JobsPage() {
+  const [jobs, employees, campaigns] = await Promise.all([
+    serverApi<Job[]>('/jobs', []),
+    serverApi<Employee[]>('/employees', []),
+    serverApi<Campaign[]>('/campaigns', []),
+  ]);
+  const employeeName = new Map(employees.map((employee) => [employee.id, employee.name]));
+  const campaignName = new Map(campaigns.map((campaign) => [campaign.id, campaign.name]));
 
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">Jobs</h1>
-        <select className="input max-w-48" value={status} onChange={(event) => { setStatus(event.target.value); load(event.target.value); }}>
-          {statuses.map((value) => <option value={value} key={value}>{value || 'All statuses'}</option>)}
-        </select>
+        <div className="text-sm text-zinc-400">{jobs.length} imported and queued jobs</div>
       </div>
-      <div className="card">
-        <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-5">
-          <label className="grid gap-1 text-sm text-zinc-300"><span>employee</span><select className="input" value={form.employee_id} onChange={(event) => setForm({ ...form, employee_id: event.target.value })}><option value="">None</option>{employees.map((employee) => <option value={employee.id} key={employee.id}>{employee.name}</option>)}</select></label>
-          <label className="grid gap-1 text-sm text-zinc-300"><span>campaign</span><select className="input" value={form.campaign_id} onChange={(event) => setForm({ ...form, campaign_id: event.target.value })}><option value="">None</option>{campaigns.map((campaign) => <option value={campaign.id} key={campaign.id}>{campaign.name}</option>)}</select></label>
-          <label className="grid gap-1 text-sm text-zinc-300"><span>task</span><input className="input" value={form.task_type} onChange={(event) => setForm({ ...form, task_type: event.target.value })} /></label>
-          <label className="grid gap-1 text-sm text-zinc-300"><span>attempts</span><input className="input" type="number" min={1} max={3} value={form.max_attempts} onChange={(event) => setForm({ ...form, max_attempts: Number(event.target.value || 1) })} /></label>
-          <div className="flex items-end"><button className="btn w-full" onClick={create}>Queue Job</button></div>
-        </div>
-        {error ? <p className="mt-3 text-sm text-red-300">{error}</p> : null}
+      <div className="grid gap-3 md:grid-cols-4">
+        {statuses.map((status) => (
+          <div className="card" key={status}>
+            <p className="text-sm text-zinc-400">{status}</p>
+            <p className="mt-2 text-3xl font-semibold">{jobs.filter((job) => job.status === status).length}</p>
+          </div>
+        ))}
       </div>
       <div className="table-wrap">
         <table className="ops-table">
-          <thead><tr><th>Task</th><th>Status</th><th>Attempts</th><th>Duration</th><th>Created</th><th>Error</th><th></th></tr></thead>
+          <thead><tr><th>Task</th><th>Status</th><th>Employee</th><th>Campaign</th><th>Connector</th><th>Attempts</th><th>Created</th><th>Log</th></tr></thead>
           <tbody>
             {jobs.map((job) => (
               <tr key={job.id}>
                 <td className="font-medium text-stone-100">{job.task_type}</td>
                 <td>{job.status}</td>
+                <td>{job.employee_id ? employeeName.get(job.employee_id) || job.employee_id : '-'}</td>
+                <td>{job.campaign_id ? campaignName.get(job.campaign_id) || job.campaign_id : '-'}</td>
+                <td>{job.connector}</td>
                 <td>{job.attempts || 0}/{job.max_attempts || 1}</td>
-                <td>{job.duration_seconds ? `${job.duration_seconds}s` : '-'}</td>
-                <td>{new Date(job.created_at).toLocaleString()}</td>
-                <td className="max-w-sm truncate text-zinc-400">{job.error_message || '-'}</td>
-                <td>{job.status === 'Failed' ? <button className="btn-secondary" onClick={() => retry(job.id)}>Retry</button> : null}</td>
+                <td>{formatDate(job.created_at)}</td>
+                <td className="max-w-md truncate text-zinc-400">{lastLog(job)}</td>
               </tr>
             ))}
-            {!jobs.length ? <tr><td colSpan={7} className="text-zinc-400">No jobs</td></tr> : null}
+            {!jobs.length ? <tr><td colSpan={8} className="text-zinc-400">No jobs imported from Hermes yet</td></tr> : null}
           </tbody>
         </table>
       </div>
