@@ -1,11 +1,16 @@
 'use client';
 
+import { useEffect, useState } from 'react';
 import { usePathname } from 'next/navigation';
 import { API } from '../lib/api';
 
 export function LogoutButton() {
   const pathname = usePathname();
-  if (pathname === '/login') return null;
+  const [mounted, setMounted] = useState(false);
+
+  useEffect(() => setMounted(true), []);
+
+  if (!mounted || pathname === '/login') return null;
 
   async function logout() {
     try {
