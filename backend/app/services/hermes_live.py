@@ -65,6 +65,8 @@ class HermesLiveMonitor:
                 "schedule": schedule,
                 "enabled": job.get("enabled"),
                 "state": job.get("state"),
+                "paused_at": job.get("paused_at"),
+                "paused_reason": redact(job.get("paused_reason")),
                 "next_run_at": job.get("next_run_at"),
                 "last_run_at": job.get("last_run_at"),
                 "last_status": job.get("last_status"),

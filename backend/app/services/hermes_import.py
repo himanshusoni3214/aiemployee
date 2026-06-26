@@ -100,11 +100,13 @@ def _campaign_name(name: str) -> str:
 
 
 def _employee_status(job: dict[str, Any]) -> EmployeeStatus:
-    if not job.get("enabled") or job.get("state") in {"paused", "disabled"}:
+    state = (job.get("state") or "").lower()
+    last_status = (job.get("last_status") or "").lower()
+    if not job.get("enabled") or state in {"paused", "disabled"}:
         return EmployeeStatus.paused
-    if job.get("last_status") == "error":
+    if last_status in {"error", "failed"}:
         return EmployeeStatus.error
-    if job.get("state") in {"running", "scheduled"}:
+    if state == "running":
         return EmployeeStatus.running
     return EmployeeStatus.stopped
 
@@ -112,12 +114,12 @@ def _employee_status(job: dict[str, Any]) -> EmployeeStatus:
 def _job_status(job: dict[str, Any]) -> JobStatus:
     last_status = (job.get("last_status") or "").lower()
     state = (job.get("state") or "").lower()
+    if state == "running":
+        return JobStatus.running
     if last_status in {"ok", "completed", "success"}:
         return JobStatus.completed
     if last_status in {"error", "failed"}:
         return JobStatus.failed
-    if state == "running":
-        return JobStatus.running
     return JobStatus.queued if job.get("enabled") else JobStatus.completed
 
 
@@ -206,6 +208,7 @@ class HermesImportService:
             employee = db.scalar(select(AIEmployee).where(AIEmployee.company_id == company.id, func.lower(AIEmployee.name) == name.lower()))
         status = _employee_status(hermes_job)
         last_error = hermes_job.get("last_error") or hermes_job.get("last_delivery_error")
+        paused_reason = hermes_job.get("paused_reason") or (last_error if status in {EmployeeStatus.error, EmployeeStatus.paused} else None)
         fields = {
             "company_id": company.id,
             "name": name,
@@ -217,7 +220,7 @@ class HermesImportService:
             "daily_email_limit": 50,
             "failure_count": 1 if status == EmployeeStatus.error else 0,
             "circuit_breaker_open": status == EmployeeStatus.error,
-            "paused_reason": last_error if status in {EmployeeStatus.error, EmployeeStatus.paused} else None,
+            "paused_reason": paused_reason,
             "last_error": last_error if status == EmployeeStatus.error else None,
             "last_heartbeat_at": _parse_dt(hermes_job.get("last_run_at")),
         }
@@ -245,6 +248,10 @@ class HermesImportService:
                 "hermes_state": hermes_job.get("state"),
                 "hermes_enabled": hermes_job.get("enabled"),
                 "hermes_last_status": hermes_job.get("last_status"),
+                "hermes_last_error": hermes_job.get("last_error"),
+                "hermes_last_delivery_error": hermes_job.get("last_delivery_error"),
+                "hermes_paused_at": hermes_job.get("paused_at"),
+                "hermes_paused_reason": hermes_job.get("paused_reason"),
             },
             "is_paused": _schedule_paused(hermes_job),
             "last_run_at": _parse_dt(hermes_job.get("last_run_at")),
@@ -271,7 +278,13 @@ class HermesImportService:
             "status": status,
             "payload": {"source": "hermes", "kind": "schedule_state", "hermes_job_id": hermes_id, "name": hermes_job.get("name")},
             "result": {"hermes": hermes_job},
-            "logs": [f"Imported Hermes schedule {hermes_id}", f"last_status={hermes_job.get('last_status') or 'unknown'}"],
+            "logs": [
+                f"Imported Hermes schedule {hermes_id}",
+                f"state={hermes_job.get('state') or 'unknown'}",
+                f"enabled={hermes_job.get('enabled')}",
+                f"last_status={hermes_job.get('last_status') or 'unknown'}",
+                f"last_run_at={hermes_job.get('last_run_at') or 'never'}",
+            ],
             "error_message": error if status == JobStatus.failed else None,
             "attempts": 1 if hermes_job.get("last_run_at") else 0,
             "max_attempts": 1,
