@@ -1,5 +1,7 @@
 import { serverApi } from '../../lib/serverApi';
 import { ScheduleActions } from '../../components/ActionButtons';
+import { LocalTime } from '../../components/LocalTime';
+import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
 
 type Employee = { id: string; name: string; status: string };
 type Schedule = {
@@ -14,10 +16,6 @@ type Schedule = {
   next_run_at?: string | null;
 };
 
-function formatDate(value?: string | null) {
-  return value ? new Date(value).toLocaleString() : '-';
-}
-
 function hermesId(schedule: Schedule) {
   const value = schedule.payload?.hermes_job_id;
   return typeof value === 'string' ? value : '-';
@@ -28,6 +26,7 @@ export default async function SchedulerPage() {
     serverApi<Schedule[]>('/schedules', []),
     serverApi<Employee[]>('/employees', []),
   ]);
+  const sync = await serverApi<SyncInfo>('/sync/status', {});
   const employeeName = new Map(employees.map((employee) => [employee.id, employee.name]));
   const runningEmployees = new Set(employees.filter((employee) => employee.status === 'Running').map((employee) => employee.id));
 
@@ -35,7 +34,7 @@ export default async function SchedulerPage() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">Scheduler</h1>
-        <div className="text-sm text-zinc-400">{schedules.length} schedules</div>
+        <div className="flex items-center gap-4"><div className="text-sm text-zinc-400">{schedules.length} schedules</div><SyncStatus sync={sync} /></div>
       </div>
       <div className="grid gap-3 md:grid-cols-3">
         <div className="card"><p className="text-sm text-zinc-400">Active</p><p className="mt-2 text-3xl font-semibold">{schedules.filter((schedule) => !schedule.is_paused).length}</p></div>
@@ -53,8 +52,8 @@ export default async function SchedulerPage() {
                 <td>{schedule.task_type}</td>
                 <td>{schedule.cron}</td>
                 <td>{schedule.is_paused ? 'Paused' : 'Active'}</td>
-                <td>{formatDate(schedule.last_run_at)}</td>
-                <td>{formatDate(schedule.next_run_at)}</td>
+                <td><LocalTime value={schedule.last_run_at} /></td>
+                <td><LocalTime value={schedule.next_run_at} /></td>
                 <td className="text-zinc-400">{hermesId(schedule)}</td>
                 <td><ScheduleActions id={schedule.id} isPaused={schedule.is_paused} /></td>
               </tr>

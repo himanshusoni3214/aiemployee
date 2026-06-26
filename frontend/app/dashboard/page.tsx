@@ -1,4 +1,5 @@
 import { serverApi } from '../../lib/serverApi';
+import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
 
 const metricLabels: Record<string, string> = {
   todays_leads: "Today's Leads",
@@ -22,13 +23,14 @@ export default async function Dashboard() {
     serverApi<any>('/workers/status', { employees: [], job_counts: {} }),
     serverApi<any>('/system/health', { status: 'unknown', checks: {} }),
   ]);
+  const sync = await serverApi<SyncInfo>('/sync/status', {});
   const cards = Object.keys(metricLabels);
 
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">CEO Dashboard</h1>
-        <div className="text-sm text-zinc-400">System: <span style={{ color: statusColor(health?.status) }}>{health?.status || 'unknown'}</span></div>
+        <div className="flex items-center gap-4"><div className="text-sm text-zinc-400">System: <span style={{ color: statusColor(health?.status) }}>{health?.status || 'unknown'}</span></div><SyncStatus sync={sync} /></div>
       </div>
       <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
         {cards.map((key) => <div className="card" key={key}><p className="text-sm text-zinc-400">{metricLabels[key]}</p><p className="mt-2 text-3xl font-semibold">{report?.[key] ?? 0}</p></div>)}

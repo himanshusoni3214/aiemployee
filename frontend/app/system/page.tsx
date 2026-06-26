@@ -1,4 +1,6 @@
 import { serverApi } from '../../lib/serverApi';
+import { LocalTime } from '../../components/LocalTime';
+import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
 
 function color(status?: string) {
   if (status === 'ok') return 'text-emerald-300';
@@ -12,13 +14,14 @@ export default async function SystemPage() {
     serverApi<any>('/workers/status', { employees: [] }),
     serverApi<any>('/hermes/live', { status: 'unknown', jobs: [], outreach: {}, outputs: {} }),
   ]);
+  const sync = await serverApi<SyncInfo>('/sync/status', {});
   const checks = Object.entries(health?.checks || {});
 
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">System Health</h1>
-        <div className={`text-sm ${color(health?.status)}`}>{health?.status || 'unknown'}</div>
+        <div className="flex items-center gap-4"><div className={`text-sm ${color(health?.status)}`}>{health?.status || 'unknown'}</div><SyncStatus sync={sync} /></div>
       </div>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         {checks.map(([name, check]: [string, any]) => <div className="card" key={name}><p className="text-sm capitalize text-zinc-400">{name}</p><p className={`mt-2 text-xl font-semibold ${color(check?.status)}`}>{check?.status || 'unknown'}</p><pre className="mt-3 max-h-36 overflow-auto text-xs text-zinc-500">{JSON.stringify(check, null, 2)}</pre></div>)}
@@ -53,7 +56,7 @@ export default async function SystemPage() {
           <table className="ops-table">
             <thead><tr><th>Name</th><th>Schedule</th><th>State</th><th>Last Run</th><th>Last Status</th><th>Error</th></tr></thead>
             <tbody>
-              {hermesLive?.jobs?.map((job: any) => <tr key={job.id}><td>{job.name}</td><td>{job.schedule_display || '-'}</td><td>{job.enabled ? job.state : 'disabled'}</td><td>{job.last_run_at || '-'}</td><td>{job.last_status || '-'}</td><td className="max-w-md truncate text-zinc-400">{job.last_error || job.last_delivery_error || '-'}</td></tr>)}
+              {hermesLive?.jobs?.map((job: any) => <tr key={job.id}><td>{job.name}</td><td>{job.schedule_display || '-'}</td><td>{job.enabled ? job.state : 'disabled'}</td><td><LocalTime value={job.last_run_at} /></td><td>{job.last_status || '-'}</td><td className="max-w-md truncate text-zinc-400">{job.last_error || job.last_delivery_error || '-'}</td></tr>)}
               {!hermesLive?.jobs?.length ? <tr><td colSpan={6} className="text-zinc-400">No mounted Hermes schedules</td></tr> : null}
             </tbody>
           </table>
@@ -66,7 +69,7 @@ export default async function SystemPage() {
             <table className="ops-table">
               <thead><tr><th>Status</th><th>Timestamp</th><th>Note</th></tr></thead>
               <tbody>
-                {hermesLive?.outreach?.recent?.map((row: any, index: number) => <tr key={`${row.timestamp}-${index}`}><td>{row.status || '-'}</td><td>{row.timestamp || '-'}</td><td className="max-w-sm truncate text-zinc-400">{row.note || '-'}</td></tr>)}
+                {hermesLive?.outreach?.recent?.map((row: any, index: number) => <tr key={`${row.timestamp}-${index}`}><td>{row.status || '-'}</td><td><LocalTime value={row.timestamp} /></td><td className="max-w-sm truncate text-zinc-400">{row.note || '-'}</td></tr>)}
                 {!hermesLive?.outreach?.recent?.length ? <tr><td colSpan={3} className="text-zinc-400">No outreach rows</td></tr> : null}
               </tbody>
             </table>

@@ -1,5 +1,5 @@
 from datetime import datetime, date
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response
 from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
@@ -15,7 +15,7 @@ from app.services.audit import log
 from app.services.connectors import get_connector
 from app.services.hermes_control import HermesControlError, HermesControlService
 from app.services.hermes_live import HermesLiveMonitor
-from app.services.hermes_sync import sync_hermes_snapshot as _sync_hermes_snapshot
+from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as _sync_hermes_snapshot
 
 router = APIRouter()
 oauth2 = OAuth2PasswordBearer(tokenUrl='/api/auth/login', auto_error=False)
@@ -116,27 +116,37 @@ def crud(model, schema, label: str):
         log(db, f'{model.__name__} Deleted', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id)
         db.delete(obj); db.commit(); return {'ok': True}
 
-@router.post('/auth/login', response_model=TokenOut)
-def login(data: LoginIn, db: Session=Depends(get_db)):
-    user = db.scalar(select(User).where(User.email == data.email))
-    if not user or not verify_password(data.password, user.password_hash): raise HTTPException(401, 'Bad credentials')
-    return TokenOut(access_token=create_token(user.id, user.role.value))
-
-@router.post('/auth/login-form')
-def login_form(email: str=Form(...), password: str=Form(...), db: Session=Depends(get_db)):
-    user = db.scalar(select(User).where(User.email == email))
-    if not user or not verify_password(password, user.password_hash): raise HTTPException(401, 'Bad credentials')
-    response = RedirectResponse(url='/dashboard', status_code=303)
+def _set_auth_cookie(response: Response, user: User) -> str:
+    token = create_token(user.id, user.role.value)
     response.set_cookie(
         'voryx_token',
-        create_token(user.id, user.role.value),
+        token,
         max_age=settings.access_token_expire_minutes * 60,
         httponly=True,
         secure=True,
         samesite='lax',
         path='/',
     )
+    return token
+
+@router.post('/auth/login', response_model=TokenOut)
+def login(data: LoginIn, response: Response, db: Session=Depends(get_db)):
+    user = db.scalar(select(User).where(User.email == data.email))
+    if not user or not verify_password(data.password, user.password_hash): raise HTTPException(401, 'Bad credentials')
+    return TokenOut(access_token=_set_auth_cookie(response, user))
+
+@router.post('/auth/login-form')
+def login_form(email: str=Form(...), password: str=Form(...), db: Session=Depends(get_db)):
+    user = db.scalar(select(User).where(User.email == email))
+    if not user or not verify_password(password, user.password_hash): raise HTTPException(401, 'Bad credentials')
+    response = RedirectResponse(url='/dashboard', status_code=303)
+    _set_auth_cookie(response, user)
     return response
+
+@router.post('/auth/logout')
+def logout(response: Response):
+    response.delete_cookie('voryx_token', path='/', secure=True, samesite='lax')
+    return {'ok': True}
 
 @router.post('/auth/password-reset')
 def password_reset(): return {'message': 'Password reset workflow placeholder: connect SMTP provider in credential vault.'}
@@ -274,6 +284,10 @@ def hermes_live(db: Session=Depends(get_db), user: User=Depends(current_user)):
     summary = HermesLiveMonitor().summary()
     summary['platform_import'] = _sync_hermes_snapshot(db, user.id)
     return summary
+
+@router.get('/sync/status')
+def sync_status(user: User=Depends(current_user)):
+    return hermes_sync_status()
 
 @router.get('/system/health')
 async def system_health(db: Session=Depends(get_db), user: User=Depends(current_user)):

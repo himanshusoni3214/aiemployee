@@ -1,5 +1,7 @@
 import { serverApi } from '../../lib/serverApi';
 import { EmployeeActions } from '../../components/ActionButtons';
+import { LocalTime } from '../../components/LocalTime';
+import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
 
 type Company = { id: string; name: string };
 type Employee = {
@@ -17,10 +19,6 @@ type Employee = {
   last_heartbeat_at?: string | null;
 };
 
-function formatDate(value?: string | null) {
-  return value ? new Date(value).toLocaleString() : '-';
-}
-
 function reason(employee: Employee) {
   return employee.last_error || employee.paused_reason || '-';
 }
@@ -30,13 +28,14 @@ export default async function EmployeesPage() {
     serverApi<Employee[]>('/employees', []),
     serverApi<Company[]>('/companies', []),
   ]);
+  const sync = await serverApi<SyncInfo>('/sync/status', {});
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
 
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">AI Employees</h1>
-        <div className="text-sm text-zinc-400">{employees.length} workers</div>
+        <div className="flex items-center gap-4"><div className="text-sm text-zinc-400">{employees.length} workers</div><SyncStatus sync={sync} /></div>
       </div>
       <div className="grid gap-3 md:grid-cols-4">
         <div className="card"><p className="text-sm text-zinc-400">Running</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.status === 'Running').length}</p></div>
@@ -56,7 +55,7 @@ export default async function EmployeesPage() {
                 <td>{employee.status}</td>
                 <td>{employee.rate_limit_per_hour ?? 0}/hr, {employee.daily_email_limit ?? 0}/day</td>
                 <td>{employee.circuit_breaker_open ? 'Open' : 'Closed'} ({employee.failure_count ?? 0})</td>
-                <td>{formatDate(employee.last_heartbeat_at)}</td>
+                <td><LocalTime value={employee.last_heartbeat_at} /></td>
                 <td className="max-w-sm truncate text-zinc-400">{reason(employee)}</td>
                 <td><EmployeeActions id={employee.id} status={employee.status} /></td>
               </tr>

@@ -1,4 +1,6 @@
 import { serverApi } from '../../lib/serverApi';
+import { LocalTime } from '../../components/LocalTime';
+import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
 
 type Employee = { id: string; name: string };
 type Campaign = { id: string; name: string };
@@ -19,10 +21,6 @@ type Job = {
 
 const statuses = ['Queued', 'Running', 'Completed', 'Failed'];
 
-function formatDate(value?: string) {
-  return value ? new Date(value).toLocaleString() : '-';
-}
-
 function lastLog(job: Job) {
   return job.error_message || job.logs?.[job.logs.length - 1] || '-';
 }
@@ -33,6 +31,7 @@ export default async function JobsPage() {
     serverApi<Employee[]>('/employees', []),
     serverApi<Campaign[]>('/campaigns', []),
   ]);
+  const sync = await serverApi<SyncInfo>('/sync/status', {});
   const employeeName = new Map(employees.map((employee) => [employee.id, employee.name]));
   const campaignName = new Map(campaigns.map((campaign) => [campaign.id, campaign.name]));
 
@@ -40,7 +39,7 @@ export default async function JobsPage() {
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h1 className="text-2xl font-semibold">Jobs</h1>
-        <div className="text-sm text-zinc-400">{jobs.length} imported and queued jobs</div>
+        <div className="flex items-center gap-4"><div className="text-sm text-zinc-400">{jobs.length} imported and queued jobs</div><SyncStatus sync={sync} /></div>
       </div>
       <div className="grid gap-3 md:grid-cols-4">
         {statuses.map((status) => (
@@ -62,7 +61,7 @@ export default async function JobsPage() {
                 <td>{job.campaign_id ? campaignName.get(job.campaign_id) || job.campaign_id : '-'}</td>
                 <td>{job.connector}</td>
                 <td>{job.attempts || 0}/{job.max_attempts || 1}</td>
-                <td>{formatDate(job.created_at)}</td>
+                <td><LocalTime value={job.created_at} /></td>
                 <td className="max-w-md truncate text-zinc-400">{lastLog(job)}</td>
               </tr>
             ))}
