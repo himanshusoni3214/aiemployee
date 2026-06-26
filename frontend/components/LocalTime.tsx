@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 
 function normalizeUtc(value: string) {
   const trimmed = value.trim();
@@ -8,6 +8,12 @@ function normalizeUtc(value: string) {
   if (/[zZ]$|[+-]\d{2}:?\d{2}$/.test(trimmed)) return trimmed;
   if (/^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}/.test(trimmed)) return `${trimmed.replace(' ', 'T')}Z`;
   return trimmed;
+}
+
+function fallbackLabel(value?: string | null) {
+  if (!value) return '-';
+  const normalized = normalizeUtc(value);
+  return normalized.replace('T', ' ').replace(/Z$/, ' UTC');
 }
 
 export function formatLocalTime(value?: string | null) {
@@ -25,12 +31,13 @@ export function formatLocalTime(value?: string | null) {
 }
 
 export function LocalTime({ value }: { value?: string | null }) {
-  const [label, setLabel] = useState('-');
+  const initialLabel = useMemo(() => fallbackLabel(value), [value]);
+  const [label, setLabel] = useState(initialLabel);
 
   useEffect(() => {
     setLabel(formatLocalTime(value));
   }, [value]);
 
   if (!value) return <span>-</span>;
-  return <time dateTime={normalizeUtc(value)}>{label}</time>;
+  return <time suppressHydrationWarning dateTime={normalizeUtc(value)}>{label}</time>;
 }
