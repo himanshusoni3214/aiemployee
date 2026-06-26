@@ -36,8 +36,20 @@ class HermesControlService:
             "state": job.get("state"),
             "next_run_at": job.get("next_run_at"),
             "last_status": job.get("last_status"),
+            "last_error": job.get("last_error"),
+            "last_delivery_error": job.get("last_delivery_error"),
         }
         self._apply(job, action)
+        after = {
+            "enabled": job.get("enabled"),
+            "state": job.get("state"),
+            "next_run_at": job.get("next_run_at"),
+            "last_status": job.get("last_status"),
+            "last_error": job.get("last_error"),
+            "last_delivery_error": job.get("last_delivery_error"),
+        }
+        if after == before:
+            raise HermesControlError(f"Hermes action produced no state change: {action} for {hermes_job_id}")
         self._write_jobs(raw)
         return {
             "status": "ok",
@@ -45,12 +57,7 @@ class HermesControlService:
             "action": action,
             "hermes_job_id": hermes_job_id,
             "before": redact(json.dumps(before, default=str)),
-            "after": {
-                "enabled": job.get("enabled"),
-                "state": job.get("state"),
-                "next_run_at": job.get("next_run_at"),
-                "last_status": job.get("last_status"),
-            },
+            "after": after,
         }
 
     def _read_jobs(self) -> Any:
