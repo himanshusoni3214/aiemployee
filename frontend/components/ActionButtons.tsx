@@ -44,15 +44,16 @@ export function EmployeeActions({ id, status }: { id: string; status: string }) 
   }
 
   return (
-    <div className="min-w-44 space-y-2">
+    <div className="min-w-44 space-y-2" data-voryx-action-wrapper>
       <div className="flex flex-wrap gap-2">
-        <button type="button" className="btn-secondary text-xs" disabled={Boolean(busy)} onClick={(event) => handleAction(event, `/employees/${id}/${toggleAction}`, toggleAction)}>
+        <button type="button" className="btn-secondary text-xs" disabled={Boolean(busy)} data-voryx-action-label={toggleAction} data-voryx-action-path={`/employees/${id}/${toggleAction}`} onClick={(event) => handleAction(event, `/employees/${id}/${toggleAction}`, toggleAction)}>
           {isRunning ? 'Pause' : 'Resume'}
         </button>
-        <button type="button" className="btn text-xs" disabled={Boolean(busy)} onClick={(event) => handleAction(event, `/employees/${id}/run`, 'run')}>
+        <button type="button" className="btn text-xs" disabled={Boolean(busy)} data-voryx-action-label="run" data-voryx-action-path={`/employees/${id}/run`} onClick={(event) => handleAction(event, `/employees/${id}/run`, 'run')}>
           Run
         </button>
       </div>
+      <div hidden className="max-w-44 truncate text-xs text-emerald-300" data-voryx-action-message />
       {message ? <div className="max-w-44 truncate text-xs text-emerald-300" title={message}>{message}</div> : null}
       {error ? <div className="max-w-44 truncate text-xs text-red-300" title={error}>{error}</div> : null}
     </div>
@@ -70,15 +71,16 @@ export function ScheduleActions({ id, isPaused }: { id: string; isPaused: boolea
   }
 
   return (
-    <div className="min-w-44 space-y-2">
+    <div className="min-w-44 space-y-2" data-voryx-action-wrapper>
       <div className="flex flex-wrap gap-2">
-        <button type="button" className="btn-secondary text-xs" disabled={Boolean(busy)} onClick={(event) => handleAction(event, `/schedules/${id}/${toggleAction}`, toggleAction)}>
+        <button type="button" className="btn-secondary text-xs" disabled={Boolean(busy)} data-voryx-action-label={toggleAction} data-voryx-action-path={`/schedules/${id}/${toggleAction}`} onClick={(event) => handleAction(event, `/schedules/${id}/${toggleAction}`, toggleAction)}>
           {isPaused ? 'Resume' : 'Pause'}
         </button>
-        <button type="button" className="btn text-xs" disabled={Boolean(busy)} onClick={(event) => handleAction(event, `/schedules/${id}/run`, 'run')}>
+        <button type="button" className="btn text-xs" disabled={Boolean(busy)} data-voryx-action-label="run" data-voryx-action-path={`/schedules/${id}/run`} onClick={(event) => handleAction(event, `/schedules/${id}/run`, 'run')}>
           Run
         </button>
       </div>
+      <div hidden className="max-w-44 truncate text-xs text-emerald-300" data-voryx-action-message />
       {message ? <div className="max-w-44 truncate text-xs text-emerald-300" title={message}>{message}</div> : null}
       {error ? <div className="max-w-44 truncate text-xs text-red-300" title={error}>{error}</div> : null}
     </div>
