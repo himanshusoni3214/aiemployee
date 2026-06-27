@@ -54,17 +54,28 @@ export default async function CompaniesPage() {
           </tbody>
         </table>
       </div>
-      <CrudPage title="Company Management" path="/companies" defaults={{
-        name: '',
-        logo: '',
-        website: '',
-        industry: '',
-        status: 'Active',
-        timezone: 'America/Toronto',
-        default_report_recipient: 'himanshusoni3214@gmail.com',
-        daily_email_limit: 50,
-        notes: '',
-      }} />
+      <CrudPage
+        title="Company Management"
+        path="/companies"
+        initialItems={companies}
+        createLabel="Create Company"
+        emptyLabel="No companies"
+        fields={{
+          status: { type: 'select', options: [{ value: 'Active', label: 'Active' }, { value: 'Inactive', label: 'Inactive' }, { value: 'Archived', label: 'Archived' }] },
+          notes: { type: 'textarea' },
+        }}
+        defaults={{
+          name: '',
+          logo: '',
+          website: '',
+          industry: '',
+          status: 'Active',
+          timezone: 'America/Toronto',
+          default_report_recipient: 'himanshusoni3214@gmail.com',
+          daily_email_limit: 50,
+          notes: '',
+        }}
+      />
     </div>
   );
 }

@@ -1,7 +1,9 @@
 import { serverApi } from '../../lib/serverApi';
 import CrudPage from '../../components/CrudPage';
+import { CompanySelector } from '../../components/CompanySelector';
+import { queryString, selectedCompanyId } from '../../lib/companySelection';
 
-type Company = { id: string; name: string };
+type Company = { id: string; name: string; status: string };
 type Campaign = {
   id: string;
   company_id: string;
@@ -17,20 +19,31 @@ function countJobs(jobs: Job[], campaignId: string, task?: string) {
   return jobs.filter((job) => job.campaign_id === campaignId && (!task || job.task_type === task)).length;
 }
 
-export default async function CampaignsPage() {
-  const [campaigns, companies, jobs] = await Promise.all([
-    serverApi<Campaign[]>('/campaigns', []),
-    serverApi<Company[]>('/companies', []),
-    serverApi<Job[]>('/jobs', []),
-  ]);
+export default async function CampaignsPage({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
+  const params = (await searchParams) || {};
+  const companies = await serverApi<Company[]>('/companies', []);
+  const companyId = selectedCompanyId(companies, params.company_id);
+  const companyQuery = queryString({ company_id: companyId || undefined });
+  const [campaigns, jobs] = companyId
+    ? await Promise.all([
+        serverApi<Campaign[]>(`/campaigns${companyQuery}`, []),
+        serverApi<Job[]>(`/jobs${companyQuery}`, []),
+      ])
+    : [[], []] as [Campaign[], Job[]];
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
+  const companyOptions = companies.filter((company) => company.status !== 'Archived').map((company) => ({ value: company.id, label: company.name }));
 
   return (
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
-        <h1 className="text-2xl font-semibold">Campaigns</h1>
+        <div>
+          <p className="text-sm text-zinc-500">Companies &gt; {companyId ? companyName.get(companyId) : 'Select Company'} &gt; Campaigns</p>
+          <h1 className="text-2xl font-semibold">Campaigns</h1>
+        </div>
         <div className="text-sm text-zinc-400">{campaigns.length} campaigns</div>
       </div>
+      <CompanySelector companies={companies} selectedCompanyId={companyId} label="Company" />
+      {!companyId ? <div className="card text-sm text-amber-300">Select a company to manage campaigns.</div> : null}
       <div className="grid gap-3 md:grid-cols-4">
         <div className="card"><p className="text-sm text-zinc-400">Active</p><p className="mt-2 text-3xl font-semibold">{campaigns.filter((campaign) => campaign.status === 'Active').length}</p></div>
         <div className="card"><p className="text-sm text-zinc-400">Outreach Jobs</p><p className="mt-2 text-3xl font-semibold">{jobs.filter((job) => job.task_type === 'Send Outreach').length}</p></div>
@@ -51,30 +64,52 @@ export default async function CampaignsPage() {
                 <td>{campaign.status}</td>
               </tr>
             ))}
-            {!campaigns.length ? <tr><td colSpan={6} className="text-zinc-400">No campaigns imported from Hermes yet</td></tr> : null}
+            {!campaigns.length ? <tr><td colSpan={6} className="text-zinc-400">{companyId ? 'No campaigns for selected company' : 'No company selected'}</td></tr> : null}
           </tbody>
         </table>
       </div>
-      <CrudPage title="Campaign Management" path="/campaigns" defaults={{
-        company_id: companies[0]?.id || '',
-        name: '',
-        description: '',
-        industry: '',
-        target_audience: '',
-        geographic_area: '',
-        daily_lead_goal: 0,
-        daily_email_goal: 0,
-        daily_email_limit: 0,
-        timezone: 'America/Toronto',
-        allowed_sending_days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
-        allowed_sending_hours: { start: '09:00', end: '19:00' },
-        internal_test_recipient: 'himanshusoni3214@gmail.com',
-        report_recipient: 'himanshusoni3214@gmail.com',
-        dry_run_mode: true,
-        start_date: '',
-        end_date: '',
-        status: 'Active',
-      }} />
+      {companyId ? (
+        <CrudPage
+          title="Campaign Management"
+          path="/campaigns"
+          initialItems={campaigns}
+          query={{ company_id: companyId }}
+          createLabel="Create Campaign"
+          emptyLabel="No campaigns for selected company"
+          displayMaps={{ company_id: Object.fromEntries(companies.map((company) => [company.id, company.name])) }}
+          fields={{
+            company_id: { type: 'select', label: 'Company', options: companyOptions },
+            description: { type: 'textarea' },
+            target_audience: { type: 'textarea' },
+            allowed_sending_days: { type: 'days', label: 'Allowed sending days' },
+            allowed_sending_hours: { type: 'hours', label: 'Allowed sending hours' },
+            dry_run_mode: { type: 'boolean', label: 'Dry-run mode' },
+            start_date: { type: 'date' },
+            end_date: { type: 'date' },
+            status: { type: 'select', options: [{ value: 'Active', label: 'Active' }, { value: 'Inactive', label: 'Inactive' }, { value: 'Archived', label: 'Archived' }] },
+          }}
+          defaults={{
+            company_id: companyId,
+            name: '',
+            description: '',
+            industry: '',
+            target_audience: '',
+            geographic_area: '',
+            daily_lead_goal: 0,
+            daily_email_goal: 0,
+            daily_email_limit: 0,
+            timezone: 'America/Toronto',
+            allowed_sending_days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+            allowed_sending_hours: { start: '09:00', end: '19:00' },
+            internal_test_recipient: 'himanshusoni3214@gmail.com',
+            report_recipient: 'himanshusoni3214@gmail.com',
+            dry_run_mode: true,
+            start_date: '',
+            end_date: '',
+            status: 'Active',
+          }}
+        />
+      ) : null}
     </div>
   );
 }

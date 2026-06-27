@@ -2,10 +2,18 @@ import { serverApi } from '../../lib/serverApi';
 import { LocalTime } from '../../components/LocalTime';
 import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
 import { DailyReportPanel } from '../../components/DailyReportPanel';
+import { CompanySelector } from '../../components/CompanySelector';
+import { queryString, selectedCompanyId } from '../../lib/companySelection';
 
-export default async function Reports() {
+type Company = { id: string; name: string; status: string };
+
+export default async function Reports({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
+  const params = (await searchParams) || {};
+  const companies = await serverApi<Company[]>('/companies', []);
+  const companyId = selectedCompanyId(companies, params.company_id);
+  const scopedQuery = queryString({ company_id: companyId || undefined });
   const [activity, sync, daily] = await Promise.all([
-    serverApi<any[]>('/activity', []),
+    serverApi<any[]>(`/activity${scopedQuery}`, []),
     serverApi<SyncInfo>('/sync/status', {}),
     serverApi<any>('/reports/daily?report_date=2026-06-26', null),
   ]);
@@ -16,6 +24,7 @@ export default async function Reports() {
         <h1 className="text-2xl font-semibold">Activity Logs</h1>
         <div className="flex items-center gap-4"><div className="text-sm text-zinc-400">{activity.length} events</div><SyncStatus sync={sync} /></div>
       </div>
+      <CompanySelector companies={companies} selectedCompanyId={companyId} allowAll label="Reports scope" />
       <DailyReportPanel initialReport={daily?.report || null} initialText={daily?.text || ''} />
       <div className="table-wrap">
         <table className="ops-table">

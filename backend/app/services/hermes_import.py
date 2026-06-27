@@ -205,7 +205,7 @@ class HermesImportService:
         db.flush()
         return campaign, True, False
 
-    def _employee(self, db: Session, company: Company, hermes_job: dict[str, Any]) -> tuple[AIEmployee, bool, bool]:
+    def _employee(self, db: Session, company: Company, campaign: Campaign, hermes_job: dict[str, Any]) -> tuple[AIEmployee, bool, bool]:
         hermes_id = str(hermes_job.get("id") or _slug(hermes_job.get("name") or "workflow"))
         name = f"Hermes {_human_name(hermes_job.get('name') or hermes_id)}"
         employee = db.get(AIEmployee, f"employee-hermes-{hermes_id}")
@@ -216,6 +216,7 @@ class HermesImportService:
         paused_reason = hermes_job.get("paused_reason") or (last_error if status in {EmployeeStatus.error, EmployeeStatus.paused} else None)
         fields = {
             "company_id": company.id,
+            "campaign_id": campaign.id,
             "name": name,
             "employee_type": _employee_type(hermes_job.get("name") or ""),
             "hermes_job_id": hermes_id,
@@ -230,6 +231,8 @@ class HermesImportService:
             "last_error": last_error if status == EmployeeStatus.error else None,
             "last_heartbeat_at": _parse_dt(hermes_job.get("last_run_at")),
         }
+        if employee and employee.status == EmployeeStatus.archived:
+            fields["status"] = EmployeeStatus.archived
         if employee:
             return employee, False, _assign(employee, **fields)
         employee = AIEmployee(id=f"employee-hermes-{hermes_id}", **fields)
@@ -311,7 +314,7 @@ class HermesImportService:
         campaign, was_created, was_updated = self._campaign(db, company, hermes_job)
         created += int(was_created)
         updated += int(was_updated)
-        employee, was_created, was_updated = self._employee(db, company, hermes_job)
+        employee, was_created, was_updated = self._employee(db, company, campaign, hermes_job)
         created += int(was_created)
         updated += int(was_updated)
         schedule, was_created, was_updated = self._schedule(db, employee, hermes_job)
@@ -459,7 +462,7 @@ class HermesImportService:
     def _fallback_workflow(self, db: Session, company: Company, hermes_id: str) -> tuple[AIEmployee, Campaign, dict[str, Any]]:
         hermes_job = {"id": hermes_id, "name": f"hermes-{hermes_id}", "enabled": False, "state": "archived"}
         campaign, _, _ = self._campaign(db, company, hermes_job)
-        employee, _, _ = self._employee(db, company, hermes_job)
+        employee, _, _ = self._employee(db, company, campaign, hermes_job)
         return employee, campaign, hermes_job
 
     def _outreach_workflow(self, db: Session, company: Company, by_hermes_id: dict[str, tuple[AIEmployee, Campaign, dict[str, Any]]]) -> tuple[AIEmployee, Campaign, dict[str, Any]]:

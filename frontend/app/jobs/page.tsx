@@ -1,7 +1,10 @@
 import { serverApi } from '../../lib/serverApi';
 import { LocalTime } from '../../components/LocalTime';
 import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
+import { CompanySelector } from '../../components/CompanySelector';
+import { queryString, selectedCompanyId } from '../../lib/companySelection';
 
+type Company = { id: string; name: string; status: string };
 type Employee = { id: string; name: string };
 type Campaign = { id: string; name: string };
 type Job = {
@@ -25,11 +28,15 @@ function lastLog(job: Job) {
   return job.error_message || job.logs?.[job.logs.length - 1] || '-';
 }
 
-export default async function JobsPage() {
+export default async function JobsPage({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
+  const params = (await searchParams) || {};
+  const companies = await serverApi<Company[]>('/companies', []);
+  const companyId = selectedCompanyId(companies, params.company_id);
+  const scopedQuery = queryString({ company_id: companyId || undefined });
   const [jobs, employees, campaigns] = await Promise.all([
-    serverApi<Job[]>('/jobs', []),
-    serverApi<Employee[]>('/employees', []),
-    serverApi<Campaign[]>('/campaigns', []),
+    serverApi<Job[]>(`/jobs${scopedQuery}`, []),
+    serverApi<Employee[]>(`/employees${scopedQuery}`, []),
+    serverApi<Campaign[]>(`/campaigns${scopedQuery}`, []),
   ]);
   const sync = await serverApi<SyncInfo>('/sync/status', {});
   const employeeName = new Map(employees.map((employee) => [employee.id, employee.name]));
@@ -41,6 +48,7 @@ export default async function JobsPage() {
         <h1 className="text-2xl font-semibold">Jobs</h1>
         <div className="flex items-center gap-4"><div className="text-sm text-zinc-400">{jobs.length} imported and queued jobs</div><SyncStatus sync={sync} /></div>
       </div>
+      <CompanySelector companies={companies} selectedCompanyId={companyId} allowAll label="Jobs scope" />
       <div className="grid gap-3 md:grid-cols-4">
         {statuses.map((status) => (
           <div className="card" key={status}>

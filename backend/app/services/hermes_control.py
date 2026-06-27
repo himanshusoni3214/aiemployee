@@ -1,4 +1,6 @@
 import json
+import re
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -14,6 +16,7 @@ class HermesControlError(RuntimeError):
 class HermesControlService:
     def __init__(self, data_path: str | None = None):
         self.data_path = Path(data_path or settings.hermes_data_path) if (data_path or settings.hermes_data_path) else None
+        self.last_backup_path: str | None = None
 
     @property
     def jobs_file(self) -> Path:
@@ -52,6 +55,40 @@ class HermesControlService:
             names = ", ".join(str(job.get("name") or job.get("id")) for job in matches[:5])
             raise HermesControlError(f"Hermes job match was ambiguous for terms {', '.join(terms)}: {names}")
         return self._control_job(raw, matches[0], action)
+
+    def update_schedule(self, hermes_job_id: str, cron: str, timezone_name: str) -> dict[str, Any]:
+        self._validate_cron(cron)
+        raw = self._read_jobs()
+        job = self._find_job(raw, hermes_job_id)
+        if not job:
+            raise HermesControlError(f"Hermes job not found: {hermes_job_id}")
+        schedule = job.get("schedule") if isinstance(job.get("schedule"), dict) else {}
+        before = {
+            "schedule": schedule,
+            "schedule_display": job.get("schedule_display"),
+            "next_run_at": job.get("next_run_at"),
+        }
+        schedule = {**schedule, "expr": cron, "timezone": timezone_name}
+        job["schedule"] = schedule
+        job["schedule_display"] = cron
+        after = {
+            "schedule": job.get("schedule"),
+            "schedule_display": job.get("schedule_display"),
+            "next_run_at": job.get("next_run_at"),
+        }
+        if after == before:
+            raise HermesControlError(f"Hermes schedule update produced no state change for {hermes_job_id}")
+        self._write_jobs(raw)
+        return {
+            "status": "ok",
+            "mode": "jobs_json",
+            "action": "update_schedule",
+            "hermes_job_id": hermes_job_id,
+            "hermes_job_name": str(job.get("name") or ""),
+            "before": redact(json.dumps(before, default=str)),
+            "after": after,
+            "backup_path": self.last_backup_path,
+        }
 
     def _control_job(self, raw: Any, job: dict[str, Any], action: str) -> dict[str, Any]:
         before = {
@@ -96,11 +133,42 @@ class HermesControlService:
     def _write_jobs(self, raw: Any) -> None:
         path = self.jobs_file
         try:
+            lock_path = path.with_name(f".{path.name}.lock")
+            lock_path.parent.mkdir(parents=True, exist_ok=True)
+            lock_handle = lock_path.open("w")
+            try:
+                import fcntl
+                fcntl.flock(lock_handle, fcntl.LOCK_EX)
+            except Exception:
+                pass
+            stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+            backup_path = path.with_name(f"{path.name}.bak-dashboard-{stamp}")
+            if path.exists():
+                shutil.copy2(path, backup_path)
+                self.last_backup_path = str(backup_path)
             temp_path = path.with_name(f".{path.name}.tmp")
             temp_path.write_text(json.dumps(raw, indent=2) + "\n", encoding="utf-8")
             temp_path.replace(path)
+            try:
+                import fcntl
+                fcntl.flock(lock_handle, fcntl.LOCK_UN)
+            except Exception:
+                pass
+            lock_handle.close()
         except Exception as exc:
             raise HermesControlError(f"Could not update Hermes jobs file: {exc}") from exc
+
+    def _validate_cron(self, cron: str) -> None:
+        value = (cron or "").strip()
+        if value in {"manual", "@hourly", "@daily", "@weekly"}:
+            return
+        fields = value.split()
+        if len(fields) != 5:
+            raise HermesControlError("Cron must be 5 fields or one of manual/@hourly/@daily/@weekly")
+        token_pattern = re.compile(r"^[0-9*/,\-]+$")
+        for field in fields:
+            if not token_pattern.match(field):
+                raise HermesControlError(f"Invalid cron field: {field}")
 
     def _find_job(self, raw: Any, hermes_job_id: str) -> dict[str, Any] | None:
         for job in self._jobs(raw):

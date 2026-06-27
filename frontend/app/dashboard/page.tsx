@@ -1,5 +1,7 @@
 import { serverApi } from '../../lib/serverApi';
 import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
+import { CompanySelector } from '../../components/CompanySelector';
+import { queryString, selectedCompanyId } from '../../lib/companySelection';
 
 const metricLabels: Record<string, string> = {
   todays_leads: "Today's Leads",
@@ -17,10 +19,16 @@ function statusColor(status?: string) {
   return '#71717a';
 }
 
-export default async function Dashboard() {
+type Company = { id: string; name: string; status: string };
+
+export default async function Dashboard({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
+  const params = (await searchParams) || {};
+  const companies = await serverApi<Company[]>('/companies', []);
+  const companyId = selectedCompanyId(companies, params.company_id);
+  const scopedQuery = queryString({ company_id: companyId || undefined });
   const [report, workers, health] = await Promise.all([
-    serverApi<Record<string, number>>('/reports/ceo', {}),
-    serverApi<any>('/workers/status', { employees: [], job_counts: {} }),
+    serverApi<Record<string, number>>(`/reports/ceo${scopedQuery}`, {}),
+    serverApi<any>(`/workers/status${scopedQuery}`, { employees: [], job_counts: {} }),
     serverApi<any>('/system/health', { status: 'unknown', checks: {} }),
   ]);
   const sync = await serverApi<SyncInfo>('/sync/status', {});
@@ -32,6 +40,7 @@ export default async function Dashboard() {
         <h1 className="text-2xl font-semibold">CEO Dashboard</h1>
         <div className="flex items-center gap-4"><div className="text-sm text-zinc-400">System: <span style={{ color: statusColor(health?.status) }}>{health?.status || 'unknown'}</span></div><SyncStatus sync={sync} /></div>
       </div>
+      <CompanySelector companies={companies} selectedCompanyId={companyId} allowAll label="Dashboard scope" />
       <div className="grid gap-3 md:grid-cols-3 xl:grid-cols-6">
         {cards.map((key) => <div className="card" key={key}><p className="text-sm text-zinc-400">{metricLabels[key]}</p><p className="mt-2 text-3xl font-semibold">{report?.[key] ?? 0}</p></div>)}
       </div>

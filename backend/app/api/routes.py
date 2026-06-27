@@ -4,7 +4,7 @@ from fastapi.responses import RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 from redis import Redis
-from sqlalchemy import func, select, text
+from sqlalchemy import func, or_, select, text
 from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.db import get_db
@@ -37,6 +37,8 @@ def require_write(user: User = Depends(current_user)):
     return user
 
 def _employee_hermes_job_id(employee: AIEmployee) -> str | None:
+    if employee.hermes_job_id:
+        return str(employee.hermes_job_id)
     limits = employee.daily_limits if isinstance(employee.daily_limits, dict) else {}
     value = limits.get('hermes_job_id')
     return str(value) if value else None
@@ -45,6 +47,28 @@ def _schedule_hermes_job_id(schedule: Schedule) -> str | None:
     payload = schedule.payload if isinstance(schedule.payload, dict) else {}
     value = payload.get('hermes_job_id')
     return str(value) if value else None
+
+def _enum_member(enum_cls, value):
+    if isinstance(value, enum_cls):
+        return value
+    if value is None:
+        return value
+    text_value = str(value)
+    for member in enum_cls:
+        if text_value == member.value or text_value.lower() == member.name.lower():
+            return member
+    return value
+
+def _coerce_payload(model, payload: dict) -> dict:
+    data = dict(payload)
+    if 'status' in data:
+        if model in {Company, Campaign}:
+            data['status'] = _enum_member(Status, data['status'])
+        elif model is AIEmployee:
+            data['status'] = _enum_member(EmployeeStatus, data['status'])
+        elif model is Lead:
+            data['status'] = _enum_member(LeadStatus, data['status'])
+    return data
 
 def _control_hermes_job(hermes_job_id: str, action: str) -> dict:
     try:
@@ -90,30 +114,78 @@ def _record_manual_run(db: Session, schedule: Schedule, user: User, control_resu
     log(db, 'Manual Hermes Run Requested', 'Job', job.id, user_id=user.id)
     return job
 
+def _filtered_job_stmt(company_id: str | None = None, campaign_id: str | None = None, employee_id: str | None = None):
+    stmt = select(Job)
+    if company_id:
+        stmt = stmt.outerjoin(Campaign, Job.campaign_id == Campaign.id).outerjoin(AIEmployee, Job.employee_id == AIEmployee.id)
+        stmt = stmt.where(or_(Campaign.company_id == company_id, AIEmployee.company_id == company_id))
+    if campaign_id:
+        stmt = stmt.where(Job.campaign_id == campaign_id)
+    if employee_id:
+        stmt = stmt.where(Job.employee_id == employee_id)
+    return stmt
+
 def crud(model, schema, label: str):
     @router.get(f'/{label}')
-    def list_items(db: Session=Depends(get_db), user: User=Depends(current_user), q: str|None=Query(None)):
+    def list_items(
+        db: Session=Depends(get_db),
+        user: User=Depends(current_user),
+        q: str|None=Query(None),
+        company_id: str|None=Query(None),
+        campaign_id: str|None=Query(None),
+        employee_id: str|None=Query(None),
+    ):
         if label in HERMES_SYNCED_LABELS:
             _sync_hermes_snapshot(db, user.id)
-        stmt = select(model)
+        if model is Schedule:
+            stmt = select(Schedule).join(AIEmployee, Schedule.employee_id == AIEmployee.id)
+            if company_id:
+                stmt = stmt.where(AIEmployee.company_id == company_id)
+            if campaign_id:
+                stmt = stmt.where(AIEmployee.campaign_id == campaign_id)
+            if employee_id:
+                stmt = stmt.where(Schedule.employee_id == employee_id)
+        else:
+            stmt = select(model)
+            if company_id and hasattr(model, 'company_id'):
+                stmt = stmt.where(model.company_id == company_id)
+            if campaign_id and hasattr(model, 'campaign_id'):
+                stmt = stmt.where(model.campaign_id == campaign_id)
+            if employee_id and hasattr(model, 'employee_id'):
+                stmt = stmt.where(model.employee_id == employee_id)
         if q and hasattr(model, 'name'): stmt = stmt.where(model.name.ilike(f'%{q}%'))
+        if hasattr(model, 'name'):
+            stmt = stmt.order_by(model.name)
         return db.scalars(stmt).all()
     @router.post(f'/{label}')
     def create_item(data: schema, db: Session=Depends(get_db), user: User=Depends(require_write)):
-        obj = model(**data.model_dump()); db.add(obj); db.flush()
+        obj = model(**_coerce_payload(model, data.model_dump())); db.add(obj); db.flush()
         log(db, f'{model.__name__} Created', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id)
         db.commit(); db.refresh(obj); return obj
     @router.put(f'/{label}/{{item_id}}')
     def update_item(item_id: str, data: schema, db: Session=Depends(get_db), user: User=Depends(require_write)):
         obj = db.get(model, item_id)
         if not obj: raise HTTPException(404, 'Not found')
-        for k,v in data.model_dump().items(): setattr(obj,k,v)
-        log(db, f'{model.__name__} Updated', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id)
+        payload = _coerce_payload(model, data.model_dump())
+        metadata = None
+        if model is Schedule:
+            hermes_id = _schedule_hermes_job_id(obj)
+            next_cron = str(payload.get('cron') or obj.cron)
+            next_timezone = str(payload.get('timezone') or obj.timezone)
+            if hermes_id and (next_cron != obj.cron or next_timezone != obj.timezone):
+                metadata = {'hermes_control': HermesControlService().update_schedule(hermes_id, next_cron, next_timezone)}
+        for k,v in payload.items(): setattr(obj,k,v)
+        log(db, f'{model.__name__} Updated', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id, metadata)
         db.commit(); db.refresh(obj); return obj
     @router.delete(f'/{label}/{{item_id}}')
     def delete_item(item_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
         obj = db.get(model, item_id)
         if not obj: raise HTTPException(404, 'Not found')
+        if model is AIEmployee:
+            obj.status = EmployeeStatus.archived
+            obj.paused_reason = f'Archived by {user.email}'
+            log(db, 'AIEmployee Archived', 'AIEmployee', obj.id, getattr(obj, 'company_id', None), user.id)
+            db.commit(); db.refresh(obj); return obj
         if hasattr(obj, 'status'):
             obj.status = Status.archived
             log(db, f'{model.__name__} Archived', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id)
@@ -158,6 +230,45 @@ def password_reset(): return {'message': 'Password reset workflow placeholder: c
 
 crud(Company, CompanyIn, 'companies'); crud(AIEmployee, EmployeeIn, 'employees'); crud(Campaign, CampaignIn, 'campaigns'); crud(Lead, LeadIn, 'leads'); crud(Schedule, ScheduleIn, 'schedules')
 
+@router.post('/campaigns/{campaign_id}/{action}')
+def campaign_action(campaign_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Not found')
+    action = action.lower()
+    if action == 'duplicate':
+        data = {
+            'company_id': campaign.company_id,
+            'name': f'{campaign.name} Copy',
+            'description': campaign.description,
+            'industry': campaign.industry,
+            'target_audience': campaign.target_audience,
+            'geographic_area': campaign.geographic_area,
+            'daily_lead_goal': campaign.daily_lead_goal,
+            'daily_email_goal': campaign.daily_email_goal,
+            'daily_email_limit': campaign.daily_email_limit,
+            'timezone': campaign.timezone,
+            'allowed_sending_days': campaign.allowed_sending_days,
+            'allowed_sending_hours': campaign.allowed_sending_hours,
+            'internal_test_recipient': campaign.internal_test_recipient,
+            'report_recipient': campaign.report_recipient,
+            'dry_run_mode': campaign.dry_run_mode,
+            'start_date': campaign.start_date,
+            'end_date': campaign.end_date,
+            'status': Status.inactive,
+        }
+        copy = Campaign(**data)
+        db.add(copy); db.flush()
+        log(db, 'Campaign Duplicated', 'Campaign', copy.id, campaign.company_id, user.id, {'source_campaign_id': campaign.id})
+        db.commit(); db.refresh(copy); return copy
+    if action == 'pause':
+        campaign.status = Status.inactive
+    elif action == 'resume':
+        campaign.status = Status.active
+    else:
+        raise HTTPException(400, 'Unsupported action')
+    log(db, f'Campaign {action.title()}', 'Campaign', campaign.id, campaign.company_id, user.id)
+    db.commit(); db.refresh(campaign); return campaign
+
 @router.post('/employees/{employee_id}/{action}')
 def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
     emp = db.get(AIEmployee, employee_id)
@@ -167,7 +278,7 @@ def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), 
     if action == 'duplicate':
         copy = AIEmployee(company_id=emp.company_id, name=f'{emp.name} Copy', employee_type=emp.employee_type, prompt=emp.prompt, daily_limits=emp.daily_limits, rate_limit_per_hour=emp.rate_limit_per_hour, daily_email_limit=emp.daily_email_limit, status=EmployeeStatus.stopped)
         db.add(copy); db.flush(); log(db, 'Employee Duplicated', 'AIEmployee', copy.id, emp.company_id, user.id); db.commit(); return copy
-    if action not in mapping and action != 'run': raise HTTPException(400, 'Unsupported action')
+    if action not in mapping and action not in {'run', 'dry-run'}: raise HTTPException(400, 'Unsupported action')
 
     hermes_id = _employee_hermes_job_id(emp)
     control_result = None
@@ -178,7 +289,7 @@ def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), 
         db.expire_all()
         emp = db.get(AIEmployee, employee_id)
         if not emp: raise HTTPException(404, 'Not found after Hermes sync')
-    elif action != 'run':
+    elif action in mapping:
         emp.status = mapping[action]
         if action in {'start', 'resume', 'restart'}:
             emp.circuit_breaker_open = False
@@ -188,11 +299,14 @@ def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), 
         if action in {'pause', 'stop'}:
             emp.paused_reason = f'Manual {action} by {user.email}'
 
-    if action == 'run':
+    if action in {'run', 'dry-run'}:
         schedule = db.scalar(select(Schedule).where(Schedule.employee_id == emp.id).order_by(Schedule.name).limit(1))
         if not schedule:
             raise HTTPException(400, 'Employee has no schedule to run')
-        _record_manual_run(db, schedule, user, control_result)
+        manual = _record_manual_run(db, schedule, user, control_result)
+        if action == 'dry-run':
+            manual.payload = {**(manual.payload or {}), 'dry_run': True, 'manual_action': 'dry-run'}
+            manual.logs = [*(manual.logs or []), 'Dry run queued from dashboard; Hermes was not triggered for prospect outreach.']
     log(db, f'Employee {action.title()}', 'AIEmployee', emp.id, emp.company_id, user.id, {'hermes_control': control_result} if control_result else None)
     db.commit(); db.refresh(emp); return emp
 
@@ -201,11 +315,11 @@ def schedule_action(schedule_id: str, action: str, db: Session=Depends(get_db), 
     schedule = db.get(Schedule, schedule_id)
     if not schedule: raise HTTPException(404, 'Not found')
     action = action.lower()
-    if action not in {'pause', 'resume', 'run'}: raise HTTPException(400, 'Unsupported action')
+    if action not in {'pause', 'resume', 'run', 'dry-run', 'test-run'}: raise HTTPException(400, 'Unsupported action')
 
     hermes_id = _schedule_hermes_job_id(schedule)
     control_result = None
-    if hermes_id:
+    if hermes_id and action in {'pause', 'resume', 'run'}:
         control_result = _control_hermes_job(hermes_id, action)
         _force_hermes_sync(db, user.id)
         db.expire_all()
@@ -218,8 +332,12 @@ def schedule_action(schedule_id: str, action: str, db: Session=Depends(get_db), 
             schedule.is_paused = False
 
     job_id = None
-    if action == 'run':
-        job_id = _record_manual_run(db, schedule, user, control_result).id
+    if action in {'run', 'dry-run', 'test-run'}:
+        job = _record_manual_run(db, schedule, user, control_result)
+        if action in {'dry-run', 'test-run'}:
+            job.payload = {**(job.payload or {}), 'manual_action': action, 'dry_run': action == 'dry-run', 'test_run': action == 'test-run'}
+            job.logs = [*(job.logs or []), f'{action} queued from dashboard; Hermes was not triggered for prospect outreach.']
+        job_id = job.id
     log(db, f'Schedule {action.title()}', 'Schedule', schedule.id, user_id=user.id, metadata={'hermes_control': control_result, 'job_id': job_id})
     db.commit()
     return {'ok': True, 'schedule_id': schedule.id, 'job_id': job_id, 'hermes_control': control_result}
@@ -231,13 +349,22 @@ def create_job(data: JobIn, db: Session=Depends(get_db), user: User=Depends(requ
     job = Job(**payload); db.add(job); db.flush(); log(db, 'Job Queued', 'Job', job.id, user_id=user.id); db.commit(); db.refresh(job); return job
 
 @router.get('/jobs')
-def list_jobs(status: str|None=None, limit: int=Query(500, ge=1, le=1000), db: Session=Depends(get_db), user: User=Depends(current_user)):
+def list_jobs(
+    status: str|None=None,
+    company_id: str|None=None,
+    campaign_id: str|None=None,
+    employee_id: str|None=None,
+    limit: int=Query(500, ge=1, le=1000),
+    db: Session=Depends(get_db),
+    user: User=Depends(current_user),
+):
     _sync_hermes_snapshot(db, user.id)
-    stmt = select(Job).order_by(Job.created_at.desc()).limit(limit)
+    stmt = _filtered_job_stmt(company_id, campaign_id, employee_id)
     if status:
         status_filter = next((s for s in JobStatus if s.value == status or s.name == status.lower()), None)
         if not status_filter: raise HTTPException(400, 'Unsupported job status')
         stmt = stmt.where(Job.status == status_filter)
+    stmt = stmt.order_by(Job.created_at.desc()).limit(limit)
     return db.scalars(stmt).all()
 
 @router.post('/jobs/{job_id}/retry')
@@ -254,15 +381,26 @@ def retry_job(job_id: str, db: Session=Depends(get_db), user: User=Depends(requi
     db.commit(); db.refresh(job); return job
 
 @router.get('/activity')
-def activity(db: Session=Depends(get_db), user: User=Depends(current_user)):
+def activity(company_id: str|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):
     _sync_hermes_snapshot(db, user.id)
-    return db.scalars(select(ActivityLog).order_by(ActivityLog.created_at.desc()).limit(200)).all()
+    stmt = select(ActivityLog)
+    if company_id:
+        stmt = stmt.where(ActivityLog.company_id == company_id)
+    return db.scalars(stmt.order_by(ActivityLog.created_at.desc()).limit(200)).all()
 
 @router.get('/workers/status')
-def worker_status(db: Session=Depends(get_db), user: User=Depends(current_user)):
+def worker_status(company_id: str|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):
     _sync_hermes_snapshot(db, user.id)
-    employees = db.scalars(select(AIEmployee).order_by(AIEmployee.name)).all()
-    job_counts = {status.value: db.scalar(select(func.count(Job.id)).where(Job.status == status)) or 0 for status in JobStatus}
+    employee_stmt = select(AIEmployee)
+    if company_id:
+        employee_stmt = employee_stmt.where(AIEmployee.company_id == company_id)
+    employees = db.scalars(employee_stmt.order_by(AIEmployee.name)).all()
+    job_counts = {
+        status.value: db.scalar(
+            select(func.count()).select_from(_filtered_job_stmt(company_id).where(Job.status == status).subquery())
+        ) or 0
+        for status in JobStatus
+    }
     return {
         'employees': [{
             'id': e.id,
@@ -325,17 +463,22 @@ async def system_health(db: Session=Depends(get_db), user: User=Depends(current_
     return {'status': status, 'checked_at': datetime.utcnow(), 'checks': checks}
 
 @router.get('/reports/ceo')
-def ceo_report(db: Session=Depends(get_db), user: User=Depends(current_user)):
+def ceo_report(company_id: str|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):
     _sync_hermes_snapshot(db, user.id)
     today = datetime.combine(date.today(), datetime.min.time())
     sent_statuses = {'sent', 'delivered', 'accepted', 'queued_by_provider'}
+    lead_base = select(Lead.id)
+    outreach_base = select(OutreachEvent.event_id)
+    if company_id:
+        lead_base = lead_base.where(Lead.company_id == company_id)
+        outreach_base = outreach_base.where(OutreachEvent.company_id == company_id)
     return {
-      'todays_leads': db.scalar(select(func.count(Lead.id)).where(Lead.created_at >= today)) or 0,
-      'verified_leads': db.scalar(select(func.count(Lead.id)).where(Lead.status == LeadStatus.verified)) or 0,
-      'emails_sent': db.scalar(select(func.count(OutreachEvent.event_id)).where(OutreachEvent.status.in_(sent_statuses), OutreachEvent.message_id.is_not(None), OutreachEvent.sent_at >= today, OutreachEvent.dry_run == False)) or 0,
-      'replies': db.scalar(select(func.count(Lead.id)).where(Lead.status == LeadStatus.replied)) or 0,
-      'meetings': db.scalar(select(func.count(Lead.id)).where(Lead.status == LeadStatus.meeting_booked)) or 0,
-      'failed_jobs': db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.failed)) or 0,
+      'todays_leads': db.scalar(select(func.count()).select_from(lead_base.where(Lead.created_at >= today).subquery())) or 0,
+      'verified_leads': db.scalar(select(func.count()).select_from(lead_base.where(Lead.status == LeadStatus.verified).subquery())) or 0,
+      'emails_sent': db.scalar(select(func.count()).select_from(outreach_base.where(OutreachEvent.status.in_(sent_statuses), OutreachEvent.message_id.is_not(None), OutreachEvent.sent_at >= today, OutreachEvent.dry_run == False).subquery())) or 0,
+      'replies': db.scalar(select(func.count()).select_from(lead_base.where(Lead.status == LeadStatus.replied).subquery())) or 0,
+      'meetings': db.scalar(select(func.count()).select_from(lead_base.where(Lead.status == LeadStatus.meeting_booked).subquery())) or 0,
+      'failed_jobs': db.scalar(select(func.count()).select_from(_filtered_job_stmt(company_id).where(Job.status == JobStatus.failed).subquery())) or 0,
       'companies': [{'id': c.id, 'name': c.name} for c in db.scalars(select(Company)).all()]
     }
 
