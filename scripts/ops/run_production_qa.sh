@@ -28,6 +28,34 @@ mkdir -p "$HOST_AUDIT_DIR"
 "${COMPOSE[@]}" ps > "$HOST_AUDIT_DIR/compose_ps_before.txt" 2>&1 || true
 docker ps > "$HOST_AUDIT_DIR/docker_ps_before.txt" 2>&1 || true
 
+env_value() {
+  local name="$1"
+  [[ -f "$ENV_FILE" ]] || return 1
+  grep -E "^${name}=" "$ENV_FILE" | tail -n 1 | cut -d= -f2- | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//"
+}
+
+APP_HOST_VALUE="${APP_HOST:-$(env_value APP_HOST || true)}"
+QA_BASE_URL_VALUE="${QA_BASE_URL:-$(env_value QA_BASE_URL || true)}"
+BASE_URL="${QA_BASE_URL_VALUE:-https://${APP_HOST_VALUE:-ops.themealz.com}}"
+HEALTH_URL="${BASE_URL%/}/health"
+echo "Waiting for backend readiness at $HEALTH_URL" | tee "$HOST_AUDIT_DIR/backend_readiness.txt"
+READY=0
+for attempt in $(seq 1 60); do
+  if curl -fsS --max-time 3 "$HEALTH_URL" >> "$HOST_AUDIT_DIR/backend_readiness.txt" 2>&1; then
+    READY=1
+    echo "Backend ready on attempt $attempt" | tee -a "$HOST_AUDIT_DIR/backend_readiness.txt"
+    break
+  fi
+  echo "Attempt $attempt failed; retrying in 2s" >> "$HOST_AUDIT_DIR/backend_readiness.txt"
+  sleep 2
+done
+
+if [[ "$READY" -ne 1 ]]; then
+  echo "Production QA FAILED: backend did not become ready at $HEALTH_URL"
+  echo "Audit artifacts: $HOST_AUDIT_DIR"
+  exit 1
+fi
+
 set +e
 "${COMPOSE[@]}" run --rm \
   -e "QA_AUDIT_DIR=$QA_AUDIT_DIR" \

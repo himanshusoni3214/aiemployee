@@ -54,6 +54,77 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("defaultToSingleActive !== true", company_selection)
         self.assertIn("CompanySelector companies={companies} selectedCompanyId={companyId} allowAll label=\"System scope\"", system_page)
 
+    def test_company_selector_exposes_non_react_fallback_contract(self):
+        source = read_frontend("components/CompanySelector.tsx")
+
+        self.assertIn("htmlFor={selectId}", source)
+        self.assertIn("id={selectId}", source)
+        self.assertIn("data-voryx-company-selector=\"true\"", source)
+        self.assertIn("data-voryx-company-param=\"company_id\"", source)
+        self.assertIn("data-voryx-allow-all={allowAll ? 'true' : 'false'}", source)
+
+    def test_company_selector_marks_react_navigation_for_fallback_guard(self):
+        source = read_frontend("components/CompanySelector.tsx")
+
+        self.assertIn("select.dataset.voryxReactNavigationHref", source)
+        self.assertIn("new URL(nextPath, window.location.href).toString()", source)
+        self.assertIn("onChange={(event) => changeCompany(event.target.value, event.currentTarget)}", source)
+        self.assertIn("router.push(nextPath)", source)
+
+    def test_action_runtime_has_company_selector_change_listener(self):
+        source = read_frontend("public/voryx-action-runtime.js")
+
+        self.assertIn("document.addEventListener('change'", source)
+        self.assertIn("select[data-voryx-company-selector]", source)
+        self.assertIn("handleCompanySelectorChange(event, select)", source)
+
+    def test_action_runtime_company_selector_sets_company_id(self):
+        source = read_frontend("public/voryx-action-runtime.js")
+
+        self.assertIn("const param = select?.dataset.voryxCompanyParam || 'company_id'", source)
+        self.assertIn("const url = new URL(window.location.href)", source)
+        self.assertIn("url.searchParams.set(param, selectedCompanyId)", source)
+
+    def test_action_runtime_company_selector_removes_dependent_filters(self):
+        source = read_frontend("public/voryx-action-runtime.js")
+
+        self.assertIn("const companySelectorResetParams = ['campaign_id', 'employee_id']", source)
+        self.assertIn("companySelectorResetParams.forEach((resetParam) => url.searchParams.delete(resetParam))", source)
+
+    def test_action_runtime_company_selector_handles_all_companies(self):
+        source = read_frontend("public/voryx-action-runtime.js")
+
+        self.assertIn("if (value === '__all') return 'all'", source)
+        self.assertIn("if (selectedCompanyId === 'all')", source)
+        self.assertIn("url.searchParams.set(param, 'all')", source)
+
+    def test_action_runtime_company_selector_handles_empty_selection(self):
+        source = read_frontend("public/voryx-action-runtime.js")
+
+        self.assertIn("} else {\n      url.searchParams.delete(param);", source)
+        self.assertIn("localStorage.removeItem(selectedCompanyStorageKey)", source)
+
+    def test_action_runtime_company_selector_updates_local_storage(self):
+        source = read_frontend("public/voryx-action-runtime.js")
+
+        self.assertIn("const selectedCompanyStorageKey = 'voryx:selectedCompanyId'", source)
+        self.assertIn("localStorage.setItem(selectedCompanyStorageKey, selectedCompanyId)", source)
+        self.assertIn("localStorage.removeItem(selectedCompanyStorageKey)", source)
+
+    def test_action_runtime_company_selector_performs_real_navigation(self):
+        source = read_frontend("public/voryx-action-runtime.js")
+
+        self.assertIn("window.location.assign(url.toString())", source)
+        self.assertIn("if (urlsEquivalent(window.location.href, targetHref))", source)
+
+    def test_action_runtime_company_selector_prevents_double_navigation(self):
+        source = read_frontend("public/voryx-action-runtime.js")
+
+        self.assertIn("select.dataset.voryxCompanyFallbackHref", source)
+        self.assertIn("select.dataset.voryxReactNavigationHref", source)
+        self.assertIn("delete select.dataset.voryxCompanyFallbackHref", source)
+        self.assertIn("urlsEquivalent(select.dataset.voryxReactNavigationHref, targetHref)", source)
+
     def test_crud_controls_have_explicit_labels(self):
         source = read_frontend("components/CrudPage.tsx")
 

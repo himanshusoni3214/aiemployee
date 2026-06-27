@@ -27,7 +27,7 @@ export function CompanySelector({
     if (selectedCompanyId) localStorage.setItem('voryx:selectedCompanyId', selectedCompanyId);
   }, [selectedCompanyId]);
 
-  function changeCompany(nextCompanyId: string) {
+  function changeCompany(nextCompanyId: string, select?: HTMLSelectElement) {
     const params = new URLSearchParams(searchParams.toString());
     params.delete('campaign_id');
     params.delete('employee_id');
@@ -41,7 +41,11 @@ export function CompanySelector({
       params.delete('company_id');
       localStorage.removeItem('voryx:selectedCompanyId');
     }
-    router.push(`${pathname}${params.toString() ? `?${params.toString()}` : ''}`);
+    const nextPath = `${pathname}${params.toString() ? `?${params.toString()}` : ''}`;
+    if (select && typeof window !== 'undefined') {
+      select.dataset.voryxReactNavigationHref = new URL(nextPath, window.location.href).toString();
+    }
+    router.push(nextPath);
   }
 
   return (
@@ -52,7 +56,15 @@ export function CompanySelector({
       </div>
       <div className="grid min-w-64 gap-1 text-sm text-zinc-300">
         <label htmlFor={selectId}>Select company</label>
-        <select id={selectId} className="input" value={selectValue} onChange={(event) => changeCompany(event.target.value)}>
+        <select
+          id={selectId}
+          className="input"
+          value={selectValue}
+          onChange={(event) => changeCompany(event.target.value, event.currentTarget)}
+          data-voryx-company-selector="true"
+          data-voryx-company-param="company_id"
+          data-voryx-allow-all={allowAll ? 'true' : 'false'}
+        >
           {allowAll ? <option value="__all">All companies</option> : <option value="">Select a company</option>}
           {activeCompanies.map((company) => <option value={company.id} key={company.id}>{company.name}</option>)}
         </select>

@@ -3,6 +3,8 @@
   window.__voryxActionRuntimeAttached = true;
   const storageKey = 'voryxLastAction';
   const crudStorageKey = 'voryxLastCrudAction';
+  const selectedCompanyStorageKey = 'voryx:selectedCompanyId';
+  const companySelectorResetParams = ['campaign_id', 'employee_id'];
 
   const formatLocalTime = (value) => {
     if (!value) return '-';
@@ -102,6 +104,61 @@
   };
 
   const capitalize = (value) => `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
+
+  const normalizeCompanySelection = (select) => {
+    const value = select?.value || '';
+    if (value === '__all') return 'all';
+    return value;
+  };
+
+  const buildCompanySelectorUrl = (select) => {
+    const param = select?.dataset.voryxCompanyParam || 'company_id';
+    const selectedCompanyId = normalizeCompanySelection(select);
+    const url = new URL(window.location.href);
+    companySelectorResetParams.forEach((resetParam) => url.searchParams.delete(resetParam));
+    if (selectedCompanyId === 'all') {
+      url.searchParams.set(param, 'all');
+    } else if (selectedCompanyId) {
+      url.searchParams.set(param, selectedCompanyId);
+    } else {
+      url.searchParams.delete(param);
+    }
+    return { url, selectedCompanyId };
+  };
+
+  const updateSelectedCompanyStorage = (selectedCompanyId) => {
+    if (selectedCompanyId && selectedCompanyId !== 'all') {
+      localStorage.setItem(selectedCompanyStorageKey, selectedCompanyId);
+      return;
+    }
+    localStorage.removeItem(selectedCompanyStorageKey);
+  };
+
+  const urlsEquivalent = (leftHref, rightHref) => {
+    const left = new URL(leftHref, window.location.href);
+    const right = new URL(rightHref, window.location.href);
+    return left.pathname === right.pathname && left.search === right.search && left.hash === right.hash;
+  };
+
+  const handleCompanySelectorChange = (event, select) => {
+    const { url, selectedCompanyId } = buildCompanySelectorUrl(select);
+    const targetHref = url.toString();
+    if (urlsEquivalent(window.location.href, targetHref)) {
+      updateSelectedCompanyStorage(selectedCompanyId);
+      return;
+    }
+    if (select.dataset.voryxCompanyFallbackHref === targetHref) return;
+    select.dataset.voryxCompanyFallbackHref = targetHref;
+
+    window.setTimeout(() => {
+      if (select.dataset.voryxCompanyFallbackHref !== targetHref) return;
+      delete select.dataset.voryxCompanyFallbackHref;
+      if (urlsEquivalent(window.location.href, targetHref)) return;
+      if (select.dataset.voryxReactNavigationHref && urlsEquivalent(select.dataset.voryxReactNavigationHref, targetHref) && urlsEquivalent(window.location.href, targetHref)) return;
+      updateSelectedCompanyStorage(selectedCompanyId);
+      window.location.assign(url.toString());
+    }, select.dataset.voryxReactNavigationHref ? 250 : 50);
+  };
 
   const apiPost = async (path, init = {}) => {
     const token = localStorage.getItem('token');
@@ -426,6 +483,13 @@
       wrapperButtons.forEach((item) => { item.disabled = false; });
     }
   }, true);
+
+  document.addEventListener('change', (event) => {
+    const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+    const select = target?.closest?.('select[data-voryx-company-selector]');
+    if (!select) return;
+    handleCompanySelectorChange(event, select);
+  });
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
