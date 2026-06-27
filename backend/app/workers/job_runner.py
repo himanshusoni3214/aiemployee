@@ -12,6 +12,35 @@ def is_email_task(task_type: str) -> bool:
     task = task_type.lower()
     return any(keyword in task for keyword in EMAIL_TASK_KEYWORDS)
 
+def terminal_block_reason(employee: AIEmployee | None) -> str | None:
+    if not employee:
+        return None
+    if employee.status == EmployeeStatus.archived:
+        return "Employee is archived"
+    if employee.status != EmployeeStatus.running:
+        return f"Employee is not running: {employee.status.value}"
+    if employee.circuit_breaker_open:
+        return "Employee circuit breaker is open"
+    return None
+
+def append_job_log_once(job: Job, message: str):
+    logs = list(job.logs or [])
+    if not logs or logs[-1] != message:
+        logs.append(message)
+    job.logs = logs
+
+def block_job(db, job: Job, employee: AIEmployee | None, message: str):
+    now = datetime.utcnow()
+    job.status = JobStatus.blocked
+    job.error_message = message
+    job.retry_after = None
+    job.ended_at = now
+    append_job_log_once(job, message)
+    if employee:
+        employee.last_error = message[:1000]
+        employee.last_heartbeat_at = now
+    log(db, 'Job Blocked By Safety Policy', 'Job', job.id)
+
 def fail_and_pause_employee(db, job: Job, employee: AIEmployee | None, message: str):
     job.status = JobStatus.failed
     job.error_message = message
@@ -31,12 +60,9 @@ def fail_and_pause_employee(db, job: Job, employee: AIEmployee | None, message: 
 def under_employee_limits(db, job: Job, employee: AIEmployee | None) -> tuple[bool, str | None]:
     if not employee:
         return True, None
-    if employee.status != EmployeeStatus.running:
-        job.retry_after = datetime.utcnow() + timedelta(minutes=5)
-        return False, f"Employee is not running: {employee.status.value}"
-    if employee.circuit_breaker_open:
-        job.retry_after = datetime.utcnow() + timedelta(minutes=15)
-        return False, "Employee circuit breaker is open"
+    terminal_reason = terminal_block_reason(employee)
+    if terminal_reason:
+        return False, terminal_reason
 
     now = datetime.utcnow()
     hour_ago = now - timedelta(hours=1)
@@ -86,8 +112,14 @@ async def run_once() -> bool:
         employee = db.get(AIEmployee, job.employee_id) if job.employee_id else None
         allowed, reason = under_employee_limits(db, job, employee)
         if not allowed:
-            job.logs = [*(job.logs or []), reason]
-            log(db, 'Job Deferred By Safety Policy', 'Job', job.id)
+            if reason in {
+                "Employee is archived",
+                "Employee circuit breaker is open",
+            } or reason.startswith(("Employee is not running:", "Daily email limit reached:")):
+                block_job(db, job, employee, reason)
+            else:
+                append_job_log_once(job, reason)
+                log(db, 'Job Deferred By Safety Policy', 'Job', job.id)
             db.commit()
             return True
 

@@ -22,7 +22,7 @@ type Job = {
   created_at?: string;
 };
 
-const statuses = ['Queued', 'Running', 'Completed', 'Failed'];
+const statuses = ['Queued', 'Running', 'Completed', 'Failed', 'Blocked', 'Cancelled', 'Skipped'];
 
 function lastLog(job: Job) {
   return job.error_message || job.logs?.[job.logs.length - 1] || '-';
@@ -49,7 +49,7 @@ export default async function JobsPage({ searchParams }: { searchParams?: Promis
         <div className="flex items-center gap-4"><div className="text-sm text-zinc-400">{jobs.length} imported and queued jobs</div><SyncStatus sync={sync} /></div>
       </div>
       <CompanySelector companies={companies} selectedCompanyId={companyId} allowAll label="Jobs scope" />
-      <div className="grid gap-3 md:grid-cols-4">
+      <div className="grid gap-3 md:grid-cols-4 xl:grid-cols-7">
         {statuses.map((status) => (
           <div className="card" key={status}>
             <p className="text-sm text-zinc-400">{status}</p>

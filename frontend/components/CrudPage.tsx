@@ -143,39 +143,47 @@ export default function CrudPage({
     const type = config.type || (typeof sample === 'number' ? 'number' : typeof sample === 'boolean' ? 'boolean' : sample && typeof sample === 'object' ? 'json' : 'text');
     const label = config.label || key.replaceAll('_', ' ');
     const disabled = config.readOnly || type === 'readonly';
+    const fieldId = `crud-${path.replace(/[^a-z0-9]+/gi, '-')}-${key}`;
     return (
-      <label key={key} className="grid gap-1 text-sm text-zinc-300" data-voryx-crud-field-wrapper={key}>
-        <span>{label}</span>
+      <div key={key} className="grid gap-1 text-sm text-zinc-300" data-voryx-crud-field-wrapper={key}>
+        {type !== 'days' && type !== 'hours' ? <label htmlFor={fieldId}>{label}</label> : null}
         {type === 'select' ? (
-          <select className="input" name={key} data-voryx-crud-field={key} data-voryx-crud-type={type} disabled={disabled} value={String(value ?? '')} onChange={(event) => setForm({ ...form, [key]: parseValue(sample, event.target.value) })}>
+          <select id={fieldId} className="input" name={key} data-voryx-crud-field={key} data-voryx-crud-type={type} disabled={disabled} value={String(value ?? '')} onChange={(event) => setForm({ ...form, [key]: parseValue(sample, event.target.value) })}>
             <option value="">Select</option>
             {(config.options || []).map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}
           </select>
         ) : type === 'boolean' ? (
-          <select className="input" name={key} data-voryx-crud-field={key} data-voryx-crud-type={type} disabled={disabled} value={String(value)} onChange={(event) => setForm({ ...form, [key]: parseValue(sample, event.target.value) })}>
+          <select id={fieldId} className="input" name={key} data-voryx-crud-field={key} data-voryx-crud-type={type} disabled={disabled} value={String(value)} onChange={(event) => setForm({ ...form, [key]: parseValue(sample, event.target.value) })}>
             <option value="false">false</option>
             <option value="true">true</option>
           </select>
         ) : type === 'textarea' ? (
-          <textarea className="input min-h-24" name={key} data-voryx-crud-field={key} data-voryx-crud-type={type} disabled={disabled} value={String(value ?? '')} onChange={(event) => setForm({ ...form, [key]: event.target.value })} />
+          <textarea id={fieldId} className="input min-h-24" name={key} data-voryx-crud-field={key} data-voryx-crud-type={type} disabled={disabled} value={String(value ?? '')} onChange={(event) => setForm({ ...form, [key]: event.target.value })} />
         ) : type === 'json' ? (
-          <textarea className="input min-h-24 font-mono text-xs" name={key} data-voryx-crud-field={key} data-voryx-crud-type={type} disabled={disabled} value={JSON.stringify(value ?? {}, null, 2)} onChange={(event) => setForm({ ...form, [key]: parseValue(sample, event.target.value) })} />
+          <textarea id={fieldId} className="input min-h-24 font-mono text-xs" name={key} data-voryx-crud-field={key} data-voryx-crud-type={type} disabled={disabled} value={JSON.stringify(value ?? {}, null, 2)} onChange={(event) => setForm({ ...form, [key]: parseValue(sample, event.target.value) })} />
         ) : type === 'days' ? (
-          <div className="flex flex-wrap gap-2 rounded border border-zinc-800 p-2" data-voryx-crud-field={key} data-voryx-crud-type={type}>
+          <fieldset className="rounded border border-zinc-800 p-2" data-voryx-crud-field={key} data-voryx-crud-type={type}>
+            <legend className="px-1 text-sm text-zinc-300">{label}</legend>
+            <div className="flex flex-wrap gap-2">
             {weekdays.map((day) => {
               const values = Array.isArray(value) ? value : [];
-              return <label className="flex items-center gap-1 text-xs" key={day}><input name={key} value={day} type="checkbox" checked={values.includes(day)} onChange={(event) => setForm({ ...form, [key]: event.target.checked ? [...values, day] : values.filter((item) => item !== day) })} />{day.slice(0, 3)}</label>;
+              const dayId = `${fieldId}-${day.toLowerCase()}`;
+              return <div className="flex items-center gap-1 text-xs" key={day}><input id={dayId} name={key} value={day} type="checkbox" checked={values.includes(day)} onChange={(event) => setForm({ ...form, [key]: event.target.checked ? [...values, day] : values.filter((item) => item !== day) })} /><label htmlFor={dayId}>{day.slice(0, 3)}</label></div>;
             })}
-          </div>
+            </div>
+          </fieldset>
         ) : type === 'hours' ? (
-          <div className="grid grid-cols-2 gap-2" data-voryx-crud-field={key} data-voryx-crud-type={type}>
-            <input className="input" name={`${key}.start`} data-voryx-crud-hour="start" type="time" value={String((value as any)?.start || '09:00')} onChange={(event) => setForm({ ...form, [key]: { ...(typeof value === 'object' && value ? value : {}), start: event.target.value } })} />
-            <input className="input" name={`${key}.end`} data-voryx-crud-hour="end" type="time" value={String((value as any)?.end || '17:00')} onChange={(event) => setForm({ ...form, [key]: { ...(typeof value === 'object' && value ? value : {}), end: event.target.value } })} />
-          </div>
+          <fieldset className="grid gap-2" data-voryx-crud-field={key} data-voryx-crud-type={type}>
+            <legend className="text-sm text-zinc-300">{label}</legend>
+            <div className="grid grid-cols-2 gap-2">
+              <div className="grid gap-1"><label htmlFor={`${fieldId}-start`} className="text-xs text-zinc-400">Start</label><input id={`${fieldId}-start`} className="input" name={`${key}.start`} data-voryx-crud-hour="start" type="time" value={String((value as any)?.start || '09:00')} onChange={(event) => setForm({ ...form, [key]: { ...(typeof value === 'object' && value ? value : {}), start: event.target.value } })} /></div>
+              <div className="grid gap-1"><label htmlFor={`${fieldId}-end`} className="text-xs text-zinc-400">End</label><input id={`${fieldId}-end`} className="input" name={`${key}.end`} data-voryx-crud-hour="end" type="time" value={String((value as any)?.end || '17:00')} onChange={(event) => setForm({ ...form, [key]: { ...(typeof value === 'object' && value ? value : {}), end: event.target.value } })} /></div>
+            </div>
+          </fieldset>
         ) : (
-          <input className="input" name={key} data-voryx-crud-field={key} data-voryx-crud-type={type} disabled={disabled} type={type === 'number' ? 'number' : type === 'date' ? 'date' : 'text'} value={String(value ?? '')} onChange={(event) => setForm({ ...form, [key]: parseValue(sample, event.target.value) })} />
+          <input id={fieldId} className="input" name={key} data-voryx-crud-field={key} data-voryx-crud-type={type} disabled={disabled} type={type === 'number' ? 'number' : type === 'date' ? 'date' : 'text'} value={String(value ?? '')} onChange={(event) => setForm({ ...form, [key]: parseValue(sample, event.target.value) })} />
         )}
-      </label>
+      </div>
     );
   }
 

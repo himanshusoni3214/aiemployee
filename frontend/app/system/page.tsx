@@ -1,6 +1,10 @@
 import { serverApi } from '../../lib/serverApi';
 import { LocalTime } from '../../components/LocalTime';
 import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
+import { CompanySelector } from '../../components/CompanySelector';
+import { queryString, selectedCompanyId } from '../../lib/companySelection';
+
+type Company = { id: string; name: string; status: string };
 
 function color(status?: string) {
   if (status === 'ok') return 'text-emerald-300';
@@ -8,10 +12,14 @@ function color(status?: string) {
   return 'text-red-300';
 }
 
-export default async function SystemPage() {
+export default async function SystemPage({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
+  const params = (await searchParams) || {};
+  const companies = await serverApi<Company[]>('/companies', []);
+  const companyId = selectedCompanyId(companies, params.company_id);
+  const scopedQuery = queryString({ company_id: companyId || undefined });
   const [health, workers, hermesLive] = await Promise.all([
-    serverApi<any>('/system/health', { status: 'unknown', checks: {} }),
-    serverApi<any>('/workers/status', { employees: [] }),
+    serverApi<any>(`/system/health${scopedQuery}`, { status: 'unknown', checks: {} }),
+    serverApi<any>(`/workers/status${scopedQuery}`, { employees: [] }),
     serverApi<any>('/hermes/live', { status: 'unknown', jobs: [], outreach: {}, outputs: {} }),
   ]);
   const sync = await serverApi<SyncInfo>('/sync/status', {});
@@ -23,11 +31,13 @@ export default async function SystemPage() {
         <h1 className="text-2xl font-semibold">System Health</h1>
         <div className="flex items-center gap-4"><div className={`text-sm ${color(health?.status)}`}>{health?.status || 'unknown'}</div><SyncStatus sync={sync} /></div>
       </div>
+      <CompanySelector companies={companies} selectedCompanyId={companyId} allowAll label="System scope" />
+      <p className="text-sm text-zinc-400">{companyId ? 'Worker and job health are scoped to the selected company. Infrastructure and Hermes live mounts are global.' : 'All-company worker and job health is shown. Infrastructure and Hermes live mounts are global.'}</p>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        {checks.map(([name, check]: [string, any]) => <div className="card" key={name}><p className="text-sm capitalize text-zinc-400">{name}</p><p className={`mt-2 text-xl font-semibold ${color(check?.status)}`}>{check?.status || 'unknown'}</p><pre className="mt-3 max-h-36 overflow-auto text-xs text-zinc-500">{JSON.stringify(check, null, 2)}</pre></div>)}
+        {checks.map(([name, check]: [string, any]) => <div className="card" key={name}><p className="text-sm capitalize text-zinc-400">{name === 'jobs' ? 'Company-scoped jobs' : `Global ${name}`}</p><p className={`mt-2 text-xl font-semibold ${color(check?.status)}`}>{check?.status || 'unknown'}</p><pre className="mt-3 max-h-36 overflow-auto text-xs text-zinc-500">{JSON.stringify(check, null, 2)}</pre></div>)}
       </div>
       <section className="card">
-        <div className="mb-3 flex items-center justify-between"><h2 className="font-semibold">Worker Circuit Breakers</h2><span className="text-sm text-zinc-400">{workers?.employees?.length ?? 0} workers</span></div>
+        <div className="mb-3 flex items-center justify-between"><h2 className="font-semibold">Company-Scoped Worker Circuit Breakers</h2><span className="text-sm text-zinc-400">{workers?.employees?.length ?? 0} workers</span></div>
         <div className="table-wrap border-0">
           <table className="ops-table">
             <thead><tr><th>Worker</th><th>Status</th><th>Circuit</th><th>Failures</th><th>Last Error</th></tr></thead>
@@ -41,7 +51,7 @@ export default async function SystemPage() {
       <section className="card">
         <div className="mb-3 flex flex-wrap items-center justify-between gap-3">
           <div>
-            <h2 className="font-semibold">Hermes Live Schedules</h2>
+            <h2 className="font-semibold">Global Hermes Live Schedules</h2>
             <p className="text-sm text-zinc-400">{hermesLive?.data_path || hermesLive?.reason || 'Waiting for Hermes data mount'}</p>
           </div>
           <div className={`text-sm ${color(hermesLive?.status)}`}>{hermesLive?.status || 'unknown'}</div>

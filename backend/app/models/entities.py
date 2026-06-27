@@ -8,7 +8,7 @@ def uid(): return str(uuid.uuid4())
 class Role(str, enum.Enum): admin='Admin'; manager='Manager'; viewer='Viewer'
 class Status(str, enum.Enum): active='Active'; inactive='Inactive'; archived='Archived'
 class EmployeeStatus(str, enum.Enum): running='Running'; paused='Paused'; stopped='Stopped'; error='Error'; archived='Archived'
-class JobStatus(str, enum.Enum): queued='Queued'; running='Running'; completed='Completed'; failed='Failed'
+class JobStatus(str, enum.Enum): queued='Queued'; running='Running'; completed='Completed'; failed='Failed'; blocked='Blocked'; cancelled='Cancelled'; skipped='Skipped'
 class LeadStatus(str, enum.Enum): generated='Generated'; verified='Verified'; contacted='Contacted'; replied='Replied'; interested='Interested'; meeting_booked='Meeting Booked'; closed='Closed'
 
 class User(Base):

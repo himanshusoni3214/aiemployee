@@ -21,6 +21,8 @@ from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as
 router = APIRouter()
 oauth2 = OAuth2PasswordBearer(tokenUrl='/api/auth/login', auto_error=False)
 HERMES_SYNCED_LABELS = {'companies', 'employees', 'campaigns', 'schedules'}
+TERMINAL_JOB_STATUSES = {JobStatus.completed, JobStatus.failed, JobStatus.blocked, JobStatus.cancelled, JobStatus.skipped}
+ACTION_LABELS = {'dry-run': 'Dry run', 'test-run': 'Test run', 'run': 'Run'}
 
 def current_user(request: Request, token: str|None = Depends(oauth2), db: Session = Depends(get_db)):
     token = token or request.cookies.get('voryx_token')
@@ -47,6 +49,62 @@ def _schedule_hermes_job_id(schedule: Schedule) -> str | None:
     payload = schedule.payload if isinstance(schedule.payload, dict) else {}
     value = payload.get('hermes_job_id')
     return str(value) if value else None
+
+def _manual_run_block_reason(employee: AIEmployee | None) -> str | None:
+    if not employee:
+        return None
+    if employee.status == EmployeeStatus.archived:
+        return 'employee is archived'
+    if employee.status != EmployeeStatus.running:
+        return f'employee is {employee.status.value.lower()}'
+    if employee.circuit_breaker_open:
+        return 'employee circuit breaker is open'
+    return None
+
+def _append_log_once(job: Job, message: str):
+    logs = list(job.logs or [])
+    if not logs or logs[-1] != message:
+        logs.append(message)
+    job.logs = logs
+
+def _block_manual_job(db: Session, job: Job, employee: AIEmployee | None, reason: str, user: User) -> Job:
+    now = datetime.utcnow()
+    job.status = JobStatus.blocked
+    job.error_message = f'Manual run blocked: {reason}'
+    job.retry_after = None
+    job.ended_at = now
+    _append_log_once(job, job.error_message)
+    if employee:
+        employee.last_error = job.error_message[:1000]
+        employee.last_heartbeat_at = now
+    log(db, 'Manual Hermes Run Blocked', 'Job', job.id, getattr(employee, 'company_id', None), user.id, {'reason': reason})
+    return job
+
+def _action_response(action: str, job: Job | None = None, hermes_control: dict | None = None, message: str | None = None) -> dict:
+    label = ACTION_LABELS.get(action, action.replace('-', ' ').title())
+    state = 'request_accepted'
+    is_terminal = False
+    if job:
+        state = job.status.name
+        is_terminal = job.status in TERMINAL_JOB_STATUSES
+        if not message:
+            if job.status == JobStatus.blocked:
+                message = f'{label} blocked: {job.error_message or "safety policy blocked the job"}. Job ID: {job.id}'
+            elif job.status == JobStatus.queued:
+                message = f'{label} queued. Job ID: {job.id}'
+            elif job.status == JobStatus.failed:
+                message = f'{label} failed: {job.error_message or "worker failed"}. Job ID: {job.id}'
+            else:
+                message = f'{label} {job.status.value.lower()}. Job ID: {job.id}'
+    return {
+        'ok': state not in {'failed', 'blocked', 'cancelled', 'skipped'},
+        'state': state,
+        'status': state,
+        'terminal': is_terminal,
+        'job_id': getattr(job, 'id', None),
+        'message': message or f'{label} request accepted',
+        'hermes_control': hermes_control,
+    }
 
 def _enum_member(enum_cls, value):
     if isinstance(value, enum_cls):
@@ -90,10 +148,10 @@ def _campaign_id_for_employee(db: Session, employee_id: str) -> str | None:
         .limit(1)
     )
 
-def _record_manual_run(db: Session, schedule: Schedule, user: User, control_result: dict | None) -> Job:
+def _record_manual_run(db: Session, schedule: Schedule, user: User, control_result: dict | None, action: str = 'run') -> Job:
     now = datetime.utcnow()
     payload = dict(schedule.payload or {})
-    payload.update({'source': payload.get('source') or 'dashboard', 'manual_action': 'run', 'requested_by': user.id})
+    payload.update({'source': payload.get('source') or 'dashboard', 'manual_action': action, 'requested_by': user.id})
     job = Job(
         employee_id=schedule.employee_id,
         campaign_id=_campaign_id_for_employee(db, schedule.employee_id),
@@ -102,7 +160,7 @@ def _record_manual_run(db: Session, schedule: Schedule, user: User, control_resu
         status=JobStatus.queued,
         payload=payload,
         result={'hermes_control': control_result or {'status': 'local'}},
-        logs=['Manual Hermes run queued from dashboard; success requires Hermes output or a verified business artifact.'],
+        logs=[f'Manual Hermes {action} queued from dashboard; success requires Hermes output or a verified business artifact.'],
         attempts=0,
         max_attempts=1,
         started_at=None,
@@ -212,11 +270,16 @@ def login(data: LoginIn, response: Response, db: Session=Depends(get_db)):
     if not user or not verify_password(data.password, user.password_hash): raise HTTPException(401, 'Bad credentials')
     return TokenOut(access_token=_set_auth_cookie(response, user))
 
+def _safe_redirect_path(path: str | None) -> str:
+    if path and path.startswith('/') and not path.startswith('//'):
+        return path
+    return '/dashboard'
+
 @router.post('/auth/login-form')
-def login_form(email: str=Form(...), password: str=Form(...), db: Session=Depends(get_db)):
+def login_form(email: str=Form(...), password: str=Form(...), redirect_to: str|None=Form(None), db: Session=Depends(get_db)):
     user = db.scalar(select(User).where(User.email == email))
     if not user or not verify_password(password, user.password_hash): raise HTTPException(401, 'Bad credentials')
-    response = RedirectResponse(url='/dashboard', status_code=303)
+    response = RedirectResponse(url=_safe_redirect_path(redirect_to), status_code=303)
     _set_auth_cookie(response, user)
     return response
 
@@ -280,10 +343,11 @@ def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), 
         db.add(copy); db.flush(); log(db, 'Employee Duplicated', 'AIEmployee', copy.id, emp.company_id, user.id); db.commit(); return copy
     if action not in mapping and action not in {'run', 'dry-run'}: raise HTTPException(400, 'Unsupported action')
 
+    run_block_reason = _manual_run_block_reason(emp) if action in {'run', 'dry-run'} else None
     hermes_id = _employee_hermes_job_id(emp)
     control_result = None
     control_action = {'start': 'resume', 'resume': 'resume', 'restart': 'resume', 'pause': 'pause', 'stop': 'pause', 'run': 'run'}.get(action)
-    if hermes_id and control_action:
+    if hermes_id and control_action and not run_block_reason:
         control_result = _control_hermes_job(hermes_id, control_action)
         _force_hermes_sync(db, user.id)
         db.expire_all()
@@ -303,12 +367,18 @@ def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), 
         schedule = db.scalar(select(Schedule).where(Schedule.employee_id == emp.id).order_by(Schedule.name).limit(1))
         if not schedule:
             raise HTTPException(400, 'Employee has no schedule to run')
-        manual = _record_manual_run(db, schedule, user, control_result)
+        manual = _record_manual_run(db, schedule, user, control_result, action)
         if action == 'dry-run':
             manual.payload = {**(manual.payload or {}), 'dry_run': True, 'manual_action': 'dry-run'}
-            manual.logs = [*(manual.logs or []), 'Dry run queued from dashboard; Hermes was not triggered for prospect outreach.']
+            _append_log_once(manual, 'Dry run queued from dashboard; Hermes was not triggered for prospect outreach.')
+        reason = run_block_reason or _manual_run_block_reason(emp)
+        if reason:
+            _block_manual_job(db, manual, emp, reason, user)
+        response_payload = _action_response(action, manual, control_result)
+    else:
+        response_payload = _action_response(action, hermes_control=control_result)
     log(db, f'Employee {action.title()}', 'AIEmployee', emp.id, emp.company_id, user.id, {'hermes_control': control_result} if control_result else None)
-    db.commit(); db.refresh(emp); return emp
+    db.commit(); return response_payload
 
 @router.post('/schedules/{schedule_id}/{action}')
 def schedule_action(schedule_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
@@ -317,9 +387,11 @@ def schedule_action(schedule_id: str, action: str, db: Session=Depends(get_db), 
     action = action.lower()
     if action not in {'pause', 'resume', 'run', 'dry-run', 'test-run'}: raise HTTPException(400, 'Unsupported action')
 
+    employee_for_action = db.get(AIEmployee, schedule.employee_id) if schedule.employee_id else None
+    run_block_reason = _manual_run_block_reason(employee_for_action) if action in {'run', 'dry-run', 'test-run'} else None
     hermes_id = _schedule_hermes_job_id(schedule)
     control_result = None
-    if hermes_id and action in {'pause', 'resume', 'run'}:
+    if hermes_id and action in {'pause', 'resume', 'run'} and not run_block_reason:
         control_result = _control_hermes_job(hermes_id, action)
         _force_hermes_sync(db, user.id)
         db.expire_all()
@@ -332,15 +404,21 @@ def schedule_action(schedule_id: str, action: str, db: Session=Depends(get_db), 
             schedule.is_paused = False
 
     job_id = None
+    response_payload = _action_response(action, hermes_control=control_result)
     if action in {'run', 'dry-run', 'test-run'}:
-        job = _record_manual_run(db, schedule, user, control_result)
+        employee = employee_for_action
+        job = _record_manual_run(db, schedule, user, control_result, action)
         if action in {'dry-run', 'test-run'}:
             job.payload = {**(job.payload or {}), 'manual_action': action, 'dry_run': action == 'dry-run', 'test_run': action == 'test-run'}
-            job.logs = [*(job.logs or []), f'{action} queued from dashboard; Hermes was not triggered for prospect outreach.']
+            _append_log_once(job, f'{action} queued from dashboard; Hermes was not triggered for prospect outreach.')
+        reason = run_block_reason or _manual_run_block_reason(employee)
+        if reason:
+            _block_manual_job(db, job, employee, reason, user)
         job_id = job.id
+        response_payload = _action_response(action, job, control_result)
     log(db, f'Schedule {action.title()}', 'Schedule', schedule.id, user_id=user.id, metadata={'hermes_control': control_result, 'job_id': job_id})
     db.commit()
-    return {'ok': True, 'schedule_id': schedule.id, 'job_id': job_id, 'hermes_control': control_result}
+    return {'schedule_id': schedule.id, **response_payload}
 
 @router.post('/jobs')
 def create_job(data: JobIn, db: Session=Depends(get_db), user: User=Depends(require_write)):
@@ -367,11 +445,17 @@ def list_jobs(
     stmt = stmt.order_by(Job.created_at.desc()).limit(limit)
     return db.scalars(stmt).all()
 
+@router.get('/jobs/{job_id}')
+def get_job(job_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    job = db.get(Job, job_id)
+    if not job: raise HTTPException(404, 'Not found')
+    return job
+
 @router.post('/jobs/{job_id}/retry')
 def retry_job(job_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
     job = db.get(Job, job_id)
     if not job: raise HTTPException(404, 'Not found')
-    if job.status not in {JobStatus.failed, JobStatus.queued}: raise HTTPException(400, 'Only failed or queued jobs can be retried')
+    if job.status not in {JobStatus.failed, JobStatus.queued, JobStatus.blocked, JobStatus.skipped}: raise HTTPException(400, 'Only failed, blocked, skipped, or queued jobs can be retried')
     job.status = JobStatus.queued
     job.retry_after = None
     job.ended_at = None
@@ -433,7 +517,7 @@ def sync_status(user: User=Depends(current_user)):
     return hermes_sync_status()
 
 @router.get('/system/health')
-async def system_health(db: Session=Depends(get_db), user: User=Depends(current_user)):
+async def system_health(company_id: str|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):
     platform_import = _sync_hermes_snapshot(db, user.id)
     checks = {}
     try:
@@ -449,18 +533,28 @@ async def system_health(db: Session=Depends(get_db), user: User=Depends(current_
     checks['hermes'] = await get_connector('hermes').health()
     checks['hermes_live'] = HermesLiveMonitor().summary()
     checks['platform_import'] = platform_import
-    failed_jobs = db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.failed)) or 0
+    job_counts = {
+        status: db.scalar(
+            select(func.count()).select_from(_filtered_job_stmt(company_id).where(Job.status == status).subquery())
+        ) or 0
+        for status in JobStatus
+    }
+    failed_jobs = job_counts.get(JobStatus.failed, 0)
     checks['jobs'] = {
         'status': 'degraded' if failed_jobs else 'ok',
-        'queued': db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.queued)) or 0,
-        'running': db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.running)) or 0,
+        'scope': company_id or 'global',
+        'queued': job_counts.get(JobStatus.queued, 0),
+        'running': job_counts.get(JobStatus.running, 0),
         'failed': failed_jobs,
+        'blocked': job_counts.get(JobStatus.blocked, 0),
+        'cancelled': job_counts.get(JobStatus.cancelled, 0),
+        'skipped': job_counts.get(JobStatus.skipped, 0),
     }
     blocking = [name for name, check in checks.items() if isinstance(check, dict) and check.get('status') == 'error']
     hermes_status = checks['hermes'].get('status') if isinstance(checks.get('hermes'), dict) else 'unknown'
     hermes_live_status = checks['hermes_live'].get('status') if isinstance(checks.get('hermes_live'), dict) else 'unknown'
     status = 'ok' if not blocking and hermes_status in {'ok', 'unknown'} and hermes_live_status in {'ok', 'unknown', 'unavailable'} else 'degraded'
-    return {'status': status, 'checked_at': datetime.utcnow(), 'checks': checks}
+    return {'status': status, 'checked_at': datetime.utcnow(), 'company_id': company_id, 'checks': checks}
 
 @router.get('/reports/ceo')
 def ceo_report(company_id: str|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):

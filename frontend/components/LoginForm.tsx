@@ -4,7 +4,11 @@ import type { FormEvent } from 'react';
 import { useState } from 'react';
 import { API } from '../lib/api';
 
-export function LoginForm({ notice: initialNotice = '' }: { notice?: string }) {
+function safeRedirect(path: string) {
+  return path.startsWith('/') && !path.startsWith('//') ? path : '/dashboard';
+}
+
+export function LoginForm({ notice: initialNotice = '', redirectTo = '/dashboard' }: { notice?: string; redirectTo?: string }) {
   const [email, setEmail] = useState('admin@themealz.com');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -21,7 +25,7 @@ export function LoginForm({ notice: initialNotice = '' }: { notice?: string }) {
     }
     const data = await response.json();
     localStorage.setItem('token', data.access_token);
-    location.href = '/dashboard';
+    location.href = safeRedirect(redirectTo);
   }
 
   return (
@@ -29,9 +33,10 @@ export function LoginForm({ notice: initialNotice = '' }: { notice?: string }) {
       <div className="card">
         <h1 className="mb-5 text-2xl font-semibold">Login</h1>
         <form action={`${API}/api/auth/login-form`} method="post" onSubmit={submit}>
+          <input type="hidden" name="redirect_to" value={safeRedirect(redirectTo)} />
           <div className="grid gap-3">
-            <label className="grid gap-1 text-sm text-zinc-300"><span>Email</span><input className="input" name="email" value={email} onChange={(event) => setEmail(event.target.value)} /></label>
-            <label className="grid gap-1 text-sm text-zinc-300"><span>Password</span><input className="input" name="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+            <div className="grid gap-1 text-sm text-zinc-300"><label htmlFor="login-email">Email</label><input id="login-email" className="input" name="email" value={email} onChange={(event) => setEmail(event.target.value)} /></div>
+            <div className="grid gap-1 text-sm text-zinc-300"><label htmlFor="login-password">Password</label><input id="login-password" className="input" name="password" type="password" value={password} onChange={(event) => setPassword(event.target.value)} /></div>
           </div>
           {notice ? <p className="mt-3 text-sm text-amber-300">{notice}</p> : null}
           {error ? <p className="mt-3 text-sm text-red-300">{error}</p> : null}

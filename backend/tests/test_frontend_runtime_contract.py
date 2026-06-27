@@ -34,6 +34,35 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("await apiPost(`${path}/${item.id}`, { method: 'DELETE' })", source)
         self.assertIn("console.error(`Dashboard ${label} failed`", source)
 
+    def test_action_runtime_surfaces_backend_job_state(self):
+        source = read_frontend("public/voryx-action-runtime.js")
+
+        self.assertIn("fetch(`/api/jobs/${jobId}`", source)
+        self.assertIn("const terminalStates = new Set(['completed', 'failed', 'blocked', 'cancelled', 'skipped'])", source)
+        self.assertIn("const problemStates = new Set(['failed', 'blocked', 'cancelled', 'skipped'])", source)
+        self.assertIn("result?.message || `${capitalize(label)} request accepted`", source)
+
+    def test_company_selector_does_not_keep_stale_dependent_filters(self):
+        company_selector = read_frontend("components/CompanySelector.tsx")
+        query_selector = read_frontend("components/QuerySelector.tsx")
+        company_selection = read_frontend("lib/companySelection.ts")
+        system_page = read_frontend("app/system/page.tsx")
+
+        self.assertIn("params.delete('campaign_id')", company_selector)
+        self.assertIn("params.delete('employee_id')", company_selector)
+        self.assertIn("resetParams.forEach((resetParam) => params.delete(resetParam))", query_selector)
+        self.assertIn("defaultToSingleActive !== true", company_selection)
+        self.assertIn("CompanySelector companies={companies} selectedCompanyId={companyId} allowAll label=\"System scope\"", system_page)
+
+    def test_crud_controls_have_explicit_labels(self):
+        source = read_frontend("components/CrudPage.tsx")
+
+        self.assertIn("htmlFor={fieldId}", source)
+        self.assertIn("id={fieldId}", source)
+        self.assertIn("<fieldset", source)
+        self.assertIn("htmlFor={dayId}", source)
+        self.assertIn("htmlFor={`${fieldId}-start`}", source)
+
     def test_action_runtime_localizes_server_rendered_times(self):
         runtime = read_frontend("public/voryx-action-runtime.js")
         sync_status = read_frontend("components/SyncStatus.tsx")

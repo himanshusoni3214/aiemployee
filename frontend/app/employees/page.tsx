@@ -57,7 +57,7 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
       </div>
       <CompanySelector companies={companies} selectedCompanyId={companyId} label="Company" />
       <div className="card flex flex-wrap items-end gap-3">
-        <QuerySelector label="Campaign" param="campaign_id" value={campaignId} options={campaignOptions} allLabel="All campaigns" />
+        <QuerySelector label="Campaign" param="campaign_id" value={campaignId} options={campaignOptions} allLabel="All campaigns" resetParams={['employee_id']} />
       </div>
       {!companyId ? <div className="card text-sm text-amber-300">Select a company to manage AI employees.</div> : null}
       <div className="grid gap-3 md:grid-cols-4">

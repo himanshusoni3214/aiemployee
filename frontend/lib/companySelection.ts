@@ -4,10 +4,15 @@ export function firstParam(value?: string | string[]) {
   return Array.isArray(value) ? value[0] : value;
 }
 
-export function selectedCompanyId(companies: CompanyOption[], requested?: string | string[]) {
+export function selectedCompanyId(
+  companies: CompanyOption[],
+  requested?: string | string[],
+  options: { defaultToSingleActive?: boolean } = {},
+) {
   const value = firstParam(requested);
   if (value === 'all') return '';
   if (value && companies.some((company) => company.id === value)) return value;
+  if (options.defaultToSingleActive !== true) return '';
   const active = companies.filter((company) => company.status !== 'Archived');
   return active.length === 1 ? active[0].id : '';
 }

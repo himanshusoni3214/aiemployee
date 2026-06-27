@@ -58,7 +58,7 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
       </div>
       <CompanySelector companies={companies} selectedCompanyId={companyId} label="Company" />
       <div className="card flex flex-wrap items-end gap-3">
-        <QuerySelector label="Campaign" param="campaign_id" value={campaignId} options={campaignOptions} allLabel="All campaigns" />
+        <QuerySelector label="Campaign" param="campaign_id" value={campaignId} options={campaignOptions} allLabel="All campaigns" resetParams={['employee_id']} />
         <QuerySelector label="Employee" param="employee_id" value={employeeId} options={employeeOptions} allLabel="All employees" />
       </div>
       {!companyId ? <div className="card text-sm text-amber-300">Select a company to manage schedules.</div> : null}

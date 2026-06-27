@@ -67,19 +67,7 @@
     sessionStorage.removeItem(storageKey);
     try {
       const action = JSON.parse(raw);
-      let text = action.text;
-      let isError = Boolean(action.isError);
-      if (action.label === 'run' && action.path) {
-        const button = document.querySelector(`button[data-voryx-action-path="${escapeAttribute(action.path)}"]`);
-        const cells = button?.closest('tr')?.querySelectorAll('td');
-        const state = cells?.[3]?.textContent?.trim();
-        const reason = cells?.[7]?.textContent?.trim();
-        if (state === 'Error') {
-          text = `Run succeeded, but Hermes now reports Error${reason && reason !== '-' ? `: ${reason}` : ''}. Last Hermes refresh: ${action.refreshLabel || '-'}`;
-          isError = true;
-        }
-      }
-      showBanner(text, isError);
+      showBanner(action.text, Boolean(action.isError));
     } catch (error) {
       console.error('Could not render stored Hermes action status', error);
     }
@@ -308,6 +296,64 @@
     return response.json();
   };
 
+  const fetchJob = async (jobId) => {
+    const token = localStorage.getItem('token');
+    const response = await fetch(`/api/jobs/${jobId}`, {
+      credentials: 'include',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      cache: 'no-store',
+    });
+    const text = await response.text();
+    let result = text;
+    try { result = text ? JSON.parse(text) : null; } catch {}
+    if (response.status === 401) {
+      localStorage.removeItem('token');
+      window.location.href = '/login?expired=1';
+      return null;
+    }
+    if (!response.ok) {
+      console.error('Job status request failed', { jobId, status: response.status, body: text });
+      return null;
+    }
+    return result;
+  };
+
+  const sleep = (ms) => new Promise((resolve) => window.setTimeout(resolve, ms));
+  const terminalStates = new Set(['completed', 'failed', 'blocked', 'cancelled', 'skipped']);
+  const problemStates = new Set(['failed', 'blocked', 'cancelled', 'skipped']);
+
+  const actionResultState = (result) => String(result?.state || result?.status || '').toLowerCase();
+  const isProblemAction = (result) => problemStates.has(actionResultState(result)) || result?.ok === false;
+  const actionMessage = (label, result, refreshLabel) => {
+    const base = result?.message || `${capitalize(label)} request accepted`;
+    return `${base}. Last Hermes refresh: ${refreshLabel || '-'}`;
+  };
+
+  const jobMessage = (label, job, refreshLabel) => {
+    const state = String(job?.status || 'unknown').toLowerCase();
+    const detail = job?.error_message || job?.logs?.[job.logs.length - 1] || '';
+    const suffix = detail ? `: ${detail}` : '';
+    return `${capitalize(label)} ${state}${suffix}. Job ID: ${job?.id || '-'}. Last Hermes refresh: ${refreshLabel || '-'}`;
+  };
+
+  const pollJobStatus = async ({ jobId, label, wrapper, refreshLabel }) => {
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await sleep(1500);
+      const job = await fetchJob(jobId);
+      if (!job) continue;
+      const state = String(job.status || '').toLowerCase();
+      if (!terminalStates.has(state)) {
+        showMessage(wrapper, jobMessage(label, job, refreshLabel), false);
+        continue;
+      }
+      const isError = problemStates.has(state);
+      const text = jobMessage(label, job, refreshLabel);
+      showMessage(wrapper, text, isError);
+      return { text, isError, state };
+    }
+    return null;
+  };
+
   document.addEventListener('click', async (event) => {
     const target = event.target instanceof Element ? event.target : event.target?.parentElement;
     const crudButton = target?.closest?.('[data-voryx-crud-save], [data-voryx-crud-edit], [data-voryx-crud-archive], [data-voryx-crud-cancel]');
@@ -355,12 +401,20 @@
         console.error('API request failed', { path, status: response.status, body: text });
         throw new Error(`POST /api${path} failed (${response.status}): ${text}`);
       }
-      console.info(`Hermes ${label} succeeded`, { path, result });
+      console.info(`Hermes ${label} completed`, { path, result });
       const sync = await fetchSyncStatus();
       const refreshLabel = formatLocalTime(sync?.last_synced_at);
-      const successText = `${label.charAt(0).toUpperCase()}${label.slice(1)} succeeded. Last Hermes refresh: ${refreshLabel}`;
-      showMessage(wrapper, successText, false);
-      sessionStorage.setItem(storageKey, JSON.stringify({ label, path, text: successText, refreshLabel, isError: false }));
+      let textToStore = actionMessage(label, result, refreshLabel);
+      let isError = isProblemAction(result);
+      showMessage(wrapper, textToStore, isError);
+      if (result?.job_id && !result?.terminal) {
+        const polled = await pollJobStatus({ jobId: result.job_id, label, wrapper, refreshLabel });
+        if (polled) {
+          textToStore = polled.text;
+          isError = polled.isError;
+        }
+      }
+      sessionStorage.setItem(storageKey, JSON.stringify({ label, path, text: textToStore, refreshLabel, isError, state: actionResultState(result), jobId: result?.job_id }));
       window.setTimeout(() => window.location.reload(), 900);
     } catch (error) {
       const failedText = `${label.charAt(0).toUpperCase()}${label.slice(1)} failed: ${error?.message || 'Action failed'}`;

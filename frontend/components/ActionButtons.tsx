@@ -17,8 +17,14 @@ function usePostAction() {
     setMessage('');
     try {
       const result = await api(path, { method: 'POST' });
-      console.info(`Hermes ${label} succeeded`, { path, result });
-      setMessage(`${label.charAt(0).toUpperCase()}${label.slice(1)} applied`);
+      const resultState = String(result?.state || result?.status || '').toLowerCase();
+      const text = result?.message || `${label.charAt(0).toUpperCase()}${label.slice(1)} request accepted`;
+      console.info(`Hermes ${label} completed`, { path, result });
+      if (['failed', 'blocked', 'cancelled', 'skipped'].includes(resultState) || result?.ok === false) {
+        setError(text);
+      } else {
+        setMessage(text);
+      }
       router.refresh();
     } catch (err: any) {
       const detail = err?.message || 'Action failed';
