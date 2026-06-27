@@ -97,6 +97,22 @@
     }
   };
 
+  const localizeStaticTimes = () => {
+    document.querySelectorAll('time[datetime]').forEach((node) => {
+      const value = node.getAttribute('datetime');
+      const label = formatLocalTime(value);
+      if (label && label !== '-') {
+        node.textContent = label;
+        node.title = value || label;
+      }
+    });
+    document.querySelectorAll('[data-voryx-sync-last]').forEach((node) => {
+      const value = node.getAttribute('data-voryx-sync-last');
+      node.textContent = `Last synced: ${value ? formatLocalTime(value) : '-'}`;
+      if (value) node.title = value;
+    });
+  };
+
   const capitalize = (value) => `${value.charAt(0).toUpperCase()}${value.slice(1)}`;
 
   const apiPost = async (path, init = {}) => {
@@ -359,11 +375,21 @@
 
   if (document.readyState === 'loading') {
     document.addEventListener('DOMContentLoaded', () => {
+      localizeStaticTimes();
       renderStoredAction();
       renderStoredCrudAction();
     });
   } else {
+    localizeStaticTimes();
     renderStoredAction();
     renderStoredCrudAction();
+  }
+
+  const observer = new MutationObserver(() => {
+    window.clearTimeout(window.__voryxLocalizeTimer);
+    window.__voryxLocalizeTimer = window.setTimeout(localizeStaticTimes, 50);
+  });
+  if (document.body) {
+    observer.observe(document.body, { childList: true, subtree: true });
   }
 })();

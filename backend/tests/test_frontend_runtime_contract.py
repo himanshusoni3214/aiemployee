@@ -32,6 +32,15 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("await apiPost(`${path}/${item.id}`, { method: 'DELETE' })", source)
         self.assertIn("console.error(`Dashboard ${label} failed`", source)
 
+    def test_action_runtime_localizes_server_rendered_times(self):
+        runtime = read_frontend("public/voryx-action-runtime.js")
+        sync_status = read_frontend("components/SyncStatus.tsx")
+
+        self.assertIn("data-voryx-sync-last", sync_status)
+        self.assertIn("const localizeStaticTimes", runtime)
+        self.assertIn("time[datetime]", runtime)
+        self.assertIn("[data-voryx-sync-last]", runtime)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -42,7 +42,7 @@ export function SyncStatus({ sync }: { sync?: SyncInfo }) {
   return (
     <div className="text-right text-sm">
       <div className={color(status)}>{status}</div>
-      <div className="text-zinc-400">Last synced: {sync?.last_synced_at ? formatLocalTime(sync.last_synced_at) : '-'}</div>
+      <div className="text-zinc-400" data-voryx-sync-last={sync?.last_synced_at || ''}>Last synced: {sync?.last_synced_at ? formatLocalTime(sync.last_synced_at) : '-'}</div>
       {sync?.error ? <div className="max-w-lg truncate text-red-300" title={sync.error}>{sync.error}</div> : null}
     </div>
   );
