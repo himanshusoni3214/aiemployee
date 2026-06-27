@@ -85,6 +85,31 @@ services:
       - traefik.http.routers.voryx-ops.tls.certresolver=${TRAEFIK_CERT_RESOLVER}
       - traefik.http.services.voryx-ops.loadbalancer.server.port=3000
 
+  qa:
+    image: mcr.microsoft.com/playwright:v1.61.1-noble
+    profiles:
+      - qa
+    working_dir: /work/tests/e2e
+    env_file: ${PRODUCTION_ENV_FILE:-.env.production}
+    environment:
+      BASE_URL: ${QA_BASE_URL:-https://${APP_HOST}}
+      API_URL: ${QA_API_URL:-https://${APP_HOST}}
+      QA_AUDIT_DIR: ${QA_AUDIT_DIR:-/work/audits/production-qa/latest}
+      QA_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB}
+      HERMES_DATA_PATH: /hermes-data
+      CI: "true"
+    volumes:
+      - .:/work
+      - /docker/hermes-agent-yepj/data:/hermes-data:ro
+    depends_on:
+      - db
+      - backend
+      - frontend
+    networks:
+      - internal
+      - proxy
+    command: bash -lc "npm ci --cache /tmp/npm-cache && npx playwright test --config=playwright.config.ts"
+
 volumes:
   postgres_data:
 

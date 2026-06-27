@@ -11,3 +11,7 @@ build/
 .coverage
 .pytest_cache/
 .DS_Store
+audits/
+tests/e2e/audits/
+tests/e2e/test-results/
+tests/e2e/playwright-report/

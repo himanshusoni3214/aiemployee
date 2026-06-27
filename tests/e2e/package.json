@@ -1,0 +1,18 @@
+{
+  "name": "voryx-ops-production-qa",
+  "private": true,
+  "scripts": {
+    "test": "playwright test",
+    "test:production": "playwright test --config=playwright.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@playwright/test": "1.61.1",
+    "pg": "8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.10.2",
+    "@types/pg": "8.11.10",
+    "typescript": "5.7.2"
+  }
+}
