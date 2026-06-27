@@ -1,5 +1,6 @@
 import csv
 import hashlib
+import json
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -9,7 +10,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
-from app.models.entities import AIEmployee, Campaign, Company, EmployeeStatus, Job, JobStatus, Schedule, Status
+from app.models.entities import AIEmployee, Campaign, Company, EmployeeStatus, Job, JobStatus, OutreachEvent, Schedule, Status
 from app.services.audit import log
 from app.services.hermes_live import HermesLiveMonitor, redact
 
@@ -164,6 +165,10 @@ class HermesImportService:
         created += counts["created"]
         updated += counts["updated"]
 
+        counts = self._outreach_events(db, company)
+        created += counts["created"]
+        updated += counts["updated"]
+
         if created or updated:
             db.flush()
             log(db, "Hermes Import Synced", "Hermes", None, company.id, user_id, {"created": created, "updated": updated})
@@ -213,6 +218,7 @@ class HermesImportService:
             "company_id": company.id,
             "name": name,
             "employee_type": _employee_type(hermes_job.get("name") or ""),
+            "hermes_job_id": hermes_id,
             "prompt": hermes_job.get("prompt_excerpt") or "",
             "daily_limits": {"source": "hermes", "hermes_job_id": hermes_id},
             "status": status,
@@ -398,6 +404,54 @@ class HermesImportService:
                     updated += int(_assign(job, **fields))
                 else:
                     db.add(Job(id=job_id, **fields))
+                    created += 1
+        db.flush()
+        return {"created": created, "updated": updated}
+
+    def _outreach_events(self, db: Session, company: Company) -> dict[str, int]:
+        if not self.data_path:
+            return {"created": 0, "updated": 0}
+        created = 0
+        updated = 0
+        for path in (self.data_path / "outreach_events.jsonl", self.data_path / "home" / "leads" / "outreach_events.jsonl"):
+            if not path.exists():
+                continue
+            for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
+                if not line.strip():
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(row, dict):
+                    continue
+                event_id = str(row.get("event_id") or _hash(line))
+                fields = {
+                    "company_id": row.get("company_id") or company.id,
+                    "campaign_id": row.get("campaign_id"),
+                    "employee_id": row.get("employee_id"),
+                    "lead_id": row.get("lead_id"),
+                    "recipient": redact(row.get("recipient") or ""),
+                    "business": row.get("business"),
+                    "subject": row.get("subject"),
+                    "attempted_at": _parse_dt(row.get("attempted_at")),
+                    "sent_at": _parse_dt(row.get("sent_at")),
+                    "status": str(row.get("status") or "unknown"),
+                    "message_id": row.get("message_id"),
+                    "thread_id": row.get("thread_id"),
+                    "provider": row.get("provider"),
+                    "error_code": row.get("error_code"),
+                    "error_message": redact(row.get("error_message")),
+                    "dry_run": bool(row.get("dry_run")),
+                    "job_run_id": row.get("job_run_id"),
+                    "source_file": str(path.relative_to(self.data_path)),
+                    "raw": {**row, "recipient": redact(row.get("recipient") or ""), "error_message": redact(row.get("error_message"))},
+                }
+                event = db.get(OutreachEvent, event_id)
+                if event:
+                    updated += int(_assign(event, **fields))
+                else:
+                    db.add(OutreachEvent(event_id=event_id, **fields))
                     created += 1
         db.flush()
         return {"created": created, "updated": updated}

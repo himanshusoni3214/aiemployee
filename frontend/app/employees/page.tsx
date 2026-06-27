@@ -2,6 +2,7 @@ import { serverApi } from '../../lib/serverApi';
 import { EmployeeActions } from '../../components/ActionButtons';
 import { LocalTime } from '../../components/LocalTime';
 import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
+import CrudPage from '../../components/CrudPage';
 
 type Company = { id: string; name: string };
 type Employee = {
@@ -64,6 +65,21 @@ export default async function EmployeesPage() {
           </tbody>
         </table>
       </div>
+      <CrudPage title="AI Employee Management" path="/employees" defaults={{
+        company_id: companies[0]?.id || '',
+        campaign_id: '',
+        name: '',
+        employee_type: 'Custom',
+        hermes_job_id: '',
+        approved_script: '',
+        working_directory: '/opt/data/home',
+        prompt: '',
+        daily_limits: {},
+        dry_run_mode: true,
+        status: 'Stopped',
+        rate_limit_per_hour: 20,
+        daily_email_limit: 50,
+      }} />
     </div>
   );
 }

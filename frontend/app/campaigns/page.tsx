@@ -1,4 +1,5 @@
 import { serverApi } from '../../lib/serverApi';
+import CrudPage from '../../components/CrudPage';
 
 type Company = { id: string; name: string };
 type Campaign = {
@@ -54,6 +55,26 @@ export default async function CampaignsPage() {
           </tbody>
         </table>
       </div>
+      <CrudPage title="Campaign Management" path="/campaigns" defaults={{
+        company_id: companies[0]?.id || '',
+        name: '',
+        description: '',
+        industry: '',
+        target_audience: '',
+        geographic_area: '',
+        daily_lead_goal: 0,
+        daily_email_goal: 0,
+        daily_email_limit: 0,
+        timezone: 'America/Toronto',
+        allowed_sending_days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
+        allowed_sending_hours: { start: '09:00', end: '19:00' },
+        internal_test_recipient: 'himanshusoni3214@gmail.com',
+        report_recipient: 'himanshusoni3214@gmail.com',
+        dry_run_mode: true,
+        start_date: '',
+        end_date: '',
+        status: 'Active',
+      }} />
     </div>
   );
 }

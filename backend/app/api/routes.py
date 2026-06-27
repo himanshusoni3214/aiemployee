@@ -13,6 +13,7 @@ from app.models.entities import *
 from app.schemas.common import *
 from app.services.audit import log
 from app.services.connectors import get_connector
+from app.services.daily_report import generate_daily_report, render_report, send_report_artifact, write_report_artifact
 from app.services.hermes_control import HermesControlError, HermesControlService
 from app.services.hermes_live import HermesLiveMonitor
 from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as _sync_hermes_snapshot
@@ -74,14 +75,14 @@ def _record_manual_run(db: Session, schedule: Schedule, user: User, control_resu
         campaign_id=_campaign_id_for_employee(db, schedule.employee_id),
         connector='hermes',
         task_type=schedule.task_type,
-        status=JobStatus.completed,
+        status=JobStatus.queued,
         payload=payload,
         result={'hermes_control': control_result or {'status': 'local'}},
-        logs=['Manual Hermes run requested from dashboard; importer will attach external outputs when Hermes writes them.'],
-        attempts=1,
+        logs=['Manual Hermes run queued from dashboard; success requires Hermes output or a verified business artifact.'],
+        attempts=0,
         max_attempts=1,
-        started_at=now,
-        ended_at=now,
+        started_at=None,
+        ended_at=None,
         created_at=now,
     )
     db.add(job)
@@ -113,6 +114,10 @@ def crud(model, schema, label: str):
     def delete_item(item_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
         obj = db.get(model, item_id)
         if not obj: raise HTTPException(404, 'Not found')
+        if hasattr(obj, 'status'):
+            obj.status = Status.archived
+            log(db, f'{model.__name__} Archived', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id)
+            db.commit(); db.refresh(obj); return obj
         log(db, f'{model.__name__} Deleted', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id)
         db.delete(obj); db.commit(); return {'ok': True}
 
@@ -323,12 +328,45 @@ async def system_health(db: Session=Depends(get_db), user: User=Depends(current_
 def ceo_report(db: Session=Depends(get_db), user: User=Depends(current_user)):
     _sync_hermes_snapshot(db, user.id)
     today = datetime.combine(date.today(), datetime.min.time())
+    sent_statuses = {'sent', 'delivered', 'accepted', 'queued_by_provider'}
     return {
       'todays_leads': db.scalar(select(func.count(Lead.id)).where(Lead.created_at >= today)) or 0,
       'verified_leads': db.scalar(select(func.count(Lead.id)).where(Lead.status == LeadStatus.verified)) or 0,
-      'emails_sent': db.scalar(select(func.count(Job.id)).where(Job.task_type == 'Send Outreach', Job.status == JobStatus.completed, Job.created_at >= today)) or 0,
+      'emails_sent': db.scalar(select(func.count(OutreachEvent.event_id)).where(OutreachEvent.status.in_(sent_statuses), OutreachEvent.message_id.is_not(None), OutreachEvent.sent_at >= today, OutreachEvent.dry_run == False)) or 0,
       'replies': db.scalar(select(func.count(Lead.id)).where(Lead.status == LeadStatus.replied)) or 0,
       'meetings': db.scalar(select(func.count(Lead.id)).where(Lead.status == LeadStatus.meeting_booked)) or 0,
       'failed_jobs': db.scalar(select(func.count(Job.id)).where(Job.status == JobStatus.failed)) or 0,
       'companies': [{'id': c.id, 'name': c.name} for c in db.scalars(select(Company)).all()]
     }
+
+@router.get('/reports/daily')
+def daily_report(report_date: str|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    report = generate_daily_report(report_date)
+    return {'report': report, 'text': render_report(report)}
+
+@router.post('/reports/daily')
+def create_daily_report(data: DailyReportRequest, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    report = generate_daily_report(data.report_date)
+    artifact = write_report_artifact(report)
+    delivery = {}
+    status = 'generated'
+    if data.send_email:
+        recipient = data.recipient or 'himanshusoni3214@gmail.com'
+        subject = f"Brew It by Sash Outreach Report - {report['report_date']}"
+        delivery = send_report_artifact(recipient, subject, artifact)
+        status = 'sent' if delivery.get('status') == 'sent' else 'delivery_failed'
+    run = ReportRun(
+        company_id=data.company_id,
+        campaign_id=data.campaign_id,
+        report_date=report['report_date'],
+        timezone=report['timezone'],
+        artifact_path=str(artifact),
+        metrics=report['metrics'],
+        evidence=report['evidence'],
+        delivery_result=delivery,
+        status=status,
+    )
+    db.add(run); db.flush()
+    log(db, 'Daily Report Generated', 'ReportRun', run.id, data.company_id, user.id, {'status': status, 'artifact_path': str(artifact)})
+    db.commit(); db.refresh(run)
+    return {'report_run': run, 'report': report, 'text': render_report(report), 'delivery': delivery}

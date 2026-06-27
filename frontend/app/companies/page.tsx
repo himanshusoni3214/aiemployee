@@ -1,4 +1,5 @@
 import { serverApi } from '../../lib/serverApi';
+import CrudPage from '../../components/CrudPage';
 
 type Company = {
   id: string;
@@ -53,6 +54,17 @@ export default async function CompaniesPage() {
           </tbody>
         </table>
       </div>
+      <CrudPage title="Company Management" path="/companies" defaults={{
+        name: '',
+        logo: '',
+        website: '',
+        industry: '',
+        status: 'Active',
+        timezone: 'America/Toronto',
+        default_report_recipient: 'himanshusoni3214@gmail.com',
+        daily_email_limit: 50,
+        notes: '',
+      }} />
     </div>
   );
 }

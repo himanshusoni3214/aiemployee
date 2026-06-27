@@ -14,6 +14,7 @@ function parseValue(sample: unknown, value: string) {
 export default function CrudPage({ title, path, defaults }: { title: string; path: string; defaults: Record<string, unknown> }) {
   const [items, setItems] = useState<any[]>([]);
   const [form, setForm] = useState(defaults);
+  const [editingId, setEditingId] = useState('');
   const [error, setError] = useState('');
 
   async function load() {
@@ -27,14 +28,35 @@ export default function CrudPage({ title, path, defaults }: { title: string; pat
 
   useEffect(() => { load(); }, []);
 
-  async function create() {
+  async function save() {
     try {
-      await api(path, { method: 'POST', body: JSON.stringify(form) });
+      await api(editingId ? `${path}/${editingId}` : path, { method: editingId ? 'PUT' : 'POST', body: JSON.stringify(form) });
       setForm(defaults);
+      setEditingId('');
       await load();
     } catch (err: any) {
       setError(err.message || 'Request failed');
     }
+  }
+
+  async function archive(item: any) {
+    try {
+      if (item.status === 'Archived') {
+        await api(`${path}/${item.id}`, { method: 'PUT', body: JSON.stringify({ ...item, status: 'Active' }) });
+      } else {
+        await api(`${path}/${item.id}`, { method: 'DELETE' });
+      }
+      await load();
+    } catch (err: any) {
+      setError(err.message || 'Request failed');
+    }
+  }
+
+  function edit(item: any) {
+    const next = { ...defaults };
+    for (const key of Object.keys(defaults)) next[key] = item[key] ?? defaults[key];
+    setForm(next);
+    setEditingId(item.id);
   }
 
   return (
@@ -66,11 +88,20 @@ export default function CrudPage({ title, path, defaults }: { title: string; pat
           })}
         </div>
         {error ? <p className="mt-3 text-sm text-red-300">{error}</p> : null}
-        <button className="btn mt-4" onClick={create}>Create</button>
+        <div className="mt-4 flex flex-wrap gap-2">
+          <button className="btn" onClick={save}>{editingId ? 'Save Changes' : 'Create'}</button>
+          {editingId ? <button className="btn-secondary" onClick={() => { setEditingId(''); setForm(defaults); }}>Cancel</button> : null}
+        </div>
       </div>
       <div className="overflow-hidden border border-zinc-800">
         {items.map((item) => (
-          <pre className="border-b border-zinc-800 bg-zinc-950/60 p-4 text-xs text-zinc-300 last:border-b-0 overflow-auto" key={item.id}>{JSON.stringify(item, null, 2)}</pre>
+          <div className="border-b border-zinc-800 bg-zinc-950/60 p-4 last:border-b-0" key={item.id}>
+            <div className="mb-3 flex flex-wrap gap-2">
+              <button className="btn-secondary text-xs" type="button" onClick={() => edit(item)}>Edit</button>
+              <button className="btn-secondary text-xs" type="button" onClick={() => archive(item)}>{item.status === 'Archived' ? 'Restore' : 'Archive'}</button>
+            </div>
+            <pre className="overflow-auto text-xs text-zinc-300">{JSON.stringify(item, null, 2)}</pre>
+          </div>
         ))}
         {!items.length ? <div className="p-5 text-sm text-zinc-400">No records</div> : null}
       </div>
