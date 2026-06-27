@@ -20,6 +20,8 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("data-voryx-crud-edit", source)
         self.assertIn("data-voryx-crud-archive", source)
         self.assertIn("type=\"button\" data-voryx-crud-save", source)
+        self.assertIn("data-voryx-action-path={`${path}/${item.id}/dry-run`}", source)
+        self.assertIn("data-voryx-action-path={`${path}/${item.id}/test-run`}", source)
 
     def test_action_runtime_prevents_navigation_and_calls_backend_for_crud(self):
         source = read_frontend("public/voryx-action-runtime.js")
