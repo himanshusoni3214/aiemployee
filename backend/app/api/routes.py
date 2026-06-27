@@ -13,7 +13,7 @@ from app.models.entities import *
 from app.schemas.common import *
 from app.services.audit import log
 from app.services.connectors import get_connector
-from app.services.daily_report import generate_daily_report, render_report, send_report_artifact, write_report_artifact
+from app.services.daily_report import generate_daily_report, render_report, write_report_artifact
 from app.services.hermes_control import HermesControlError, HermesControlService
 from app.services.hermes_live import HermesLiveMonitor
 from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as _sync_hermes_snapshot
@@ -352,9 +352,19 @@ def create_daily_report(data: DailyReportRequest, db: Session=Depends(get_db), u
     status = 'generated'
     if data.send_email:
         recipient = data.recipient or 'himanshusoni3214@gmail.com'
-        subject = f"Brew It by Sash Outreach Report - {report['report_date']}"
-        delivery = send_report_artifact(recipient, subject, artifact)
-        status = 'sent' if delivery.get('status') == 'sent' else 'delivery_failed'
+        try:
+            hermes_control = HermesControlService().control_matching(['end', 'day', 'report'], 'run')
+            delivery = {
+                'status': 'queued_in_hermes',
+                'recipient': recipient,
+                'artifact_path': str(artifact),
+                'hermes_control': hermes_control,
+                'note': 'Hermes End Day Report job was queued. Delivery success is confirmed by Hermes logs/report output, not by the dashboard backend.',
+            }
+            status = 'delivery_queued'
+        except HermesControlError as exc:
+            delivery = {'status': 'failed', 'recipient': recipient, 'artifact_path': str(artifact), 'error': str(exc)}
+            status = 'delivery_failed'
     run = ReportRun(
         company_id=data.company_id,
         campaign_id=data.campaign_id,

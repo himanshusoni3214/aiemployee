@@ -30,7 +30,30 @@ class HermesControlService:
         job = self._find_job(raw, hermes_job_id)
         if not job:
             raise HermesControlError(f"Hermes job not found: {hermes_job_id}")
+        return self._control_job(raw, job, action)
 
+    def control_matching(self, required_terms: list[str], action: str) -> dict[str, Any]:
+        action = action.lower()
+        if action not in {"pause", "resume", "run"}:
+            raise HermesControlError(f"Unsupported Hermes action: {action}")
+        terms = [term.lower() for term in required_terms if term.strip()]
+        if not terms:
+            raise HermesControlError("No Hermes job match terms provided")
+
+        raw = self._read_jobs()
+        matches = []
+        for job in self._jobs(raw):
+            name = str(job.get("name") or job.get("id") or "").lower()
+            if all(term in name for term in terms):
+                matches.append(job)
+        if not matches:
+            raise HermesControlError(f"Hermes job not found for terms: {', '.join(terms)}")
+        if len(matches) > 1:
+            names = ", ".join(str(job.get("name") or job.get("id")) for job in matches[:5])
+            raise HermesControlError(f"Hermes job match was ambiguous for terms {', '.join(terms)}: {names}")
+        return self._control_job(raw, matches[0], action)
+
+    def _control_job(self, raw: Any, job: dict[str, Any], action: str) -> dict[str, Any]:
         before = {
             "enabled": job.get("enabled"),
             "state": job.get("state"),
@@ -49,13 +72,14 @@ class HermesControlService:
             "last_delivery_error": job.get("last_delivery_error"),
         }
         if after == before:
-            raise HermesControlError(f"Hermes action produced no state change: {action} for {hermes_job_id}")
+            raise HermesControlError(f"Hermes action produced no state change: {action} for {job.get('id') or job.get('name')}")
         self._write_jobs(raw)
         return {
             "status": "ok",
             "mode": "jobs_json",
             "action": action,
-            "hermes_job_id": hermes_job_id,
+            "hermes_job_id": str(job.get("id") or ""),
+            "hermes_job_name": str(job.get("name") or ""),
             "before": redact(json.dumps(before, default=str)),
             "after": after,
         }
