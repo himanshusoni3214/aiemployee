@@ -54,7 +54,6 @@ async function assertBrewSelected(page: Page, route: RouteConfig) {
   await expect(page).toHaveURL(new RegExp(`${route.path.replace('/', '\\/')}\\?[^#]*company_id=${BREW_COMPANY_ID}`));
   await expect(page.getByRole('heading', { name: route.heading, exact: true })).toBeVisible();
   await expect(page.getByText(new RegExp(`Companies\\s*>\\s*${escapeRegex(BREW_COMPANY_NAME)}`))).toBeVisible();
-  await expect(page.getByText(BREW_COMPANY_NAME, { exact: false })).toBeVisible();
   await expect(page.getByLabel('Select company', { exact: true })).toHaveValue(BREW_COMPANY_ID);
 }
 
@@ -130,8 +129,6 @@ async function runRouteFlow(page: Page, route: RouteConfig): Promise<RouteResult
     };
   }
 }
-
-test.describe.configure({ mode: 'serial' });
 
 test('server-side production baseline matches Brew It By Sash state', async () => {
   await runServerChecks('baseline');
