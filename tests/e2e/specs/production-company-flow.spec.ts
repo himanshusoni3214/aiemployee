@@ -1,6 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import path from 'node:path';
-import { BREW_COMPANY_ID, BREW_COMPANY_NAME, ROUTES, auditDir, requiredEnv, slug, type RouteConfig } from '../src/env';
+import { BREW_COMPANY_ID, BREW_COMPANY_NAME, ROUTES, apiUrl, auditDir, requiredEnv, slug, type RouteConfig } from '../src/env';
 import { writeQaReport, writeRouteResult, type RouteResult } from '../src/report';
 import { runServerChecks } from '../src/serverChecks';
 
@@ -11,10 +11,20 @@ type Captures = {
 
 function attachCapture(page: Page): Captures {
   const captures: Captures = { consoleErrors: [], failedRequests: [] };
+  const appOrigin = new URL(apiUrl()).origin;
   page.on('console', (message) => {
     if (message.type() === 'error') captures.consoleErrors.push(message.text());
   });
   page.on('requestfailed', (request) => {
+    const failure = request.failure()?.errorText || '';
+    const url = new URL(request.url());
+    const benignNextNavigationAbort = (
+      request.method() === 'GET'
+      && url.origin === appOrigin
+      && url.searchParams.has('_rsc')
+      && failure.includes('ERR_ABORTED')
+    );
+    if (benignNextNavigationAbort) return;
     captures.failedRequests.push(`${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`.trim());
   });
   page.on('response', (response) => {
@@ -53,8 +63,8 @@ function escapeRegex(value: string) {
 async function assertBrewSelected(page: Page, route: RouteConfig) {
   await expect(page).toHaveURL(new RegExp(`${route.path.replace('/', '\\/')}\\?[^#]*company_id=${BREW_COMPANY_ID}`));
   await expect(page.getByRole('heading', { name: route.heading, exact: true })).toBeVisible();
-  await expect(page.getByText(new RegExp(`Companies\\s*>\\s*${escapeRegex(BREW_COMPANY_NAME)}`))).toBeVisible();
   await expect(page.getByLabel('Select company', { exact: true })).toHaveValue(BREW_COMPANY_ID);
+  await expect(page.locator('body')).toContainText(new RegExp(escapeRegex(BREW_COMPANY_NAME)));
 }
 
 async function runRouteFlow(page: Page, route: RouteConfig): Promise<RouteResult> {

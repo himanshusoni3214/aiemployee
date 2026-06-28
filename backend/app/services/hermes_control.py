@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.services.hermes_live import redact
+from app.services.internal_mail_queue import PROCESSOR_JOB_ID, PROCESSOR_JOB_NAME
 
 
 class HermesControlError(RuntimeError):
@@ -68,6 +69,7 @@ class HermesControlService:
             "schedule_display": job.get("schedule_display"),
             "next_run_at": job.get("next_run_at"),
         }
+
         schedule = {**schedule, "expr": cron, "timezone": timezone_name}
         job["schedule"] = schedule
         job["schedule_display"] = cron
@@ -89,6 +91,63 @@ class HermesControlService:
             "after": after,
             "backup_path": self.last_backup_path,
         }
+
+    def ensure_internal_mail_processor_job(self) -> dict[str, Any]:
+        raw = self._read_jobs()
+        job = self._find_job(raw, PROCESSOR_JOB_ID)
+        command = "python3 /opt/data/home/voryx_mail_queue/process_internal_mail_queue.py"
+        desired = {
+            "id": PROCESSOR_JOB_ID,
+            "name": PROCESSOR_JOB_NAME,
+            "enabled": True,
+            "state": "scheduled",
+            "schedule": {"expr": "*/1 * * * *", "timezone": "America/Toronto"},
+            "schedule_display": "*/1 * * * *",
+            "command": command,
+            "working_directory": "/opt/data/home/voryx_mail_queue",
+            "description": "Processes only Voryx internal daily-report mail queue items for the approved internal recipient.",
+            "source": "voryx_ops",
+            "safety": {
+                "kind": "internal_report_mail_only",
+                "allowed_recipient": "himanshusoni3214@gmail.com",
+                "prospect_outreach": False,
+            },
+        }
+        if job:
+            before = dict(job)
+            changed = False
+            for key, value in desired.items():
+                if job.get(key) != value:
+                    job[key] = value
+                    changed = True
+            if changed:
+                self._write_jobs(raw)
+            return {
+                "status": "ok",
+                "mode": "jobs_json",
+                "action": "ensure_internal_mail_processor",
+                "created": False,
+                "updated": changed,
+                "hermes_job_id": PROCESSOR_JOB_ID,
+                "hermes_job_name": PROCESSOR_JOB_NAME,
+                "before": redact(json.dumps(before, default=str)) if changed else None,
+            }
+        self._append_job(raw, desired)
+        self._write_jobs(raw)
+        return {
+            "status": "ok",
+            "mode": "jobs_json",
+            "action": "ensure_internal_mail_processor",
+            "created": True,
+            "updated": False,
+            "hermes_job_id": PROCESSOR_JOB_ID,
+            "hermes_job_name": PROCESSOR_JOB_NAME,
+        }
+
+    def trigger_internal_mail_processor(self) -> dict[str, Any]:
+        ensured = self.ensure_internal_mail_processor_job()
+        control = self.control(PROCESSOR_JOB_ID, "run")
+        return {"status": "ok", "ensure": ensured, "control": control}
 
     def _control_job(self, raw: Any, job: dict[str, Any], action: str) -> dict[str, Any]:
         before = {
@@ -185,6 +244,18 @@ class HermesControlService:
                     return [item for item in raw[key] if isinstance(item, dict)]
             return [raw]
         return []
+
+    def _append_job(self, raw: Any, job: dict[str, Any]) -> None:
+        if isinstance(raw, list):
+            raw.append(job)
+            return
+        if isinstance(raw, dict):
+            for key in ("jobs", "items"):
+                if isinstance(raw.get(key), list):
+                    raw[key].append(job)
+                    return
+            raise HermesControlError("Hermes jobs file is an object without a jobs/items list; refusing to append a processor job")
+        raise HermesControlError("Unsupported Hermes jobs file format")
 
     def _apply(self, job: dict[str, Any], action: str) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")

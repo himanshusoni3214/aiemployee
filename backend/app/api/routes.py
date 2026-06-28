@@ -13,11 +13,12 @@ from app.models.entities import *
 from app.schemas.common import *
 from app.services.audit import log
 from app.services.connectors import get_connector
-from app.services.daily_report import generate_daily_report, render_report, send_report_artifact, write_report_artifact
+from app.services.daily_report import generate_daily_report, render_report, write_report_artifact
 from app.services.hermes_control import HermesControlError, HermesControlService
 from app.services.hermes_live import HermesLiveMonitor
 from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as _sync_hermes_snapshot
-from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, classify_delivery_result, validate_report_recipient
+from app.services.internal_mail_queue import enqueue_daily_report_delivery, ingest_internal_mail_receipts
+from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, validate_report_recipient
 
 router = APIRouter()
 oauth2 = OAuth2PasswordBearer(tokenUrl='/api/auth/login', auto_error=False)
@@ -245,6 +246,9 @@ def crud(model, schema, label: str):
             obj.paused_reason = f'Archived by {user.email}'
             log(db, 'AIEmployee Archived', 'AIEmployee', obj.id, getattr(obj, 'company_id', None), user.id)
             db.commit(); db.refresh(obj); return obj
+        if model is Lead:
+            log(db, 'Lead Deleted', 'Lead', obj.id, getattr(obj, 'company_id', None), user.id)
+            db.delete(obj); db.commit(); return {'ok': True}
         if hasattr(obj, 'status'):
             obj.status = Status.archived
             log(db, f'{model.__name__} Archived', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id)
@@ -584,6 +588,7 @@ def daily_report(report_date: str|None=None, db: Session=Depends(get_db), user: 
 
 @router.post('/reports/daily')
 def create_daily_report(data: DailyReportRequest, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    ingest_internal_mail_receipts(db)
     report = generate_daily_report(data.report_date)
     artifact = write_report_artifact(report)
     delivery = {}
@@ -596,39 +601,59 @@ def create_daily_report(data: DailyReportRequest, db: Session=Depends(get_db), u
             raise HTTPException(400, str(exc)) from exc
         try:
             subject = f"Brew It by Sash Outreach Report - {report['report_date']}"
-            delivery = send_report_artifact(recipient, subject, artifact, report_only_acceptance=True)
+            delivery_job, queued = enqueue_daily_report_delivery(
+                db,
+                recipient=recipient,
+                subject=subject,
+                artifact_path=artifact,
+                report_date=report['report_date'],
+                company_id=data.company_id,
+                campaign_id=data.campaign_id,
+            )
+            delivery = {
+                'status': 'queued',
+                'delivery_status': 'queued',
+                'recipient': recipient,
+                'subject': subject,
+                'artifact_path': str(artifact),
+                'request_id': queued['request']['request_id'],
+                'request_path': queued['request_path'],
+                'processor_path': queued['processor_path'],
+                'job_id': delivery_job.id,
+                'message': 'Daily report queued for Hermes internal mail processor; completion requires receipt evidence.',
+            }
+            try:
+                delivery['hermes_control'] = HermesControlService().trigger_internal_mail_processor()
+            except HermesControlError as exc:
+                delivery['hermes_control_error'] = str(exc)
+                _append_log_once(delivery_job, f'Hermes processor trigger failed: {exc}')
         except Exception as exc:
             delivery = {'status': 'failed', 'recipient': recipient, 'artifact_path': str(artifact), 'error': str(exc)}
-        decision = classify_delivery_result('Daily Report', {}, delivery, expected_recipient=recipient)
-        now = datetime.utcnow()
-        delivery_job = Job(
-            employee_id=None,
-            campaign_id=data.campaign_id,
-            connector='hermes',
-            task_type='Daily Report',
-            status=decision.status,
-            payload={'source': 'dashboard', 'kind': 'daily_report', 'report_only_acceptance': True, 'report_date': report['report_date']},
-            result={'delivery': delivery, 'report_date': report['report_date']},
-            logs=[f"Daily report delivery {decision.delivery_status}: {decision.verification_reason}"],
-            error_message=decision.verification_reason if decision.status == JobStatus.failed else None,
-            provider_message_id=decision.provider_message_id,
-            recipient_email=decision.recipient_email,
-            sent_at=decision.sent_at,
-            delivery_status=decision.delivery_status,
-            evidence_type=decision.evidence_type,
-            source_output_path=str(artifact),
-            verification_reason=decision.verification_reason,
-            external_execution_key=f"daily-report:{report['report_date']}:{recipient}:{decision.provider_message_id or now.isoformat()}",
-            attempts=1,
-            max_attempts=1,
-            started_at=now,
-            ended_at=now,
-            created_at=now,
-        )
-        db.add(delivery_job)
-        db.flush()
-        delivery['job_id'] = delivery_job.id
-        status = 'delivered' if decision.status == JobStatus.completed else 'delivery_failed'
+            delivery_job = Job(
+                employee_id=None,
+                campaign_id=data.campaign_id,
+                connector='hermes',
+                task_type='Daily Report',
+                status=JobStatus.failed,
+                payload={'source': 'internal_mail_queue', 'kind': 'daily_report', 'report_only_acceptance': True, 'report_date': report['report_date']},
+                result={'delivery': delivery, 'report_date': report['report_date']},
+                logs=[f"Daily report queue failed: {exc}"],
+                error_message=str(exc),
+                recipient_email=recipient,
+                delivery_status='failed',
+                evidence_type='mail_queue_request',
+                source_output_path=str(artifact),
+                verification_reason=str(exc),
+                attempts=1,
+                max_attempts=1,
+                started_at=datetime.utcnow(),
+                ended_at=datetime.utcnow(),
+                created_at=datetime.utcnow(),
+            )
+            db.add(delivery_job)
+            db.flush()
+            delivery['job_id'] = delivery_job.id
+        status = 'delivery_queued' if delivery_job and delivery_job.status == JobStatus.queued else 'delivery_failed'
     run = ReportRun(
         company_id=data.company_id,
         campaign_id=data.campaign_id,

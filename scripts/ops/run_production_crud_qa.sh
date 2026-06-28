@@ -9,9 +9,10 @@ COMPOSE=(docker compose --env-file "$ENV_FILE" -f "$COMPOSE_FILE")
 cd "$ROOT_DIR" || exit 1
 
 TS="$(TZ=America/Toronto date +%Y%m%d-%H%M%S)"
-QA_AUDIT_REL_DIR="${QA_AUDIT_REL_DIR:-audits/production-qa/$TS}"
+QA_AUDIT_REL_DIR="${QA_AUDIT_REL_DIR:-audits/final-production-qa/$TS}"
 QA_AUDIT_DIR="/work/$QA_AUDIT_REL_DIR"
 HOST_AUDIT_DIR="$ROOT_DIR/$QA_AUDIT_REL_DIR"
+CRUD_QA_PREFIX="${CRUD_QA_PREFIX:-QA-E2E-$TS}"
 mkdir -p "$HOST_AUDIT_DIR"
 
 {
@@ -19,6 +20,7 @@ mkdir -p "$HOST_AUDIT_DIR"
   echo "root=$ROOT_DIR"
   echo "compose_file=$COMPOSE_FILE"
   echo "env_file=$ENV_FILE"
+  echo "crud_qa_prefix=$CRUD_QA_PREFIX"
   echo "git_head=$(git rev-parse HEAD 2>/dev/null || true)"
   echo "git_status<<EOF"
   git status --short 2>/dev/null || true
@@ -51,7 +53,7 @@ for attempt in $(seq 1 60); do
 done
 
 if [[ "$READY" -ne 1 ]]; then
-  echo "Production QA FAILED: backend did not become ready at $HEALTH_URL"
+  echo "Production CRUD QA FAILED: backend did not become ready at $HEALTH_URL"
   echo "Audit artifacts: $HOST_AUDIT_DIR"
   exit 1
 fi
@@ -59,7 +61,8 @@ fi
 set +e
 "${COMPOSE[@]}" run --rm \
   -e "QA_AUDIT_DIR=$QA_AUDIT_DIR" \
-  qa npx playwright test --config=playwright.config.ts specs/production-company-flow.spec.ts
+  -e "CRUD_QA_PREFIX=$CRUD_QA_PREFIX" \
+  qa npx playwright test --config=playwright.config.ts specs/production-crud-flow.spec.ts
 STATUS=$?
 set -e
 
@@ -67,13 +70,12 @@ set -e
 "${COMPOSE[@]}" logs --tail=300 backend frontend worker scheduler > "$HOST_AUDIT_DIR/docker_logs_tail.txt" 2>&1 || true
 
 if [[ "$STATUS" -eq 0 ]]; then
-  echo "Production QA PASSED"
+  echo "Production CRUD QA PASSED"
 else
-  echo "Production QA FAILED"
+  echo "Production CRUD QA FAILED"
 fi
 echo "Audit artifacts: $HOST_AUDIT_DIR"
-echo "Markdown report: $HOST_AUDIT_DIR/QA_REPORT.md"
-echo "HTML report: $HOST_AUDIT_DIR/QA_REPORT.html"
+echo "CRUD matrix: $HOST_AUDIT_DIR/CRUD_MATRIX.md"
 echo "Playwright report: $HOST_AUDIT_DIR/playwright-report/index.html"
 
 exit "$STATUS"

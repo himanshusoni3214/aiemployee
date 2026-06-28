@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.core.db import SessionLocal
 from app.services.hermes_import import HermesImportService
+from app.services.internal_mail_queue import ingest_internal_mail_receipts
 
 HERMES_SYNC_TTL_SECONDS = 10
 
@@ -31,6 +32,8 @@ def sync_hermes_snapshot(db: Session, user_id: str | None = None, force: bool = 
             if not force and _sync_last_result and now - _sync_last_at < HERMES_SYNC_TTL_SECONDS:
                 return _sync_last_result
             _sync_last_result = HermesImportService().sync(db, user_id=user_id)
+            _sync_last_result["internal_mail_receipts"] = ingest_internal_mail_receipts(db)
+            db.commit()
             _sync_last_at = time.monotonic()
             _sync_last_wall_at = datetime.now(timezone.utc)
             return _sync_last_result
