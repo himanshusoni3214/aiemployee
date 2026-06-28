@@ -8,7 +8,7 @@ def uid(): return str(uuid.uuid4())
 class Role(str, enum.Enum): admin='Admin'; manager='Manager'; viewer='Viewer'
 class Status(str, enum.Enum): active='Active'; inactive='Inactive'; archived='Archived'
 class EmployeeStatus(str, enum.Enum): running='Running'; paused='Paused'; stopped='Stopped'; error='Error'; archived='Archived'
-class JobStatus(str, enum.Enum): queued='Queued'; running='Running'; completed='Completed'; failed='Failed'; blocked='Blocked'; cancelled='Cancelled'; skipped='Skipped'
+class JobStatus(str, enum.Enum): queued='Queued'; running='Running'; completed='Completed'; failed='Failed'; blocked='Blocked'; cancelled='Cancelled'; skipped='Skipped'; imported='Imported'; synced='Synced'
 class LeadStatus(str, enum.Enum): generated='Generated'; verified='Verified'; contacted='Contacted'; replied='Replied'; interested='Interested'; meeting_booked='Meeting Booked'; closed='Closed'
 
 class User(Base):
@@ -124,6 +124,16 @@ class Job(Base):
     duration_seconds: Mapped[int|None]=mapped_column(Integer, nullable=True)
     started_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
     ended_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    provider_message_id: Mapped[str|None]=mapped_column(String, nullable=True, index=True)
+    recipient_email: Mapped[str|None]=mapped_column(String, nullable=True, index=True)
+    sent_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True, index=True)
+    delivery_status: Mapped[str|None]=mapped_column(String, nullable=True, index=True)
+    evidence_type: Mapped[str|None]=mapped_column(String, nullable=True, index=True)
+    source_output_path: Mapped[str|None]=mapped_column(String, nullable=True)
+    verification_reason: Mapped[str|None]=mapped_column(Text, nullable=True)
+    hermes_job_id: Mapped[str|None]=mapped_column(String, nullable=True, index=True)
+    hermes_run_timestamp: Mapped[datetime|None]=mapped_column(DateTime, nullable=True, index=True)
+    external_execution_key: Mapped[str|None]=mapped_column(String, nullable=True, index=True)
     created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
 
 class ActivityLog(Base):

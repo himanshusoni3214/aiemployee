@@ -20,12 +20,25 @@ type Job = {
   max_attempts?: number;
   duration_seconds?: number | null;
   created_at?: string;
+  provider_message_id?: string | null;
+  recipient_email?: string | null;
+  sent_at?: string | null;
+  delivery_status?: string | null;
+  evidence_type?: string | null;
+  source_output_path?: string | null;
+  verification_reason?: string | null;
 };
 
-const statuses = ['Queued', 'Running', 'Completed', 'Failed', 'Blocked', 'Cancelled', 'Skipped'];
+const statuses = ['Queued', 'Running', 'Completed', 'Failed', 'Blocked', 'Cancelled', 'Skipped', 'Imported', 'Synced'];
 
 function lastLog(job: Job) {
-  return job.error_message || job.logs?.[job.logs.length - 1] || '-';
+  return job.verification_reason || job.error_message || job.logs?.[job.logs.length - 1] || '-';
+}
+
+function shortMessageId(value?: string | null) {
+  if (!value) return '-';
+  if (value.length <= 18) return value;
+  return `${value.slice(0, 8)}...${value.slice(-6)}`;
 }
 
 export default async function JobsPage({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
@@ -59,21 +72,23 @@ export default async function JobsPage({ searchParams }: { searchParams?: Promis
       </div>
       <div className="table-wrap">
         <table className="ops-table">
-          <thead><tr><th>Task</th><th>Status</th><th>Employee</th><th>Campaign</th><th>Connector</th><th>Attempts</th><th>Created</th><th>Log</th></tr></thead>
+          <thead><tr><th>Task</th><th>Execution</th><th>Delivery</th><th>Recipient</th><th>Provider ID</th><th>Evidence</th><th>Employee</th><th>Campaign</th><th>Created</th><th>Verification</th></tr></thead>
           <tbody>
             {jobs.map((job) => (
               <tr key={job.id}>
                 <td className="font-medium text-stone-100">{job.task_type}</td>
                 <td>{job.status}</td>
+                <td>{job.delivery_status || '-'}</td>
+                <td>{job.recipient_email || '-'}</td>
+                <td title={job.provider_message_id || ''}>{shortMessageId(job.provider_message_id)}</td>
+                <td title={job.source_output_path || ''}>{job.evidence_type || '-'}</td>
                 <td>{job.employee_id ? employeeName.get(job.employee_id) || job.employee_id : '-'}</td>
                 <td>{job.campaign_id ? campaignName.get(job.campaign_id) || job.campaign_id : '-'}</td>
-                <td>{job.connector}</td>
-                <td>{job.attempts || 0}/{job.max_attempts || 1}</td>
                 <td><LocalTime value={job.created_at} /></td>
                 <td className="max-w-md truncate text-zinc-400">{lastLog(job)}</td>
               </tr>
             ))}
-            {!jobs.length ? <tr><td colSpan={8} className="text-zinc-400">No jobs imported from Hermes yet</td></tr> : null}
+            {!jobs.length ? <tr><td colSpan={10} className="text-zinc-400">No jobs imported from Hermes yet</td></tr> : null}
           </tbody>
         </table>
       </div>

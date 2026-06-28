@@ -2,6 +2,7 @@
 import argparse
 import csv
 import json
+import re
 import subprocess
 from datetime import date, datetime, time, timezone
 from pathlib import Path
@@ -104,6 +105,19 @@ def message_id_from(row):
     return ""
 
 
+def message_id_from_output(output):
+    patterns = (
+        r"(?:provider_message_id|message_id|smtp_id|receipt_id)\s*[:=]\s*([<]?[^\s,;]+[>]?)",
+        r"Message-ID:\s*([<]?[^\s,;]+[>]?)",
+        r"EMAIL_SENT[^\n]*\s([<][^\s,;]+[>])",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, output or "", flags=re.I)
+        if match:
+            return match.group(1).strip()
+    return ""
+
+
 def timestamp_from(row, default_tz):
     for key in ("sent_at", "attempted_at", "timestamp", "created_at", "date"):
         parsed = parse_dt(row.get(key), default_tz)
@@ -177,11 +191,13 @@ def generate(data_root, report_date=None):
 
     verified_path = leads_dir / "leads_verified.csv"
     verified_rows, verified_headers = read_csv(verified_path)
+    verified_path_emails = set()
     for row in verified_rows:
         email = email_from(row)
         if email and "@" in email and "inferred" not in email:
             verified_available.add(email)
-    report_evidence.append(evidence(verified_path, len(verified_rows), len(verified_available), "unique valid public email rows", [c for c in ("Public Email", "created_at") if c not in verified_headers], window))
+            verified_path_emails.add(email)
+    report_evidence.append(evidence(verified_path, len(verified_rows), len(verified_path_emails), "unique valid public email rows", [c for c in ("Public Email", "created_at") if c not in verified_headers], window))
 
     event_rows = []
     for path in (root / "outreach_events.jsonl", leads_dir / "outreach_events.jsonl"):
@@ -300,9 +316,10 @@ def main():
         completed = subprocess.run([str(sender), args.recipient, subject, str(output)], text=True, capture_output=True, check=False)
         combined = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
         print(combined)
-        if completed.returncode != 0 or "EMAIL_SENT" not in combined:
-            raise SystemExit(f"REPORT_EMAIL_FAILED exit_code={completed.returncode}")
-        print(f"REPORT_EMAIL_DELIVERED recipient={args.recipient} subject={subject}")
+        message_id = message_id_from_output(combined)
+        if completed.returncode != 0 or "EMAIL_SENT" not in combined or not message_id:
+            raise SystemExit(f"REPORT_EMAIL_FAILED exit_code={completed.returncode} missing_provider_message_id={not bool(message_id)}")
+        print(f"REPORT_EMAIL_DELIVERED recipient={args.recipient} subject={subject} provider_message_id={message_id}")
 
 
 if __name__ == "__main__":

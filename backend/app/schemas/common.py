@@ -60,3 +60,4 @@ class DailyReportRequest(BaseModel):
     campaign_id: str|None=None
     recipient: str|None=None
     send_email: bool=False
+    report_only_acceptance: bool=False

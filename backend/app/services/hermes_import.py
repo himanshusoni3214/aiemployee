@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.models.entities import AIEmployee, Campaign, Company, EmployeeStatus, Job, JobStatus, OutreachEvent, Schedule, Status
 from app.services.audit import log
 from app.services.hermes_live import HermesLiveMonitor, redact
+from app.services.job_evidence import classify_delivery_result
 
 BREW_COMPANY_NAME = "Brew It By Sash"
 
@@ -117,11 +118,13 @@ def _job_status(job: dict[str, Any]) -> JobStatus:
     state = (job.get("state") or "").lower()
     if state == "running":
         return JobStatus.running
-    if last_status in {"ok", "completed", "success"}:
-        return JobStatus.completed
     if last_status in {"error", "failed"}:
         return JobStatus.failed
-    return JobStatus.queued if job.get("enabled") else JobStatus.completed
+    if not job.get("enabled") or state in {"paused", "disabled"}:
+        return JobStatus.blocked
+    if last_status or job.get("last_run_at"):
+        return JobStatus.synced
+    return JobStatus.queued
 
 
 def _campaign_status(job: dict[str, Any]) -> Status:
@@ -279,6 +282,8 @@ class HermesImportService:
         status = _job_status(hermes_job)
         last_run = _parse_dt(hermes_job.get("last_run_at")) or _parse_dt(hermes_job.get("created_at")) or datetime.utcnow()
         error = hermes_job.get("last_error") or hermes_job.get("last_delivery_error")
+        external_key = f"hermes:schedule:{hermes_id}:{hermes_job.get('last_run_at') or 'never'}"
+        verification_reason = error or "Hermes schedule snapshot only; no durable delivery evidence"
         fields = {
             "employee_id": employee.id,
             "campaign_id": campaign.id,
@@ -295,10 +300,16 @@ class HermesImportService:
                 f"last_run_at={hermes_job.get('last_run_at') or 'never'}",
             ],
             "error_message": error if status == JobStatus.failed else None,
+            "delivery_status": "failed" if status == JobStatus.failed else "synced",
+            "evidence_type": "hermes_schedule_state",
+            "verification_reason": verification_reason,
+            "hermes_job_id": hermes_id,
+            "hermes_run_timestamp": _parse_dt(hermes_job.get("last_run_at")),
+            "external_execution_key": external_key,
             "attempts": 1 if hermes_job.get("last_run_at") else 0,
             "max_attempts": 1,
             "started_at": last_run if hermes_job.get("last_run_at") else None,
-            "ended_at": last_run if status in {JobStatus.completed, JobStatus.failed} else None,
+            "ended_at": last_run if status in {JobStatus.synced, JobStatus.failed, JobStatus.blocked} else None,
             "created_at": last_run,
         }
         if job:
@@ -343,16 +354,24 @@ class HermesImportService:
             content = path.read_text(encoding="utf-8", errors="replace")[:20000]
             error_line = self._error_line(content)
             created_at = _file_dt(path) or datetime.fromtimestamp(path.stat().st_mtime)
+            external_key = f"hermes:output:{hermes_id}:{created_at.isoformat()}:{relative}"
             fields = {
                 "employee_id": employee.id,
                 "campaign_id": campaign.id,
                 "connector": "hermes",
                 "task_type": _task_type(hermes_job.get("name") or hermes_id),
-                "status": JobStatus.failed if error_line else JobStatus.completed,
+                "status": JobStatus.failed if error_line else JobStatus.imported,
                 "payload": {"source": "hermes", "kind": "output_file", "hermes_job_id": hermes_id, "output_path": relative},
                 "result": {"output_path": relative, "size_bytes": path.stat().st_size},
                 "logs": [f"Imported Hermes output {relative}"],
                 "error_message": error_line,
+                "delivery_status": "failed" if error_line else "imported",
+                "evidence_type": "output_file",
+                "source_output_path": relative,
+                "verification_reason": error_line or "imported output file is not delivery evidence",
+                "hermes_job_id": hermes_id,
+                "hermes_run_timestamp": created_at,
+                "external_execution_key": external_key,
                 "attempts": 1,
                 "max_attempts": 1,
                 "started_at": created_at,
@@ -386,16 +405,27 @@ class HermesImportService:
                 status = (row.get("status") or "").lower()
                 created_at = _parse_dt(row.get("timestamp")) or datetime.utcnow()
                 failed = status in {"failed", "error", "bounced"}
+                decision = classify_delivery_result("Send Outreach", {}, row, imported=True)
+                external_key = f"hermes:outreach_log:{key}"
                 fields = {
                     "employee_id": employee.id,
                     "campaign_id": campaign.id,
                     "connector": "hermes",
                     "task_type": "Send Outreach",
-                    "status": JobStatus.failed if failed else JobStatus.completed,
+                    "status": decision.status,
                     "payload": {"source": "hermes", "kind": "outreach_log", "status": row.get("status"), "recipient": redact(row.get("recipient") or row.get("email") or "")},
                     "result": {"business": redact(row.get("business") or ""), "note": redact(row.get("note") or "")},
                     "logs": [f"Imported Hermes outreach row {row.get('timestamp') or ''}".strip()],
                     "error_message": redact(row.get("note") or "") if failed else None,
+                    "provider_message_id": decision.provider_message_id,
+                    "recipient_email": decision.recipient_email,
+                    "sent_at": decision.sent_at,
+                    "delivery_status": decision.delivery_status,
+                    "evidence_type": decision.evidence_type,
+                    "verification_reason": decision.verification_reason,
+                    "hermes_job_id": employee.hermes_job_id,
+                    "hermes_run_timestamp": created_at,
+                    "external_execution_key": external_key,
                     "attempts": 1,
                     "max_attempts": 1,
                     "started_at": created_at,
@@ -434,7 +464,7 @@ class HermesImportService:
                     "campaign_id": row.get("campaign_id"),
                     "employee_id": row.get("employee_id"),
                     "lead_id": row.get("lead_id"),
-                    "recipient": redact(row.get("recipient") or ""),
+                    "recipient": row.get("recipient") or "",
                     "business": row.get("business"),
                     "subject": row.get("subject"),
                     "attempted_at": _parse_dt(row.get("attempted_at")),
@@ -455,6 +485,45 @@ class HermesImportService:
                     updated += int(_assign(event, **fields))
                 else:
                     db.add(OutreachEvent(event_id=event_id, **fields))
+                    created += 1
+                employee = db.get(AIEmployee, fields["employee_id"]) if fields.get("employee_id") else None
+                campaign = db.get(Campaign, fields["campaign_id"]) if fields.get("campaign_id") else None
+                if not employee or not campaign:
+                    employee, campaign, _ = self._outreach_workflow(db, company, {})
+                decision = classify_delivery_result("Send Outreach", {}, row, imported=True)
+                created_at = fields["sent_at"] or fields["attempted_at"] or datetime.utcnow()
+                job_id = f"hermes-outreach-event-{_hash(event_id)}"
+                external_key = f"hermes:outreach_event:{event_id}"
+                job_fields = {
+                    "employee_id": employee.id,
+                    "campaign_id": campaign.id,
+                    "connector": "hermes",
+                    "task_type": "Send Outreach",
+                    "status": decision.status,
+                    "payload": {"source": "hermes", "kind": "outreach_event", "event_id": event_id, "recipient": redact(row.get("recipient") or "")},
+                    "result": {"event_id": event_id, "status": row.get("status"), "provider": row.get("provider")},
+                    "logs": [f"Imported Hermes outreach event {event_id}"],
+                    "error_message": decision.verification_reason if decision.status == JobStatus.failed else None,
+                    "provider_message_id": decision.provider_message_id,
+                    "recipient_email": decision.recipient_email,
+                    "sent_at": decision.sent_at,
+                    "delivery_status": decision.delivery_status,
+                    "evidence_type": decision.evidence_type,
+                    "verification_reason": decision.verification_reason,
+                    "hermes_job_id": employee.hermes_job_id,
+                    "hermes_run_timestamp": created_at,
+                    "external_execution_key": external_key,
+                    "attempts": 1,
+                    "max_attempts": 1,
+                    "started_at": fields["attempted_at"] or created_at,
+                    "ended_at": fields["sent_at"] or created_at,
+                    "created_at": created_at,
+                }
+                job = db.get(Job, job_id)
+                if job:
+                    updated += int(_assign(job, **job_fields))
+                else:
+                    db.add(Job(id=job_id, **job_fields))
                     created += 1
         db.flush()
         return {"created": created, "updated": updated}

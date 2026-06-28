@@ -25,6 +25,7 @@ EMPLOYEE_ID = os.getenv("EMPLOYEE_ID", "hermes-outreach-sender")
 JOB_RUN_ID = os.getenv("JOB_RUN_ID", f"manual-{dt.datetime.now(dt.timezone.utc).strftime('%Y%m%dT%H%M%SZ')}")
 PROVIDER = "gmail-smtp"
 BAD_PARTS = ("inferred", "family-owned", "example.com", "test.com", "no-reply", "noreply", "(", ")", " ")
+LEGACY_HEADERS = ["recipient", "status", "timestamp", "business", "message_id", "campaign_id", "sent_at", "provider", "job_run_id"]
 
 
 def now_utc():
@@ -70,14 +71,28 @@ def append_event(event):
         handle.write(json.dumps(event, sort_keys=True) + "\n")
 
 
-def append_legacy(email, status, business, timestamp):
+def append_legacy(email, status, business, timestamp, sent_at=None, message_id=None):
     LEGACY_LOG.parent.mkdir(parents=True, exist_ok=True)
-    exists = LEGACY_LOG.exists()
-    with LEGACY_LOG.open("a", newline="", encoding="utf-8") as handle:
-        writer = csv.writer(handle)
-        if not exists:
-            writer.writerow(["recipient", "status", "timestamp", "business"])
-        writer.writerow([email, status, timestamp, business])
+    rows = []
+    if LEGACY_LOG.exists():
+        with LEGACY_LOG.open(newline="", encoding="utf-8", errors="replace") as handle:
+            reader = csv.DictReader(handle)
+            rows = list(reader)
+    rows.append({
+        "recipient": email,
+        "status": status,
+        "timestamp": timestamp,
+        "business": business,
+        "message_id": message_id or "",
+        "campaign_id": CAMPAIGN_ID,
+        "sent_at": sent_at or "",
+        "provider": PROVIDER,
+        "job_run_id": JOB_RUN_ID,
+    })
+    with LEGACY_LOG.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=LEGACY_HEADERS)
+        writer.writeheader()
+        writer.writerows({key: row.get(key, "") for key in LEGACY_HEADERS} for row in rows)
 
 
 def event(row, email, business, subject, status, attempted_at, sent_at=None, message_id=None, error=None):
@@ -157,7 +172,7 @@ def main():
                 raise RuntimeError(f"SMTP refused recipients: {refused}")
             sent_at = now_utc()
             append_event(event(row, email, business, subject, "sent", attempted_at, sent_at=sent_at, message_id=message_id))
-            append_legacy(email, "sent", business, sent_at)
+            append_legacy(email, "sent", business, sent_at, sent_at=sent_at, message_id=message_id)
             print(f"EMAIL_SENT recipient={email} message_id={message_id}")
             sent += 1
         except Exception as exc:

@@ -13,15 +13,16 @@ from app.models.entities import *
 from app.schemas.common import *
 from app.services.audit import log
 from app.services.connectors import get_connector
-from app.services.daily_report import generate_daily_report, render_report, write_report_artifact
+from app.services.daily_report import generate_daily_report, render_report, send_report_artifact, write_report_artifact
 from app.services.hermes_control import HermesControlError, HermesControlService
 from app.services.hermes_live import HermesLiveMonitor
 from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as _sync_hermes_snapshot
+from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, classify_delivery_result, validate_report_recipient
 
 router = APIRouter()
 oauth2 = OAuth2PasswordBearer(tokenUrl='/api/auth/login', auto_error=False)
 HERMES_SYNCED_LABELS = {'companies', 'employees', 'campaigns', 'schedules'}
-TERMINAL_JOB_STATUSES = {JobStatus.completed, JobStatus.failed, JobStatus.blocked, JobStatus.cancelled, JobStatus.skipped}
+TERMINAL_JOB_STATUSES = {JobStatus.completed, JobStatus.failed, JobStatus.blocked, JobStatus.cancelled, JobStatus.skipped, JobStatus.imported, JobStatus.synced}
 ACTION_LABELS = {'dry-run': 'Dry run', 'test-run': 'Test run', 'run': 'Run'}
 
 def current_user(request: Request, token: str|None = Depends(oauth2), db: Session = Depends(get_db)):
@@ -587,21 +588,47 @@ def create_daily_report(data: DailyReportRequest, db: Session=Depends(get_db), u
     artifact = write_report_artifact(report)
     delivery = {}
     status = 'generated'
+    delivery_job = None
     if data.send_email:
-        recipient = data.recipient or 'himanshusoni3214@gmail.com'
         try:
-            hermes_control = HermesControlService().control_matching(['end', 'day', 'report'], 'run')
-            delivery = {
-                'status': 'queued_in_hermes',
-                'recipient': recipient,
-                'artifact_path': str(artifact),
-                'hermes_control': hermes_control,
-                'note': 'Hermes End Day Report job was queued. Delivery success is confirmed by Hermes logs/report output, not by the dashboard backend.',
-            }
-            status = 'delivery_queued'
-        except HermesControlError as exc:
+            recipient = validate_report_recipient(data.recipient or INTERNAL_REPORT_RECIPIENT, report_only_acceptance=True)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
+        try:
+            subject = f"Brew It by Sash Outreach Report - {report['report_date']}"
+            delivery = send_report_artifact(recipient, subject, artifact, report_only_acceptance=True)
+        except Exception as exc:
             delivery = {'status': 'failed', 'recipient': recipient, 'artifact_path': str(artifact), 'error': str(exc)}
-            status = 'delivery_failed'
+        decision = classify_delivery_result('Daily Report', {}, delivery, expected_recipient=recipient)
+        now = datetime.utcnow()
+        delivery_job = Job(
+            employee_id=None,
+            campaign_id=data.campaign_id,
+            connector='hermes',
+            task_type='Daily Report',
+            status=decision.status,
+            payload={'source': 'dashboard', 'kind': 'daily_report', 'report_only_acceptance': True, 'report_date': report['report_date']},
+            result={'delivery': delivery, 'report_date': report['report_date']},
+            logs=[f"Daily report delivery {decision.delivery_status}: {decision.verification_reason}"],
+            error_message=decision.verification_reason if decision.status == JobStatus.failed else None,
+            provider_message_id=decision.provider_message_id,
+            recipient_email=decision.recipient_email,
+            sent_at=decision.sent_at,
+            delivery_status=decision.delivery_status,
+            evidence_type=decision.evidence_type,
+            source_output_path=str(artifact),
+            verification_reason=decision.verification_reason,
+            external_execution_key=f"daily-report:{report['report_date']}:{recipient}:{decision.provider_message_id or now.isoformat()}",
+            attempts=1,
+            max_attempts=1,
+            started_at=now,
+            ended_at=now,
+            created_at=now,
+        )
+        db.add(delivery_job)
+        db.flush()
+        delivery['job_id'] = delivery_job.id
+        status = 'delivered' if decision.status == JobStatus.completed else 'delivery_failed'
     run = ReportRun(
         company_id=data.company_id,
         campaign_id=data.campaign_id,
@@ -614,6 +641,6 @@ def create_daily_report(data: DailyReportRequest, db: Session=Depends(get_db), u
         status=status,
     )
     db.add(run); db.flush()
-    log(db, 'Daily Report Generated', 'ReportRun', run.id, data.company_id, user.id, {'status': status, 'artifact_path': str(artifact)})
+    log(db, 'Daily Report Generated', 'ReportRun', run.id, data.company_id, user.id, {'status': status, 'artifact_path': str(artifact), 'job_id': getattr(delivery_job, 'id', None)})
     db.commit(); db.refresh(run)
     return {'report_run': run, 'report': report, 'text': render_report(report), 'delivery': delivery}

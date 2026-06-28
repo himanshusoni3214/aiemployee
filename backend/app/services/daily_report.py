@@ -8,6 +8,7 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
+from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, provider_message_id_from_output, validate_report_recipient
 
 TORONTO = "America/Toronto"
 SUCCESS_STATUSES = {"sent", "delivered", "accepted", "queued_by_provider"}
@@ -186,11 +187,13 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
 
     verified_path = leads_dir / "leads_verified.csv"
     verified_rows, verified_headers = _read_csv(verified_path)
+    verified_path_emails: set[str] = set()
     for row in verified_rows:
         email = _email(row)
         if email and "@" in email and "inferred" not in email:
             verified_available_emails.add(email)
-    evidence.append(_file_evidence(verified_path, len(verified_rows), len(verified_available_emails), "unique valid public email rows", [c for c in ("Public Email", "created_at") if c not in verified_headers], window))
+            verified_path_emails.add(email)
+    evidence.append(_file_evidence(verified_path, len(verified_rows), len(verified_path_emails), "unique valid public email rows", [c for c in ("Public Email", "created_at") if c not in verified_headers], window))
 
     structured_event_paths = [root / "outreach_events.jsonl", leads_dir / "outreach_events.jsonl"]
     structured_rows: list[dict[str, Any]] = []
@@ -310,7 +313,15 @@ def write_report_artifact(report: dict[str, Any], data_path: str | None = None, 
     return output
 
 
-def send_report_artifact(recipient: str, subject: str, artifact_path: Path, data_path: str | None = None, timeout_seconds: int = 60) -> dict[str, Any]:
+def send_report_artifact(
+    recipient: str | None,
+    subject: str,
+    artifact_path: Path,
+    data_path: str | None = None,
+    timeout_seconds: int = 60,
+    report_only_acceptance: bool = True,
+) -> dict[str, Any]:
+    recipient = validate_report_recipient(recipient or INTERNAL_REPORT_RECIPIENT, report_only_acceptance=report_only_acceptance)
     root = _data_path(data_path)
     sender = root / "home" / "leads" / "send_daily_report.sh"
     if not sender.exists():
@@ -323,12 +334,17 @@ def send_report_artifact(recipient: str, subject: str, artifact_path: Path, data
         check=False,
     )
     output = "\n".join(part for part in (completed.stdout, completed.stderr) if part)
+    provider_message_id = provider_message_id_from_output(output)
+    sent = completed.returncode == 0 and "EMAIL_SENT" in output and bool(provider_message_id)
     return {
-        "status": "sent" if completed.returncode == 0 and "EMAIL_SENT" in output else "failed",
+        "status": "sent" if sent else "failed",
+        "delivery_status": "sent" if sent else "failed",
         "recipient": recipient,
         "subject": subject,
         "artifact_path": str(artifact_path),
-        "sent_at": datetime.now(timezone.utc).isoformat() if completed.returncode == 0 and "EMAIL_SENT" in output else None,
+        "provider_message_id": provider_message_id or None,
+        "sent_at": datetime.now(timezone.utc).isoformat() if sent else None,
         "exit_code": completed.returncode,
+        "error": None if sent else "report sender did not return EMAIL_SENT with a durable provider_message_id",
         "output": output[-4000:],
     }

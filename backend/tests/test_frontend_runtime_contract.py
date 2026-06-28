@@ -143,6 +143,17 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("time[datetime]", runtime)
         self.assertIn("[data-voryx-sync-last]", runtime)
 
+    def test_jobs_page_displays_delivery_evidence_fields(self):
+        source = read_frontend("app/jobs/page.tsx")
+
+        self.assertIn("delivery_status", source)
+        self.assertIn("recipient_email", source)
+        self.assertIn("provider_message_id", source)
+        self.assertIn("evidence_type", source)
+        self.assertIn("verification_reason", source)
+        self.assertIn("'Imported'", source)
+        self.assertIn("'Synced'", source)
+
 
 if __name__ == "__main__":
     unittest.main()
