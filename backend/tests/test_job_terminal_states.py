@@ -66,8 +66,8 @@ class JobTerminalStateTests(unittest.TestCase):
 
     def test_impossible_employee_states_block_queued_job_terminally(self):
         cases = [
-            (EmployeeStatus.stopped, False, 'Employee is not running: Stopped'),
-            (EmployeeStatus.paused, False, 'Employee is not running: Paused'),
+            (EmployeeStatus.stopped, False, 'Employee is not running or scheduled: Stopped'),
+            (EmployeeStatus.paused, False, 'Employee is not running or scheduled: Paused'),
             (EmployeeStatus.archived, False, 'Employee is archived'),
             (EmployeeStatus.running, True, 'Employee circuit breaker is open'),
         ]
@@ -102,6 +102,16 @@ class JobTerminalStateTests(unittest.TestCase):
             self.assertEqual(queued, 0)
         finally:
             db.close()
+
+    def test_scheduled_employee_job_completes_and_leaves_no_queued_work(self):
+        job_id = self.create_job(status=EmployeeStatus.scheduled)
+
+        self.assertTrue(asyncio.run(job_runner.run_once()))
+        job = self.load_job(job_id)
+        self.assertEqual(job.status, JobStatus.completed)
+        self.assertEqual(job.logs, ['dummy execution completed'])
+        self.assertIsNotNone(job.started_at)
+        self.assertIsNotNone(job.ended_at)
 
 
 if __name__ == '__main__':

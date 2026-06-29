@@ -45,7 +45,7 @@ async def run_once() -> int:
             if already_ran_this_minute(schedule, now) or not cron_matches(schedule.cron, now):
                 continue
             employee = db.get(AIEmployee, schedule.employee_id)
-            if not employee or employee.status != EmployeeStatus.running or employee.circuit_breaker_open:
+            if not employee or employee.status not in {EmployeeStatus.running, EmployeeStatus.scheduled} or employee.circuit_breaker_open:
                 schedule.next_run_at = now + timedelta(minutes=1)
                 continue
             job = Job(employee_id=schedule.employee_id, connector='hermes', task_type=schedule.task_type, payload=schedule.payload, max_attempts=1)

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-set -uo pipefail
+set -Eeuo pipefail
 
 ROOT_DIR="${VORYX_OPS_ROOT:-/docker/voryx-ops}"
 COMPOSE_FILE="${COMPOSE_FILE:-docker-compose.prod.yml}"

@@ -82,7 +82,7 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
                 <td><LocalTime value={schedule.last_run_at} /></td>
                 <td><LocalTime value={schedule.next_run_at} /></td>
                 <td className="text-zinc-400">{hermesId(schedule)}</td>
-                <td><ScheduleActions id={schedule.id} isPaused={schedule.is_paused} /></td>
+                <td><ScheduleActions id={schedule.id} isPaused={schedule.is_paused} hermesJobId={hermesId(schedule) === '-' ? null : hermesId(schedule)} /></td>
               </tr>
             ))}
             {!schedules.length ? <tr><td colSpan={10} className="text-zinc-400">{companyId ? 'No schedules for selected filters' : 'No company selected'}</td></tr> : null}

@@ -7,6 +7,7 @@ from typing import Any
 
 from app.core.config import settings
 from app.services.hermes_live import redact
+from app.services.hermes_safety import is_safety_blocked_action, safety_block_result
 from app.services.internal_mail_queue import PROCESSOR_JOB_ID, PROCESSOR_JOB_NAME
 
 
@@ -34,6 +35,8 @@ class HermesControlService:
         job = self._find_job(raw, hermes_job_id)
         if not job:
             raise HermesControlError(f"Hermes job not found: {hermes_job_id}")
+        if is_safety_blocked_action(hermes_job_id, action):
+            return safety_block_result(action, hermes_job_id, str(job.get("name") or ""))
         return self._control_job(raw, job, action)
 
     def control_matching(self, required_terms: list[str], action: str) -> dict[str, Any]:
@@ -55,6 +58,9 @@ class HermesControlService:
         if len(matches) > 1:
             names = ", ".join(str(job.get("name") or job.get("id")) for job in matches[:5])
             raise HermesControlError(f"Hermes job match was ambiguous for terms {', '.join(terms)}: {names}")
+        hermes_id = str(matches[0].get("id") or "")
+        if is_safety_blocked_action(hermes_id, action):
+            return safety_block_result(action, hermes_id, str(matches[0].get("name") or ""))
         return self._control_job(raw, matches[0], action)
 
     def update_schedule(self, hermes_job_id: str, cron: str, timezone_name: str) -> dict[str, Any]:
@@ -78,13 +84,14 @@ class HermesControlService:
             "schedule_display": job.get("schedule_display"),
             "next_run_at": job.get("next_run_at"),
         }
-        if after == before:
-            raise HermesControlError(f"Hermes schedule update produced no state change for {hermes_job_id}")
-        self._write_jobs(raw)
+        no_change = after == before
+        if not no_change:
+            self._write_jobs(raw)
         return {
             "status": "ok",
             "mode": "jobs_json",
             "action": "update_schedule",
+            "no_change": no_change,
             "hermes_job_id": hermes_job_id,
             "hermes_job_name": str(job.get("name") or ""),
             "before": redact(json.dumps(before, default=str)),
@@ -157,6 +164,8 @@ class HermesControlService:
             "last_status": job.get("last_status"),
             "last_error": job.get("last_error"),
             "last_delivery_error": job.get("last_delivery_error"),
+            "paused_at": job.get("paused_at"),
+            "paused_reason": job.get("paused_reason"),
         }
         self._apply(job, action)
         after = {
@@ -166,18 +175,22 @@ class HermesControlService:
             "last_status": job.get("last_status"),
             "last_error": job.get("last_error"),
             "last_delivery_error": job.get("last_delivery_error"),
+            "paused_at": job.get("paused_at"),
+            "paused_reason": job.get("paused_reason"),
         }
-        if after == before:
-            raise HermesControlError(f"Hermes action produced no state change: {action} for {job.get('id') or job.get('name')}")
-        self._write_jobs(raw)
+        no_change = after == before
+        if not no_change:
+            self._write_jobs(raw)
         return {
             "status": "ok",
             "mode": "jobs_json",
             "action": action,
+            "no_change": no_change,
             "hermes_job_id": str(job.get("id") or ""),
             "hermes_job_name": str(job.get("name") or ""),
             "before": redact(json.dumps(before, default=str)),
             "after": after,
+            "backup_path": self.last_backup_path,
         }
 
     def _read_jobs(self) -> Any:
@@ -260,20 +273,26 @@ class HermesControlService:
     def _apply(self, job: dict[str, Any], action: str) -> None:
         now = datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
         if action == "pause":
+            already_paused = job.get("enabled") is False and job.get("state") == "paused" and job.get("next_run_at") is None
+            if already_paused:
+                return
             job["enabled"] = False
             job["state"] = "paused"
             job["next_run_at"] = None
+            job["paused_at"] = now
+            job["paused_reason"] = "Paused from Voryx dashboard"
             return
 
+        already_scheduled = job.get("enabled") is True and job.get("state") == "scheduled"
         job["enabled"] = True
         job["state"] = "scheduled"
         if action == "run":
             job["next_run_at"] = now
-        elif not job.get("next_run_at"):
+        elif not already_scheduled and not job.get("next_run_at"):
             job["next_run_at"] = now
 
         if job.get("last_status") == "error":
             job["last_status"] = None
-        for key in ("last_error", "last_delivery_error"):
+        for key in ("last_error", "last_delivery_error", "paused_at", "paused_reason"):
             if key in job:
                 job[key] = None

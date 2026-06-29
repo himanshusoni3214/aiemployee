@@ -14,6 +14,7 @@ const metricLabels: Record<string, string> = {
 
 function statusColor(status?: string) {
   if (status === 'Running' || status === 'ok') return '#2fbf71';
+  if (status === 'Scheduled') return '#4f8cff';
   if (status === 'Paused' || status === 'degraded') return '#d6a23a';
   if (status === 'Error' || status === 'Failed' || status === 'error') return '#d94b5b';
   return '#71717a';

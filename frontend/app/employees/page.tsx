@@ -1,5 +1,5 @@
 import { serverApi } from '../../lib/serverApi';
-import { EmployeeActions } from '../../components/ActionButtons';
+import { EmployeeActions, isSafetyLockedHermesJob } from '../../components/ActionButtons';
 import { LocalTime } from '../../components/LocalTime';
 import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
 import CrudPage from '../../components/CrudPage';
@@ -28,6 +28,10 @@ type Employee = {
 
 function reason(employee: Employee) {
   return employee.last_error || employee.paused_reason || '-';
+}
+
+function statusLabel(employee: Employee) {
+  return isSafetyLockedHermesJob(employee.hermes_job_id) ? 'Safety Locked' : employee.status;
 }
 
 export default async function EmployeesPage({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
@@ -60,8 +64,9 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
         <QuerySelector label="Campaign" param="campaign_id" value={campaignId} options={campaignOptions} allLabel="All campaigns" resetParams={['employee_id']} />
       </div>
       {!companyId ? <div className="card text-sm text-amber-300">Select a company to manage AI employees.</div> : null}
-      <div className="grid gap-3 md:grid-cols-4">
+      <div className="grid gap-3 md:grid-cols-5">
         <div className="card"><p className="text-sm text-zinc-400">Running</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.status === 'Running').length}</p></div>
+        <div className="card"><p className="text-sm text-zinc-400">Scheduled</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.status === 'Scheduled').length}</p></div>
         <div className="card"><p className="text-sm text-zinc-400">Paused</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.status === 'Paused').length}</p></div>
         <div className="card"><p className="text-sm text-zinc-400">Errors</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.status === 'Error').length}</p></div>
         <div className="card"><p className="text-sm text-zinc-400">Open Circuits</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.circuit_breaker_open).length}</p></div>
@@ -76,12 +81,12 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
                 <td>{companyName.get(employee.company_id) || employee.company_id}</td>
                 <td>{employee.campaign_id ? campaignName.get(employee.campaign_id) || employee.campaign_id : '-'}</td>
                 <td>{employee.employee_type}</td>
-                <td>{employee.status}</td>
+                <td>{statusLabel(employee)}</td>
                 <td>{employee.rate_limit_per_hour ?? 0}/hr, {employee.daily_email_limit ?? 0}/day</td>
                 <td>{employee.circuit_breaker_open ? 'Open' : 'Closed'} ({employee.failure_count ?? 0})</td>
                 <td><LocalTime value={employee.last_heartbeat_at} /></td>
                 <td className="max-w-sm truncate text-zinc-400">{reason(employee)}</td>
-                <td><EmployeeActions id={employee.id} status={employee.status} /></td>
+                <td><EmployeeActions id={employee.id} status={employee.status} hermesJobId={employee.hermes_job_id} /></td>
               </tr>
             ))}
             {!employees.length ? <tr><td colSpan={10} className="text-zinc-400">{companyId ? 'No workers for selected filters' : 'No company selected'}</td></tr> : null}
@@ -110,7 +115,7 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
             prompt: { type: 'textarea' },
             daily_limits: { type: 'json' },
             dry_run_mode: { type: 'boolean', label: 'Dry-run mode' },
-            status: { type: 'select', options: [{ value: 'Running', label: 'Running' }, { value: 'Paused', label: 'Paused' }, { value: 'Stopped', label: 'Stopped' }, { value: 'Error', label: 'Error' }, { value: 'Archived', label: 'Archived' }] },
+            status: { type: 'select', options: [{ value: 'Running', label: 'Running' }, { value: 'Scheduled', label: 'Scheduled' }, { value: 'Paused', label: 'Paused' }, { value: 'Stopped', label: 'Stopped' }, { value: 'Error', label: 'Error' }, { value: 'Archived', label: 'Archived' }] },
           }}
           defaults={{
             company_id: companyId,

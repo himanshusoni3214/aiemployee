@@ -16,6 +16,7 @@ from app.services.connectors import get_connector
 from app.services.daily_report import generate_daily_report, render_report, write_report_artifact
 from app.services.hermes_control import HermesControlError, HermesControlService
 from app.services.hermes_live import HermesLiveMonitor
+from app.services.hermes_safety import SAFETY_LOCK_MESSAGE, is_safety_blocked_action, safety_block_result
 from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as _sync_hermes_snapshot
 from app.services.internal_mail_queue import enqueue_daily_report_delivery, ingest_internal_mail_receipts
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, validate_report_recipient
@@ -57,7 +58,7 @@ def _manual_run_block_reason(employee: AIEmployee | None) -> str | None:
         return None
     if employee.status == EmployeeStatus.archived:
         return 'employee is archived'
-    if employee.status != EmployeeStatus.running:
+    if employee.status not in {EmployeeStatus.running, EmployeeStatus.scheduled}:
         return f'employee is {employee.status.value.lower()}'
     if employee.circuit_breaker_open:
         return 'employee circuit breaker is open'
@@ -76,9 +77,6 @@ def _block_manual_job(db: Session, job: Job, employee: AIEmployee | None, reason
     job.retry_after = None
     job.ended_at = now
     _append_log_once(job, job.error_message)
-    if employee:
-        employee.last_error = job.error_message[:1000]
-        employee.last_heartbeat_at = now
     log(db, 'Manual Hermes Run Blocked', 'Job', job.id, getattr(employee, 'company_id', None), user.id, {'reason': reason})
     return job
 
@@ -86,8 +84,13 @@ def _action_response(action: str, job: Job | None = None, hermes_control: dict |
     label = ACTION_LABELS.get(action, action.replace('-', ' ').title())
     state = 'request_accepted'
     is_terminal = False
+    safety_blocked = bool(hermes_control and hermes_control.get('status') == 'safety_blocked')
+    if safety_blocked:
+        state = 'safety_blocked'
+        is_terminal = True
+        message = message or hermes_control.get('message') or SAFETY_LOCK_MESSAGE
     if job:
-        state = job.status.name
+        state = 'safety_blocked' if safety_blocked else job.status.name
         is_terminal = job.status in TERMINAL_JOB_STATUSES
         if not message:
             if job.status == JobStatus.blocked:
@@ -99,7 +102,7 @@ def _action_response(action: str, job: Job | None = None, hermes_control: dict |
             else:
                 message = f'{label} {job.status.value.lower()}. Job ID: {job.id}'
     return {
-        'ok': state not in {'failed', 'blocked', 'cancelled', 'skipped'},
+        'ok': state not in {'failed', 'blocked', 'cancelled', 'skipped', 'safety_blocked'},
         'state': state,
         'status': state,
         'terminal': is_terminal,
@@ -107,6 +110,10 @@ def _action_response(action: str, job: Job | None = None, hermes_control: dict |
         'message': message or f'{label} request accepted',
         'hermes_control': hermes_control,
     }
+
+def _safety_block_response(action: str, hermes_job_id: str, hermes_job_name: str | None = None, job: Job | None = None) -> dict:
+    result = safety_block_result(action, hermes_job_id, hermes_job_name)
+    return _action_response(action, job, result, result['message'])
 
 def _enum_member(enum_cls, value):
     if isinstance(value, enum_cls):
@@ -141,6 +148,23 @@ def _force_hermes_sync(db: Session, user_id: str) -> dict:
     if result.get('status') != 'ok':
         raise HTTPException(502, f"Hermes import failed after control action: {result.get('error') or result.get('reason') or result.get('status')}")
     return result
+
+def _refresh_employee_from_hermes(db: Session, employee_id: str, user_id: str) -> AIEmployee:
+    _force_hermes_sync(db, user_id)
+    db.expire_all()
+    employee = db.get(AIEmployee, employee_id)
+    if not employee:
+        raise HTTPException(404, 'Not found after Hermes sync')
+    return employee
+
+def _refresh_schedule_from_hermes(db: Session, schedule_id: str, user_id: str) -> tuple[Schedule, AIEmployee | None]:
+    _force_hermes_sync(db, user_id)
+    db.expire_all()
+    schedule = db.get(Schedule, schedule_id)
+    if not schedule:
+        raise HTTPException(404, 'Not found after Hermes sync')
+    employee = db.get(AIEmployee, schedule.employee_id) if schedule.employee_id else None
+    return schedule, employee
 
 def _campaign_id_for_employee(db: Session, employee_id: str) -> str | None:
     return db.scalar(
@@ -348,16 +372,27 @@ def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), 
         db.add(copy); db.flush(); log(db, 'Employee Duplicated', 'AIEmployee', copy.id, emp.company_id, user.id); db.commit(); return copy
     if action not in mapping and action not in {'run', 'dry-run'}: raise HTTPException(400, 'Unsupported action')
 
-    run_block_reason = _manual_run_block_reason(emp) if action in {'run', 'dry-run'} else None
     hermes_id = _employee_hermes_job_id(emp)
+    if hermes_id:
+        emp = _refresh_employee_from_hermes(db, employee_id, user.id)
+        hermes_id = _employee_hermes_job_id(emp)
+    if hermes_id and is_safety_blocked_action(hermes_id, action):
+        job = None
+        if action in {'run', 'dry-run'}:
+            schedule = db.scalar(select(Schedule).where(Schedule.employee_id == emp.id).order_by(Schedule.name).limit(1))
+            if schedule:
+                job = _record_manual_run(db, schedule, user, None, action)
+                _block_manual_job(db, job, emp, SAFETY_LOCK_MESSAGE, user)
+        log(db, 'Employee Safety Blocked', 'AIEmployee', emp.id, emp.company_id, user.id, {'hermes_job_id': hermes_id, 'action': action})
+        db.commit()
+        return _safety_block_response(action, hermes_id, emp.name, job)
+
+    run_block_reason = _manual_run_block_reason(emp) if action in {'run', 'dry-run'} else None
     control_result = None
     control_action = {'start': 'resume', 'resume': 'resume', 'restart': 'resume', 'pause': 'pause', 'stop': 'pause', 'run': 'run'}.get(action)
     if hermes_id and control_action and not run_block_reason:
         control_result = _control_hermes_job(hermes_id, control_action)
-        _force_hermes_sync(db, user.id)
-        db.expire_all()
-        emp = db.get(AIEmployee, employee_id)
-        if not emp: raise HTTPException(404, 'Not found after Hermes sync')
+        emp = _refresh_employee_from_hermes(db, employee_id, user.id)
     elif action in mapping:
         emp.status = mapping[action]
         if action in {'start', 'resume', 'restart'}:
@@ -392,16 +427,25 @@ def schedule_action(schedule_id: str, action: str, db: Session=Depends(get_db), 
     action = action.lower()
     if action not in {'pause', 'resume', 'run', 'dry-run', 'test-run'}: raise HTTPException(400, 'Unsupported action')
 
-    employee_for_action = db.get(AIEmployee, schedule.employee_id) if schedule.employee_id else None
-    run_block_reason = _manual_run_block_reason(employee_for_action) if action in {'run', 'dry-run', 'test-run'} else None
     hermes_id = _schedule_hermes_job_id(schedule)
+    employee_for_action = db.get(AIEmployee, schedule.employee_id) if schedule.employee_id else None
+    if hermes_id:
+        schedule, employee_for_action = _refresh_schedule_from_hermes(db, schedule_id, user.id)
+        hermes_id = _schedule_hermes_job_id(schedule)
+    if hermes_id and is_safety_blocked_action(hermes_id, action):
+        job = None
+        if action in {'run', 'dry-run', 'test-run'}:
+            job = _record_manual_run(db, schedule, user, None, action)
+            _block_manual_job(db, job, employee_for_action, SAFETY_LOCK_MESSAGE, user)
+        log(db, 'Schedule Safety Blocked', 'Schedule', schedule.id, user_id=user.id, metadata={'hermes_job_id': hermes_id, 'action': action, 'job_id': getattr(job, 'id', None)})
+        db.commit()
+        return {'schedule_id': schedule.id, **_safety_block_response(action, hermes_id, schedule.name, job)}
+
+    run_block_reason = _manual_run_block_reason(employee_for_action) if action in {'run', 'dry-run', 'test-run'} else None
     control_result = None
     if hermes_id and action in {'pause', 'resume', 'run'} and not run_block_reason:
         control_result = _control_hermes_job(hermes_id, action)
-        _force_hermes_sync(db, user.id)
-        db.expire_all()
-        schedule = db.get(Schedule, schedule_id)
-        if not schedule: raise HTTPException(404, 'Not found after Hermes sync')
+        schedule, employee_for_action = _refresh_schedule_from_hermes(db, schedule_id, user.id)
     else:
         if action == 'pause':
             schedule.is_paused = True

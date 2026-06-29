@@ -18,8 +18,8 @@ def terminal_block_reason(employee: AIEmployee | None) -> str | None:
         return None
     if employee.status == EmployeeStatus.archived:
         return "Employee is archived"
-    if employee.status != EmployeeStatus.running:
-        return f"Employee is not running: {employee.status.value}"
+    if employee.status not in {EmployeeStatus.running, EmployeeStatus.scheduled}:
+        return f"Employee is not running or scheduled: {employee.status.value}"
     if employee.circuit_breaker_open:
         return "Employee circuit breaker is open"
     return None
@@ -117,7 +117,7 @@ async def run_once() -> bool:
             if reason in {
                 "Employee is archived",
                 "Employee circuit breaker is open",
-            } or reason.startswith(("Employee is not running:", "Daily email limit reached:")):
+            } or reason.startswith(("Employee is not running", "Daily email limit reached:")):
                 block_job(db, job, employee, reason)
             else:
                 append_job_log_once(job, reason)

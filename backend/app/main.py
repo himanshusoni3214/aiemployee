@@ -15,7 +15,6 @@ from app.core.security import hash_password
 from app.models.entities import (
     Campaign,
     Company,
-    EmployeeStatus,
     Job,
     JobStatus,
     Lead,
@@ -23,29 +22,11 @@ from app.models.entities import (
     Role,
     User,
 )
-from app.services import hermes_import
 from app.services.hermes_sync import periodic_hermes_sync, sync_hermes_once, sync_hermes_snapshot
 
 TORONTO_TZ = ZoneInfo('America/Toronto')
 CONFIRMED_SENT_STATUSES = {'sent', 'success', 'successful', 'delivered', 'ok', 'completed'}
 
-
-def _truthful_employee_status(job: dict) -> EmployeeStatus:
-    """Only report Running while Hermes says the job is actively executing."""
-    state = str(job.get('state') or '').lower()
-    last_status = str(job.get('last_status') or '').lower()
-    if last_status in {'error', 'failed'}:
-        return EmployeeStatus.error
-    if not job.get('enabled') or state in {'paused', 'disabled'}:
-        return EmployeeStatus.paused
-    if state == 'running':
-        return EmployeeStatus.running
-    return EmployeeStatus.stopped
-
-
-# Hermes marks enabled/scheduled jobs as scheduled, not actively running. Patch the
-# importer mapping so the Employees page does not claim they are running.
-hermes_import._employee_status = _truthful_employee_status
 
 # Replace the original CEO report with a version that counts only confirmed
 # Hermes outreach-log sends for the Brew It By Sash campaigns.

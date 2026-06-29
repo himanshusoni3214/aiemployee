@@ -19,20 +19,21 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("data-voryx-crud-save", source)
         self.assertIn("data-voryx-crud-edit", source)
         self.assertIn("data-voryx-crud-archive", source)
-        self.assertIn("type=\"button\" data-voryx-crud-save", source)
+        self.assertIn("type=\"button\"", source)
+        self.assertIn("data-voryx-crud-save", source)
         self.assertIn("data-voryx-action-path={`${path}/${item.id}/dry-run`}", source)
         self.assertIn("data-voryx-action-path={`${path}/${item.id}/test-run`}", source)
 
-    def test_action_runtime_prevents_navigation_and_calls_backend_for_crud(self):
+    def test_action_runtime_does_not_intercept_crud_controls(self):
         source = read_frontend("public/voryx-action-runtime.js")
 
-        self.assertIn("event.preventDefault();", source)
-        self.assertIn("event.stopImmediatePropagation?.();", source)
-        self.assertIn("button.closest('[data-voryx-crud-save]')", source)
-        self.assertIn("await apiPost(editingId ? `${path}/${editingId}` : path", source)
-        self.assertIn("method: editingId ? 'PUT' : 'POST'", source)
-        self.assertIn("await apiPost(`${path}/${item.id}`, { method: 'DELETE' })", source)
-        self.assertIn("console.error(`Dashboard ${label} failed`", source)
+        self.assertNotIn("data-voryx-crud-save], [data-voryx-crud-edit]", source)
+        self.assertNotIn("handleCrudClick", source)
+        self.assertNotIn("readCrudForm", source)
+        self.assertNotIn("setCrudField", source)
+        self.assertNotIn("apiPost", source)
+        self.assertIn("button[data-voryx-action-path]", source)
+        self.assertIn("select[data-voryx-company-selector]", source)
 
     def test_action_runtime_surfaces_backend_job_state(self):
         source = read_frontend("public/voryx-action-runtime.js")
@@ -133,6 +134,19 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("<fieldset", source)
         self.assertIn("htmlFor={dayId}", source)
         self.assertIn("htmlFor={`${fieldId}-start`}", source)
+
+    def test_employee_actions_support_scheduled_and_safety_locked_states(self):
+        actions = read_frontend("components/ActionButtons.tsx")
+        employees = read_frontend("app/employees/page.tsx")
+        crud = read_frontend("components/CrudPage.tsx")
+
+        self.assertIn("status === 'Scheduled'", actions)
+        self.assertIn("canRun = status === 'Scheduled'", actions)
+        self.assertIn("Safety Locked", actions)
+        self.assertIn("b03a2d0f1149", actions)
+        self.assertIn("Scheduled", employees)
+        self.assertIn("isSafetyLockedHermesJob", employees)
+        self.assertIn("Safety Locked", crud)
 
     def test_action_runtime_localizes_server_rendered_times(self):
         runtime = read_frontend("public/voryx-action-runtime.js")

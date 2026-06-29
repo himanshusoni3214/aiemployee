@@ -1,6 +1,7 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
+import { isSafetyLockedHermesJob } from './ActionButtons';
 
 type Option = { value: string; label: string };
 type FieldConfig = {
@@ -70,7 +71,9 @@ export default function CrudPage({
   const [form, setForm] = useState(defaults);
   const [editingId, setEditingId] = useState('');
   const [error, setError] = useState('');
+  const [message, setMessage] = useState('');
   const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState('');
 
   useEffect(() => {
     setItems(initialItems);
@@ -95,36 +98,55 @@ export default function CrudPage({
 
   async function save() {
     try {
+      setBusy(editingId ? 'save' : 'create');
       await api(editingId ? `${path}/${editingId}` : path, { method: editingId ? 'PUT' : 'POST', body: JSON.stringify(form) });
       setForm(defaults);
       setEditingId('');
+      setMessage(editingId ? 'Save succeeded' : 'Create succeeded');
+      setError('');
       await load();
     } catch (err: any) {
       setError(err.message || 'Request failed');
+      setMessage('');
+    } finally {
+      setBusy('');
     }
   }
 
   async function archive(item: any) {
     try {
+      setBusy(item.id);
       if (item.status === 'Archived') {
         const restoreForm = { ...defaults };
         for (const key of Object.keys(defaults)) restoreForm[key] = item[key] ?? defaults[key];
         await api(`${path}/${item.id}`, { method: 'PUT', body: JSON.stringify({ ...restoreForm, status: path === '/employees' ? 'Stopped' : 'Active' }) });
+        setMessage('Restore succeeded');
       } else {
         await api(`${path}/${item.id}`, { method: 'DELETE' });
+        setMessage('Archive succeeded');
       }
+      setError('');
       await load();
     } catch (err: any) {
       setError(err.message || 'Request failed');
+      setMessage('');
+    } finally {
+      setBusy('');
     }
   }
 
   async function postAction(item: any, action: string) {
     try {
+      setBusy(`${item.id}:${action}`);
       await api(`${path}/${item.id}/${action}`, { method: 'POST' });
+      setMessage(`${action.replace('-', ' ')} request accepted`);
+      setError('');
       await load();
     } catch (err: any) {
       setError(err.message || 'Action failed');
+      setMessage('');
+    } finally {
+      setBusy('');
     }
   }
 
@@ -133,6 +155,20 @@ export default function CrudPage({
     for (const key of Object.keys(defaults)) next[key] = item[key] ?? defaults[key];
     setForm(next);
     setEditingId(item.id);
+    setMessage(`Editing ${itemTitle(item)}`);
+    setError('');
+  }
+
+  function cancelEdit() {
+    setEditingId('');
+    setForm(defaults);
+    setMessage('');
+    setError('');
+  }
+
+  function itemHermesJobId(item: any) {
+    const payload = item.payload && typeof item.payload === 'object' ? item.payload : {};
+    return item.hermes_job_id || payload.hermes_job_id || null;
   }
 
   function renderField(key: string) {
@@ -197,11 +233,12 @@ export default function CrudPage({
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           {Object.keys(defaults).map(renderField)}
         </div>
+        {message ? <p className="mt-3 text-sm text-emerald-300">{message}</p> : null}
         {error ? <p className="mt-3 text-sm text-red-300">{error}</p> : null}
         <p className="mt-3 text-sm text-emerald-300" hidden data-voryx-crud-message />
         <div className="mt-4 flex flex-wrap gap-2">
-          <button className="btn" type="button" data-voryx-crud-save onClick={save}>{editingId ? 'Save Changes' : createLabel || 'Create'}</button>
-          <button className="btn-secondary" type="button" hidden={!editingId} data-voryx-crud-cancel onClick={() => { setEditingId(''); setForm(defaults); }}>Cancel</button>
+          <button className="btn" type="button" disabled={Boolean(busy)} data-voryx-crud-save onClick={save}>{editingId ? 'Save Changes' : createLabel || 'Create'}</button>
+          <button className="btn-secondary" type="button" disabled={Boolean(busy)} hidden={!editingId} data-voryx-crud-cancel onClick={cancelEdit}>Cancel</button>
         </div>
       </div>
       <div className="overflow-hidden border border-zinc-800">
@@ -216,13 +253,16 @@ export default function CrudPage({
                 <button className="btn-secondary text-xs" type="button" data-voryx-crud-edit onClick={() => edit(item)}>Edit</button>
                 {path === '/campaigns' ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="duplicate" data-voryx-action-path={`${path}/${item.id}/duplicate`} onClick={() => postAction(item, 'duplicate')}>Duplicate</button> : null}
                 {path === '/campaigns' && item.status !== 'Archived' ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label={item.status === 'Inactive' ? 'resume' : 'pause'} data-voryx-action-path={`${path}/${item.id}/${item.status === 'Inactive' ? 'resume' : 'pause'}`} onClick={() => postAction(item, item.status === 'Inactive' ? 'resume' : 'pause')}>{item.status === 'Inactive' ? 'Resume' : 'Pause'}</button> : null}
-                {path === '/employees' && item.status !== 'Archived' ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label={item.status === 'Paused' ? 'resume' : 'pause'} data-voryx-action-path={`${path}/${item.id}/${item.status === 'Paused' ? 'resume' : 'pause'}`} onClick={() => postAction(item, item.status === 'Paused' ? 'resume' : 'pause')}>{item.status === 'Paused' ? 'Resume' : 'Pause'}</button> : null}
-                {path === '/employees' && item.status !== 'Archived' ? <button className="btn text-xs" type="button" data-voryx-action-label="run" data-voryx-action-path={`${path}/${item.id}/run`} onClick={() => postAction(item, 'run')}>Run</button> : null}
-                {path === '/employees' && item.status !== 'Archived' ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="dry-run" data-voryx-action-path={`${path}/${item.id}/dry-run`} onClick={() => postAction(item, 'dry-run')}>Dry Run</button> : null}
-                {path === '/schedules' && item.status !== 'Archived' ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label={item.is_paused ? 'resume' : 'pause'} data-voryx-action-path={`${path}/${item.id}/${item.is_paused ? 'resume' : 'pause'}`} onClick={() => postAction(item, item.is_paused ? 'resume' : 'pause')}>{item.is_paused ? 'Resume' : 'Pause'}</button> : null}
-                {path === '/schedules' && item.status !== 'Archived' ? <button className="btn text-xs" type="button" data-voryx-action-label="run" data-voryx-action-path={`${path}/${item.id}/run`} onClick={() => postAction(item, 'run')}>Run Now</button> : null}
-                {path === '/schedules' && item.status !== 'Archived' ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="dry-run" data-voryx-action-path={`${path}/${item.id}/dry-run`} onClick={() => postAction(item, 'dry-run')}>Dry Run</button> : null}
-                {path === '/schedules' && item.status !== 'Archived' ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="test-run" data-voryx-action-path={`${path}/${item.id}/test-run`} onClick={() => postAction(item, 'test-run')}>Test Run</button> : null}
+                {path === '/employees' && item.status !== 'Archived' && isSafetyLockedHermesJob(itemHermesJobId(item)) ? <span className="rounded border border-amber-700 px-2 py-1 text-xs text-amber-300">Safety Locked</span> : null}
+                {path === '/employees' && item.status !== 'Archived' && !isSafetyLockedHermesJob(itemHermesJobId(item)) && ['Running', 'Scheduled'].includes(item.status) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="pause" data-voryx-action-path={`${path}/${item.id}/pause`} onClick={() => postAction(item, 'pause')}>Pause</button> : null}
+                {path === '/employees' && item.status !== 'Archived' && !isSafetyLockedHermesJob(itemHermesJobId(item)) && ['Paused', 'Stopped'].includes(item.status) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="resume" data-voryx-action-path={`${path}/${item.id}/resume`} onClick={() => postAction(item, 'resume')}>Resume</button> : null}
+                {path === '/employees' && item.status === 'Scheduled' && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn text-xs" type="button" data-voryx-action-label="run" data-voryx-action-path={`${path}/${item.id}/run`} onClick={() => postAction(item, 'run')}>Run</button> : null}
+                {path === '/employees' && item.status === 'Scheduled' && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="dry-run" data-voryx-action-path={`${path}/${item.id}/dry-run`} onClick={() => postAction(item, 'dry-run')}>Dry Run</button> : null}
+                {path === '/schedules' && item.status !== 'Archived' && isSafetyLockedHermesJob(itemHermesJobId(item)) ? <span className="rounded border border-amber-700 px-2 py-1 text-xs text-amber-300">Safety Locked</span> : null}
+                {path === '/schedules' && item.status !== 'Archived' && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label={item.is_paused ? 'resume' : 'pause'} data-voryx-action-path={`${path}/${item.id}/${item.is_paused ? 'resume' : 'pause'}`} onClick={() => postAction(item, item.is_paused ? 'resume' : 'pause')}>{item.is_paused ? 'Resume' : 'Pause'}</button> : null}
+                {path === '/schedules' && item.status !== 'Archived' && !item.is_paused && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn text-xs" type="button" data-voryx-action-label="run" data-voryx-action-path={`${path}/${item.id}/run`} onClick={() => postAction(item, 'run')}>Run Now</button> : null}
+                {path === '/schedules' && item.status !== 'Archived' && !item.is_paused && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="dry-run" data-voryx-action-path={`${path}/${item.id}/dry-run`} onClick={() => postAction(item, 'dry-run')}>Dry Run</button> : null}
+                {path === '/schedules' && item.status !== 'Archived' && !item.is_paused && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="test-run" data-voryx-action-path={`${path}/${item.id}/test-run`} onClick={() => postAction(item, 'test-run')}>Test Run</button> : null}
                 {path !== '/schedules' ? <button className="btn-secondary text-xs" type="button" data-voryx-crud-archive onClick={() => archive(item)}>{item.status === 'Archived' ? 'Restore' : 'Archive'}</button> : null}
               </div>
             </div>

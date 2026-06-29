@@ -13,6 +13,7 @@ from app.core.config import settings
 from app.models.entities import AIEmployee, Campaign, Company, EmployeeStatus, Job, JobStatus, OutreachEvent, Schedule, Status
 from app.services.audit import log
 from app.services.hermes_live import HermesLiveMonitor, redact
+from app.services.hermes_safety import SAFETY_LOCK_MESSAGE, is_safety_locked_hermes_job_id
 from app.services.job_evidence import classify_delivery_result
 
 BREW_COMPANY_NAME = "Brew It By Sash"
@@ -104,12 +105,14 @@ def _campaign_name(name: str) -> str:
 def _employee_status(job: dict[str, Any]) -> EmployeeStatus:
     state = (job.get("state") or "").lower()
     last_status = (job.get("last_status") or "").lower()
-    if not job.get("enabled") or state in {"paused", "disabled"}:
-        return EmployeeStatus.paused
     if last_status in {"error", "failed"}:
         return EmployeeStatus.error
+    if not job.get("enabled") or state in {"paused", "disabled"}:
+        return EmployeeStatus.paused
     if state == "running":
         return EmployeeStatus.running
+    if job.get("enabled") and state in {"scheduled", "idle", "waiting", "queued"}:
+        return EmployeeStatus.scheduled
     return EmployeeStatus.stopped
 
 
@@ -217,6 +220,8 @@ class HermesImportService:
         status = _employee_status(hermes_job)
         last_error = hermes_job.get("last_error") or hermes_job.get("last_delivery_error")
         paused_reason = hermes_job.get("paused_reason") or (last_error if status in {EmployeeStatus.error, EmployeeStatus.paused} else None)
+        if is_safety_locked_hermes_job_id(hermes_id):
+            paused_reason = SAFETY_LOCK_MESSAGE
         fields = {
             "company_id": company.id,
             "campaign_id": campaign.id,
