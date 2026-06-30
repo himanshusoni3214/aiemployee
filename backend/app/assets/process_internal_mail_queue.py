@@ -85,6 +85,20 @@ def compose_message(request: dict[str, Any], message_id: str, message_path: Path
     artifact = request_artifact_path(request)
     body = artifact.read_text(encoding="utf-8", errors="replace")
     message = EmailMessage()
+    sender = os.environ.get(
+        "VORYX_INTERNAL_REPORT_FROM",
+        "voryxio@gmail.com",
+    ).strip()
+    if (
+        not sender
+        or "@" not in sender
+        or "," in sender
+        or ";" in sender
+    ):
+        raise ValueError(
+            "VORYX_INTERNAL_REPORT_FROM must contain exactly one email address"
+        )
+    message["From"] = sender
     message["To"] = ALLOWED_RECIPIENT
     message["Subject"] = str(request.get("subject") or f"Voryx Daily Report - {request.get('report_date') or ''}").strip()
     message["Date"] = format_datetime(utc_now())
@@ -98,15 +112,38 @@ def send_command(message_path: Path) -> list[str]:
     if override:
         return [part.format(message_file=str(message_path)) for part in shlex.split(override)]
     himalaya = os.environ.get("HIMALAYA_BIN", "/usr/local/bin/himalaya")
-    return [himalaya, "message", "send", str(message_path)]
+    return [himalaya, "message", "send"]
 
 
 def run_send(message_path: Path) -> subprocess.CompletedProcess[str]:
+    command = send_command(message_path)
+    timeout = int(
+        os.environ.get("VORYX_HIMALAYA_TIMEOUT_SECONDS", "90")
+    )
+
+    override = os.environ.get(
+        "VORYX_HIMALAYA_SEND_COMMAND",
+        "",
+    ).strip()
+
+    if override:
+        return subprocess.run(
+            command,
+            text=True,
+            capture_output=True,
+            timeout=timeout,
+            check=False,
+        )
+
     return subprocess.run(
-        send_command(message_path),
+        command,
+        input=message_path.read_text(
+            encoding="utf-8",
+            errors="replace",
+        ),
         text=True,
         capture_output=True,
-        timeout=int(os.environ.get("VORYX_HIMALAYA_TIMEOUT_SECONDS", "90")),
+        timeout=timeout,
         check=False,
     )
 

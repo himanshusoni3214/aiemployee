@@ -68,9 +68,10 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         source = read_frontend("components/CompanySelector.tsx")
 
         self.assertIn("select.dataset.voryxReactNavigationHref", source)
-        self.assertIn("new URL(nextPath, window.location.href).toString()", source)
+        self.assertIn("const targetHref = new URL(", source)
+        self.assertIn("window.location.href", source)
         self.assertIn("onChange={(event) => changeCompany(event.target.value, event.currentTarget)}", source)
-        self.assertIn("router.push(nextPath)", source)
+        self.assertIn("window.location.assign(targetHref)", source)
 
     def test_action_runtime_has_company_selector_change_listener(self):
         source = read_frontend("public/voryx-action-runtime.js")
@@ -139,11 +140,13 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         actions = read_frontend("components/ActionButtons.tsx")
         employees = read_frontend("app/employees/page.tsx")
         crud = read_frontend("components/CrudPage.tsx")
+        safety = read_frontend("lib/hermesSafety.ts")
 
         self.assertIn("status === 'Scheduled'", actions)
         self.assertIn("canRun = status === 'Scheduled'", actions)
         self.assertIn("Safety Locked", actions)
-        self.assertIn("b03a2d0f1149", actions)
+        self.assertIn("isSafetyLockedHermesJob", actions)
+        self.assertIn("b03a2d0f1149", safety)
         self.assertIn("Scheduled", employees)
         self.assertIn("isSafetyLockedHermesJob", employees)
         self.assertIn("Safety Locked", crud)

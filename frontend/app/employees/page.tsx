@@ -1,5 +1,6 @@
 import { serverApi } from '../../lib/serverApi';
-import { EmployeeActions, isSafetyLockedHermesJob } from '../../components/ActionButtons';
+import { EmployeeActions } from '../../components/ActionButtons';
+import { isSafetyLockedHermesJob } from '../../lib/hermesSafety';
 import { LocalTime } from '../../components/LocalTime';
 import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
 import CrudPage from '../../components/CrudPage';

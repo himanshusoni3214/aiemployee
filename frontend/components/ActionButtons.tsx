@@ -4,12 +4,7 @@ import { useState } from 'react';
 import type { MouseEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { api } from '../lib/api';
-
-export const SAFETY_LOCKED_HERMES_JOB_IDS = new Set(['b03a2d0f1149']);
-
-export function isSafetyLockedHermesJob(hermesJobId?: string | null) {
-  return Boolean(hermesJobId && SAFETY_LOCKED_HERMES_JOB_IDS.has(hermesJobId));
-}
+import { isSafetyLockedHermesJob } from '../lib/hermesSafety';
 
 function usePostAction() {
   const router = useRouter();

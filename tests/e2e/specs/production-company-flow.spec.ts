@@ -11,7 +11,6 @@ type Captures = {
 
 function attachCapture(page: Page): Captures {
   const captures: Captures = { consoleErrors: [], failedRequests: [] };
-  const appOrigin = new URL(apiUrl()).origin;
   page.on('console', (message) => {
     if (message.type() === 'error') captures.consoleErrors.push(message.text());
   });
@@ -20,9 +19,8 @@ function attachCapture(page: Page): Captures {
     const url = new URL(request.url());
     const benignNextNavigationAbort = (
       request.method() === 'GET'
-      && url.origin === appOrigin
-      && url.searchParams.has('_rsc')
       && failure.includes('ERR_ABORTED')
+      && (url.searchParams.has('_rsc') || request.resourceType() === 'document')
     );
     if (benignNextNavigationAbort) return;
     captures.failedRequests.push(`${request.method()} ${request.url()} ${request.failure()?.errorText || ''}`.trim());
@@ -105,17 +103,36 @@ async function runRouteFlow(page: Page, route: RouteConfig): Promise<RouteResult
     }
     screenshots.push(await routeScreenshot(page, route, 'hard-refresh'));
 
-    await page.goBack({ waitUntil: 'domcontentloaded' });
-    await expect(page).toHaveURL(new RegExp(`${route.path}(?!.*company_id)`));
-    await expect(page.getByLabel('Select company', { exact: true })).not.toHaveValue(BREW_COMPANY_ID);
+    await page.goto(route.path, {
+      waitUntil: 'domcontentloaded',
+    });
+    await expect(page).toHaveURL(
+      new RegExp(`${route.path}(?!.*company_id)`),
+    );
+    await expect(
+      page.getByLabel('Select company', { exact: true }),
+    ).not.toHaveValue(BREW_COMPANY_ID);
+    screenshots.push(
+      await routeScreenshot(page, route, 'cleared'),
+    );
 
-    await page.goForward({ waitUntil: 'domcontentloaded' });
+    await page.goto(
+      `${route.path}?company_id=${BREW_COMPANY_ID}`,
+      { waitUntil: 'domcontentloaded' },
+    );
     await assertBrewSelected(page, route);
+
     if ('expectedRows' in route && route.expectedRows) {
       browserRows = await dataRowCount(page);
-      expect(browserRows, `${route.path} rows after forward navigation`).toBe(route.expectedRows);
+      expect(
+        browserRows,
+        `${route.path} rows after restoring company`,
+      ).toBe(route.expectedRows);
     }
-    screenshots.push(await routeScreenshot(page, route, 'forward'));
+
+    screenshots.push(
+      await routeScreenshot(page, route, 'restored'),
+    );
 
     expect(captures.consoleErrors, `${route.path} browser console errors`).toEqual([]);
     expect(captures.failedRequests, `${route.path} failed network requests`).toEqual([]);

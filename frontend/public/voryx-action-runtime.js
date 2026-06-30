@@ -268,7 +268,7 @@
     const select = target?.closest?.('select[data-voryx-company-selector]');
     if (!select) return;
     handleCompanySelectorChange(event, select);
-  });
+  }, true);
 
   if (document.readyState === 'loading') {
       document.addEventListener('DOMContentLoaded', () => {

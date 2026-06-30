@@ -203,6 +203,7 @@ def _filtered_job_stmt(company_id: str | None = None, campaign_id: str | None = 
     if company_id:
         stmt = stmt.outerjoin(Campaign, Job.campaign_id == Campaign.id).outerjoin(AIEmployee, Job.employee_id == AIEmployee.id)
         stmt = stmt.where(or_(Campaign.company_id == company_id, AIEmployee.company_id == company_id))
+        stmt = stmt.where(or_(AIEmployee.id.is_(None), AIEmployee.status != EmployeeStatus.archived))
     if campaign_id:
         stmt = stmt.where(Job.campaign_id == campaign_id)
     if employee_id:
@@ -237,6 +238,8 @@ def crud(model, schema, label: str):
                 stmt = stmt.where(model.campaign_id == campaign_id)
             if employee_id and hasattr(model, 'employee_id'):
                 stmt = stmt.where(model.employee_id == employee_id)
+        if model is AIEmployee:
+            stmt = stmt.where(AIEmployee.status != EmployeeStatus.archived)
         if q and hasattr(model, 'name'): stmt = stmt.where(model.name.ilike(f'%{q}%'))
         if hasattr(model, 'name'):
             stmt = stmt.order_by(model.name)

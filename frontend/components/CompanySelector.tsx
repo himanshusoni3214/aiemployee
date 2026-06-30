@@ -1,7 +1,7 @@
 'use client';
 
-import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { useEffect } from 'react';
+import { usePathname, useSearchParams } from 'next/navigation';
+import { useEffect, useState } from 'react';
 
 type Company = { id: string; name: string; status?: string };
 
@@ -16,23 +16,30 @@ export function CompanySelector({
   allowAll?: boolean;
   label?: string;
 }) {
-  const router = useRouter();
   const pathname = usePathname();
   const searchParams = useSearchParams();
   const activeCompanies = companies.filter((company) => company.status !== 'Archived');
-  const selectValue = selectedCompanyId || (allowAll ? '__all' : '');
+  const externalSelectValue =
+    selectedCompanyId || (allowAll ? '__all' : '');
+  const [selectValue, setSelectValue] =
+    useState(externalSelectValue);
   const selectId = `company-selector-${label.toLowerCase().replace(/[^a-z0-9]+/g, '-') || 'scope'}`;
+
+  useEffect(() => {
+    setSelectValue(externalSelectValue);
+  }, [externalSelectValue]);
 
   useEffect(() => {
     if (selectedCompanyId) localStorage.setItem('voryx:selectedCompanyId', selectedCompanyId);
   }, [selectedCompanyId]);
 
   function changeCompany(nextCompanyId: string, select?: HTMLSelectElement) {
+    setSelectValue(nextCompanyId);
     const params = new URLSearchParams(searchParams.toString());
     params.delete('campaign_id');
     params.delete('employee_id');
     if (nextCompanyId === '__all') {
-      params.set('company_id', 'all');
+      params.delete('company_id');
       localStorage.removeItem('voryx:selectedCompanyId');
     } else if (nextCompanyId) {
       params.set('company_id', nextCompanyId);
@@ -42,10 +49,22 @@ export function CompanySelector({
       localStorage.removeItem('voryx:selectedCompanyId');
     }
     const nextPath = `${pathname}${params.toString() ? `?${params.toString()}` : ''}`;
-    if (select && typeof window !== 'undefined') {
-      select.dataset.voryxReactNavigationHref = new URL(nextPath, window.location.href).toString();
+
+    if (typeof window !== 'undefined') {
+      const targetHref = new URL(
+        nextPath,
+        window.location.href,
+      ).toString();
+
+      if (select) {
+        select.dataset.voryxReactNavigationHref =
+          targetHref;
+      }
+
+      if (window.location.href !== targetHref) {
+        window.location.assign(targetHref);
+      }
     }
-    router.push(nextPath);
   }
 
   return (

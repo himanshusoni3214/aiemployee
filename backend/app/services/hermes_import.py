@@ -15,6 +15,7 @@ from app.services.audit import log
 from app.services.hermes_live import HermesLiveMonitor, redact
 from app.services.hermes_safety import SAFETY_LOCK_MESSAGE, is_safety_locked_hermes_job_id
 from app.services.job_evidence import classify_delivery_result
+from app.services.internal_mail_queue import PROCESSOR_JOB_ID
 
 BREW_COMPANY_NAME = "Brew It By Sash"
 
@@ -156,12 +157,45 @@ class HermesImportService:
 
         by_hermes_id: dict[str, tuple[AIEmployee, Campaign, dict[str, Any]]] = {}
         for hermes_job in summary.get("jobs", []):
-            employee, campaign, counts = self._workflow(db, company, hermes_job)
+            # Internal infrastructure jobs must not become business employees.
+            if str(hermes_job.get("id") or "") == "voryx-internal-report-mail-processor":
+                continue
+            hermes_id = str(hermes_job.get("id") or "")
+            safety = (
+                hermes_job.get("safety")
+                if isinstance(hermes_job.get("safety"), dict)
+                else {}
+            )
+
+            is_internal_mail_processor = (
+                hermes_id == PROCESSOR_JOB_ID
+                or (
+                    str(
+                        hermes_job.get("source") or ""
+                    ).lower() == "voryx_ops"
+                    and str(
+                        safety.get("kind") or ""
+                    ).lower() == "internal_report_mail_only"
+                )
+            )
+
+            if is_internal_mail_processor:
+                continue
+
+            employee, campaign, counts = self._workflow(
+                db,
+                company,
+                hermes_job,
+            )
             created += counts["created"]
             updated += counts["updated"]
-            hermes_id = hermes_job.get("id")
+
             if hermes_id:
-                by_hermes_id[str(hermes_id)] = (employee, campaign, hermes_job)
+                by_hermes_id[hermes_id] = (
+                    employee,
+                    campaign,
+                    hermes_job,
+                )
 
         counts = self._outputs(db, company, by_hermes_id)
         created += counts["created"]
@@ -353,6 +387,8 @@ class HermesImportService:
             if not path.is_file():
                 continue
             hermes_id = path.parent.name
+            if hermes_id == PROCESSOR_JOB_ID:
+                continue
             employee, campaign, hermes_job = by_hermes_id.get(hermes_id) or self._fallback_workflow(db, company, hermes_id)
             relative = str(path.relative_to(self.data_path))
             job_id = f"hermes-output-{_hash(relative)}"

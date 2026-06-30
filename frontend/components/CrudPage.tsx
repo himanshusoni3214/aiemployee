@@ -1,7 +1,7 @@
 'use client';
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
-import { isSafetyLockedHermesJob } from './ActionButtons';
+import { isSafetyLockedHermesJob } from '../lib/hermesSafety';
 
 type Option = { value: string; label: string };
 type FieldConfig = {
@@ -41,6 +41,14 @@ function itemMeta(item: any, maps?: Record<string, Record<string, string>>) {
   if (item.campaign_id) parts.push(maps?.campaign_id?.[item.campaign_id] || item.campaign_id);
   if (item.employee_type) parts.push(item.employee_type);
   if (item.task_type) parts.push(item.task_type);
+  if (
+    Object.prototype.hasOwnProperty.call(item, 'daily_lead_goal') ||
+    Object.prototype.hasOwnProperty.call(item, 'daily_email_goal')
+  ) {
+    parts.push(
+      `${Number(item.daily_lead_goal ?? 0)} leads, ${Number(item.daily_email_goal ?? 0)} emails`,
+    );
+  }
   if (item.status) parts.push(item.status);
   return parts.join(' / ');
 }
