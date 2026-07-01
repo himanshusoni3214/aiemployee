@@ -229,6 +229,8 @@ class HermesImportService:
         name = _campaign_name(hermes_job.get("name") or "")
         campaign = db.scalar(select(Campaign).where(Campaign.company_id == company.id, func.lower(Campaign.name) == name.lower()))
         status = _campaign_status(hermes_job)
+        if campaign and campaign.status == Status.active and status == Status.inactive:
+            status = campaign.status
         if campaign:
             changed = _assign(campaign, industry="Cold Brew Coffee B2B Outreach", daily_lead_goal=25, daily_email_goal=25, status=status)
             return campaign, False, changed
