@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     credential_encryption_key: str = ""
     hermes_base_url: str = "http://localhost:9000"
     hermes_jobs_path: str = "/jobs"
+    hermes_connector_mode: str = "auto"
     hermes_data_path: str = ""
     hermes_sync_interval_seconds: int = 45
     class Config: env_file = ".env"

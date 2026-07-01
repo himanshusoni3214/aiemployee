@@ -1,16 +1,37 @@
 from abc import ABC, abstractmethod
 import json
 from pathlib import Path
+from urllib.parse import urlparse
 
 import httpx
 from app.core.config import settings
 
+
 class WorkerConnector(ABC):
     @abstractmethod
     async def execute(self, task_type: str, payload: dict) -> dict: ...
-    async def health(self) -> dict: return {"status": "unknown"}
+
+    async def health(self) -> dict:
+        return {"status": "unknown"}
+
 
 class HermesConnector(WorkerConnector):
+    @property
+    def configured_mode(self) -> str:
+        return (settings.hermes_connector_mode or "auto").strip().lower() or "auto"
+
+    @property
+    def mode(self) -> str:
+        configured = self.configured_mode
+        if configured in {"jobs_json", "json", "file", "file_backed"}:
+            return "jobs_json"
+        if configured == "http":
+            return "http"
+        jobs_file = self.jobs_file
+        if jobs_file and jobs_file.exists():
+            return "jobs_json"
+        return "http"
+
     @property
     def jobs_url(self) -> str:
         jobs_path = settings.hermes_jobs_path if settings.hermes_jobs_path.startswith("/") else f"/{settings.hermes_jobs_path}"
@@ -23,7 +44,33 @@ class HermesConnector(WorkerConnector):
             return None
         return Path(data_path) / "cron" / "jobs.json"
 
+    def _base_url_is_ttyd(self) -> bool:
+        try:
+            parsed = urlparse(settings.hermes_base_url)
+        except Exception:
+            return False
+        return parsed.port == 4860
+
+    def _unsupported(self, message: str) -> dict:
+        return {
+            "status": "unsupported",
+            "mode": self.mode,
+            "logs": [message],
+            "results": {},
+            "error": message,
+        }
+
     async def execute(self, task_type: str, payload: dict) -> dict:
+        if self.mode == "jobs_json":
+            return self._unsupported(
+                "Hermes connector is in jobs_json mode: jobs.json supports state synchronization and pause/resume/run scheduling, "
+                "but not arbitrary HTTP job execution. No Hermes HTTP request was made."
+            )
+        if self._base_url_is_ttyd():
+            return self._unsupported(
+                "HERMES_BASE_URL points to ttyd on port 4860, which is the Hermes web terminal, not a jobs API. "
+                "No Hermes HTTP request was made."
+            )
         async with httpx.AsyncClient(timeout=60) as client:
             try:
                 res = await client.post(self.jobs_url, json={"task_type": task_type, "payload": payload})
@@ -33,8 +80,25 @@ class HermesConnector(WorkerConnector):
                 return {"status": "failed", "logs": [f"Hermes unavailable: {exc}"], "results": {}}
 
     async def health(self) -> dict:
-        jobs_file = self.jobs_file
-        if jobs_file and jobs_file.exists():
+        if self.mode == "jobs_json":
+            jobs_file = self.jobs_file
+            if not jobs_file:
+                return {
+                    "status": "error",
+                    "mode": "jobs_json",
+                    "base_url": settings.hermes_base_url,
+                    "jobs_api": "disabled",
+                    "error": "HERMES_DATA_PATH is required for jobs_json mode",
+                }
+            if not jobs_file.exists():
+                return {
+                    "status": "error",
+                    "mode": "jobs_json",
+                    "base_url": settings.hermes_base_url,
+                    "jobs_api": "disabled",
+                    "jobs_file": str(jobs_file),
+                    "error": "Hermes jobs.json is not mounted",
+                }
             try:
                 raw = json.loads(jobs_file.read_text(encoding="utf-8"))
                 jobs = raw.get("jobs", raw if isinstance(raw, list) else [])
@@ -45,24 +109,40 @@ class HermesConnector(WorkerConnector):
                     "status": "ok",
                     "mode": "jobs_json",
                     "base_url": settings.hermes_base_url,
-                    "jobs_url": self.jobs_url,
+                    "jobs_api": "disabled",
                     "jobs_file": str(jobs_file),
                     "job_count": len(jobs),
                     "enabled_job_count": len(enabled),
+                    "message": "Hermes state/control uses mounted jobs.json; ttyd is not used as a Jobs API.",
                 }
             except Exception as exc:
                 return {
                     "status": "error",
                     "mode": "jobs_json",
                     "base_url": settings.hermes_base_url,
-                    "jobs_url": self.jobs_url,
+                    "jobs_api": "disabled",
                     "jobs_file": str(jobs_file),
                     "error": str(exc),
                 }
 
-        last_error = "Hermes jobs.json is not mounted; HTTP API probe skipped because this deployment uses the web terminal on HERMES_BASE_URL."
-        return {"status": "unreachable", "mode": "unknown", "base_url": settings.hermes_base_url, "jobs_url": self.jobs_url, "error": last_error}
+        if self._base_url_is_ttyd():
+            return {
+                "status": "misconfigured",
+                "mode": "http",
+                "base_url": settings.hermes_base_url,
+                "jobs_api": "disabled",
+                "error": "HERMES_BASE_URL points to ttyd on port 4860, not a Hermes Jobs API.",
+            }
+        async with httpx.AsyncClient(timeout=10) as client:
+            try:
+                res = await client.get(self.jobs_url)
+                res.raise_for_status()
+                return {"status": "ok", "mode": "http", "jobs_url": self.jobs_url}
+            except Exception as exc:
+                return {"status": "unreachable", "mode": "http", "jobs_url": self.jobs_url, "error": str(exc)}
+
 
 def get_connector(name: str) -> WorkerConnector:
-    if name == 'hermes': return HermesConnector()
+    if name == 'hermes':
+        return HermesConnector()
     raise ValueError(f'Unknown connector {name}')

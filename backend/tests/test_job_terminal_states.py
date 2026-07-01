@@ -15,6 +15,17 @@ class DummyConnector:
         return {'status': 'ok', 'logs': ['dummy execution completed'], 'results': {'task_type': task_type}}
 
 
+
+
+class UnsupportedConnector:
+    async def execute(self, task_type, payload):
+        return {
+            'status': 'unsupported',
+            'logs': ['jobs_json mode has no arbitrary executor'],
+            'error': 'jobs_json mode has no arbitrary executor',
+            'results': {},
+        }
+
 class JobTerminalStateTests(unittest.TestCase):
     def setUp(self):
         self.engine = create_engine(
@@ -85,6 +96,25 @@ class JobTerminalStateTests(unittest.TestCase):
                 self.assertFalse(asyncio.run(job_runner.run_once()))
                 job_again = self.load_job(job_id)
                 self.assertEqual(job_again.logs, job.logs)
+
+
+    def test_unsupported_connector_skips_job_without_circuit_breaker(self):
+        job_runner.get_connector = lambda connector: UnsupportedConnector()
+        job_id = self.create_job(status=EmployeeStatus.running)
+
+        self.assertTrue(asyncio.run(job_runner.run_once()))
+        db = self.Session()
+        try:
+            job = db.get(Job, job_id)
+            employee = db.get(AIEmployee, job.employee_id)
+            self.assertEqual(job.status, JobStatus.skipped)
+            self.assertEqual(job.error_message, 'jobs_json mode has no arbitrary executor')
+            self.assertEqual(job.logs[-1], 'jobs_json mode has no arbitrary executor')
+            self.assertEqual(employee.status, EmployeeStatus.running)
+            self.assertFalse(employee.circuit_breaker_open)
+            self.assertIsNone(employee.paused_reason)
+        finally:
+            db.close()
 
     def test_running_employee_job_completes_and_leaves_no_queued_work(self):
         job_id = self.create_job(status=EmployeeStatus.running)

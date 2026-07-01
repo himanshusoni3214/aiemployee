@@ -143,6 +143,18 @@ def _control_hermes_job(hermes_job_id: str, action: str) -> dict:
     except HermesControlError as exc:
         raise HTTPException(502, f'Hermes control failed: {exc}') from exc
 
+def _jobs_json_mode() -> bool:
+    mode = (settings.hermes_connector_mode or 'auto').strip().lower()
+    return mode in {'jobs_json', 'json', 'file', 'file_backed'}
+
+def _unsupported_dry_run_reason(action: str) -> str | None:
+    if action not in {'dry-run', 'test-run'} or not _jobs_json_mode():
+        return None
+    return (
+        f'Hermes {action} is unsupported in jobs_json connector mode because no safe dry-run executor is exposed. '
+        'No Hermes HTTP request was made and no email was sent.'
+    )
+
 def _force_hermes_sync(db: Session, user_id: str) -> dict:
     result = _sync_hermes_snapshot(db, user_id, force=True)
     if result.get('status') != 'ok':
@@ -325,6 +337,51 @@ def password_reset(): return {'message': 'Password reset workflow placeholder: c
 
 crud(Company, CompanyIn, 'companies'); crud(AIEmployee, EmployeeIn, 'employees'); crud(Campaign, CampaignIn, 'campaigns'); crud(Lead, LeadIn, 'leads'); crud(Schedule, ScheduleIn, 'schedules')
 
+def _campaign_payload(campaign: Campaign, *, state: str = 'ok', hermes_controls: list | None = None, blocked: list | None = None) -> dict:
+    return {
+        'id': campaign.id,
+        'company_id': campaign.company_id,
+        'name': campaign.name,
+        'description': campaign.description,
+        'industry': campaign.industry,
+        'target_audience': campaign.target_audience,
+        'geographic_area': campaign.geographic_area,
+        'daily_lead_goal': campaign.daily_lead_goal,
+        'daily_email_goal': campaign.daily_email_goal,
+        'daily_email_limit': campaign.daily_email_limit,
+        'timezone': campaign.timezone,
+        'allowed_sending_days': campaign.allowed_sending_days,
+        'allowed_sending_hours': campaign.allowed_sending_hours,
+        'internal_test_recipient': campaign.internal_test_recipient,
+        'report_recipient': campaign.report_recipient,
+        'dry_run_mode': campaign.dry_run_mode,
+        'start_date': campaign.start_date,
+        'end_date': campaign.end_date,
+        'status': campaign.status,
+        'ok': state == 'ok',
+        'state': state,
+        'hermes_controls': hermes_controls or [],
+        'blocked': blocked or [],
+    }
+
+def _control_campaign_workers(db: Session, campaign: Campaign, action: str) -> tuple[list, list]:
+    hermes_action = 'resume' if action == 'resume' else 'pause'
+    controls = []
+    blocked = []
+    employees = db.scalars(select(AIEmployee).where(AIEmployee.campaign_id == campaign.id, AIEmployee.hermes_job_id.is_not(None))).all()
+    for employee in employees:
+        hermes_id = _employee_hermes_job_id(employee)
+        if not hermes_id:
+            continue
+        try:
+            result = HermesControlService().control(hermes_id, hermes_action)
+            controls.append(result)
+            if result.get('status') == 'safety_blocked':
+                blocked.append({'employee_id': employee.id, 'employee_name': employee.name, 'hermes_job_id': hermes_id, 'reason': result.get('message') or result.get('reason')})
+        except HermesControlError as exc:
+            blocked.append({'employee_id': employee.id, 'employee_name': employee.name, 'hermes_job_id': hermes_id, 'reason': str(exc)})
+    return controls, blocked
+
 @router.post('/campaigns/{campaign_id}/{action}')
 def campaign_action(campaign_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
     campaign = db.get(Campaign, campaign_id)
@@ -361,8 +418,11 @@ def campaign_action(campaign_id: str, action: str, db: Session=Depends(get_db), 
         campaign.status = Status.active
     else:
         raise HTTPException(400, 'Unsupported action')
-    log(db, f'Campaign {action.title()}', 'Campaign', campaign.id, campaign.company_id, user.id)
-    db.commit(); db.refresh(campaign); return campaign
+    controls, blocked = _control_campaign_workers(db, campaign, action)
+    state = 'partial' if blocked else 'ok'
+    metadata = {'hermes_controls': controls, 'blocked': blocked} if controls or blocked else None
+    log(db, f'Campaign {action.title()}', 'Campaign', campaign.id, campaign.company_id, user.id, metadata)
+    db.commit(); db.refresh(campaign); return _campaign_payload(campaign, state=state, hermes_controls=controls, blocked=blocked)
 
 @router.post('/employees/{employee_id}/{action}')
 def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
@@ -389,6 +449,12 @@ def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), 
         log(db, 'Employee Safety Blocked', 'AIEmployee', emp.id, emp.company_id, user.id, {'hermes_job_id': hermes_id, 'action': action})
         db.commit()
         return _safety_block_response(action, hermes_id, emp.name, job)
+
+    unsupported_reason = _unsupported_dry_run_reason(action)
+    if unsupported_reason:
+        log(db, 'Employee Dry Run Unsupported', 'AIEmployee', emp.id, emp.company_id, user.id, {'hermes_job_id': hermes_id, 'action': action, 'reason': unsupported_reason})
+        db.commit()
+        raise HTTPException(501, unsupported_reason)
 
     run_block_reason = _manual_run_block_reason(emp) if action in {'run', 'dry-run'} else None
     control_result = None
@@ -443,6 +509,12 @@ def schedule_action(schedule_id: str, action: str, db: Session=Depends(get_db), 
         log(db, 'Schedule Safety Blocked', 'Schedule', schedule.id, user_id=user.id, metadata={'hermes_job_id': hermes_id, 'action': action, 'job_id': getattr(job, 'id', None)})
         db.commit()
         return {'schedule_id': schedule.id, **_safety_block_response(action, hermes_id, schedule.name, job)}
+
+    unsupported_reason = _unsupported_dry_run_reason(action)
+    if unsupported_reason:
+        log(db, 'Schedule Dry Run Unsupported', 'Schedule', schedule.id, user_id=user.id, metadata={'hermes_job_id': hermes_id, 'action': action, 'reason': unsupported_reason})
+        db.commit()
+        raise HTTPException(501, unsupported_reason)
 
     run_block_reason = _manual_run_block_reason(employee_for_action) if action in {'run', 'dry-run', 'test-run'} else None
     control_result = None

@@ -42,6 +42,24 @@ def block_job(db, job: Job, employee: AIEmployee | None, message: str):
         employee.last_heartbeat_at = now
     log(db, 'Job Blocked By Safety Policy', 'Job', job.id)
 
+def skip_unsupported_connector_job(db, job: Job, employee: AIEmployee | None, result: dict):
+    message = result.get('error') or result.get('error_message') or '; '.join(result.get('logs') or []) or 'Connector execution is unsupported'
+    now = datetime.utcnow()
+    job.status = JobStatus.skipped
+    job.error_message = message
+    job.retry_after = None
+    job.ended_at = now
+    job.result = result.get('results', result)
+    append_job_log_once(job, message)
+    if is_delivery_task(job.task_type):
+        job.delivery_status = 'not_sent'
+        job.evidence_type = 'unsupported_connector'
+        job.verification_reason = message
+    if employee:
+        employee.last_heartbeat_at = now
+    log(db, 'Job Skipped Unsupported Connector', 'Job', job.id)
+
+
 def fail_and_pause_employee(db, job: Job, employee: AIEmployee | None, message: str):
     job.status = JobStatus.failed
     job.error_message = message
@@ -138,7 +156,9 @@ async def run_once() -> bool:
         result = await connector.execute(job.task_type, job.payload)
         job.logs = result.get('logs', [])
         job.result = result.get('results', result)
-        if result.get('status') == 'failed':
+        if result.get('status') == 'unsupported':
+            skip_unsupported_connector_job(db, job, employee, result)
+        elif result.get('status') == 'failed':
             message = '; '.join(job.logs[-3:]) or result.get('error') or result.get('error_message') or "Worker failed without logs"
             if job.attempts < job.max_attempts:
                 job.status = JobStatus.queued

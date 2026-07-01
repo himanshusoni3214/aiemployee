@@ -5,11 +5,13 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 
+from fastapi import HTTPException
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from app.api import routes
+from app.core.config import settings
 from app.models.base import Base
 from app.models.entities import AIEmployee, Campaign, Company, EmployeeStatus, Job, JobStatus, Role, Schedule, Status, User
 from app.services.hermes_control import HermesControlService
@@ -46,10 +48,12 @@ class HermesScheduledSafetyTests(unittest.TestCase):
         self.Session = sessionmaker(bind=self.engine)
         self.original_sync = routes._sync_hermes_snapshot
         self.original_control = routes._control_hermes_job
+        self.original_connector_mode = settings.hermes_connector_mode
 
     def tearDown(self):
         routes._sync_hermes_snapshot = self.original_sync
         routes._control_hermes_job = self.original_control
+        settings.hermes_connector_mode = self.original_connector_mode
         Base.metadata.drop_all(self.engine)
         self.engine.dispose()
 
@@ -245,6 +249,43 @@ class HermesScheduledSafetyTests(unittest.TestCase):
             manual = db.scalar(select(Job).where(Job.employee_id == employee.id).order_by(Job.created_at.desc()))
             self.assertEqual(manual.status, JobStatus.blocked)
             self.assertIn("Safety blocked", manual.error_message)
+        finally:
+            db.close()
+
+
+
+    def test_campaign_resume_reports_partial_when_locked_worker_cannot_resume(self):
+        db = self.Session()
+        try:
+            user = self.make_user(db)
+            employee, _ = self.make_employee_schedule(db, status=EmployeeStatus.paused, hermes_job_id=OUTREACH_FOLLOWUP_HERMES_JOB_ID)
+            campaign_id = employee.campaign_id
+            db.commit()
+
+            response = routes.campaign_action(campaign_id, 'resume', db=db, user=user)
+
+            self.assertEqual(response['state'], 'partial')
+            self.assertFalse(response['ok'])
+            self.assertEqual(response['blocked'][0]['hermes_job_id'], OUTREACH_FOLLOWUP_HERMES_JOB_ID)
+            self.assertIn('real Gmail prospect outreach', response['blocked'][0]['reason'])
+        finally:
+            db.close()
+
+    def test_dry_run_returns_unsupported_in_jobs_json_mode_without_mutation(self):
+        db = self.Session()
+        try:
+            settings.hermes_connector_mode = 'jobs_json'
+            user = self.make_user(db)
+            _, schedule = self.make_employee_schedule(db, status=EmployeeStatus.scheduled, hermes_job_id='5881b72113ce')
+            db.commit()
+            routes._sync_hermes_snapshot = lambda sync_db, user_id, force=False: {'status': 'ok'}
+            routes._control_hermes_job = lambda hermes_job_id, action: self.fail('dry-run must not call Hermes control in jobs_json mode')
+
+            with self.assertRaises(HTTPException) as exc:
+                routes.schedule_action(schedule.id, 'dry-run', db=db, user=user)
+            self.assertEqual(exc.exception.status_code, 501)
+            self.assertIn('unsupported in jobs_json connector mode', exc.exception.detail)
+            self.assertEqual(db.scalar(select(Job).where(Job.employee_id == schedule.employee_id)), None)
         finally:
             db.close()
 
