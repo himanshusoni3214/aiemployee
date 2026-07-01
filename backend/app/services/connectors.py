@@ -60,6 +60,18 @@ class HermesConnector(WorkerConnector):
             "error": message,
         }
 
+    def capabilities(self) -> dict:
+        mode = self.mode
+        supports_run = mode == "http" and not self._base_url_is_ttyd()
+        return {
+            "connector": "hermes",
+            "connector_mode": mode,
+            "supports_pause_resume": mode == "jobs_json" or supports_run,
+            "supports_manual_run": supports_run,
+            "supports_dry_run": supports_run,
+            "manual_run_message": None if supports_run else "Manual run unavailable in jobs_json mode",
+        }
+
     async def execute(self, task_type: str, payload: dict) -> dict:
         if self.mode == "jobs_json":
             return self._unsupported(
@@ -113,6 +125,7 @@ class HermesConnector(WorkerConnector):
                     "jobs_file": str(jobs_file),
                     "job_count": len(jobs),
                     "enabled_job_count": len(enabled),
+                    **self.capabilities(),
                     "message": "Hermes state/control uses mounted jobs.json; ttyd is not used as a Jobs API.",
                 }
             except Exception as exc:
@@ -131,13 +144,14 @@ class HermesConnector(WorkerConnector):
                 "mode": "http",
                 "base_url": settings.hermes_base_url,
                 "jobs_api": "disabled",
+                **self.capabilities(),
                 "error": "HERMES_BASE_URL points to ttyd on port 4860, not a Hermes Jobs API.",
             }
         async with httpx.AsyncClient(timeout=10) as client:
             try:
                 res = await client.get(self.jobs_url)
                 res.raise_for_status()
-                return {"status": "ok", "mode": "http", "jobs_url": self.jobs_url}
+                return {"status": "ok", "mode": "http", "jobs_url": self.jobs_url, **self.capabilities()}
             except Exception as exc:
                 return {"status": "unreachable", "mode": "http", "jobs_url": self.jobs_url, "error": str(exc)}
 

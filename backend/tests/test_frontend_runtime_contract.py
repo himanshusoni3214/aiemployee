@@ -143,13 +143,35 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         safety = read_frontend("lib/hermesSafety.ts")
 
         self.assertIn("status === 'Scheduled'", actions)
-        self.assertIn("canRun = status === 'Scheduled'", actions)
-        self.assertIn("Safety Locked", actions)
+        self.assertIn("supports_manual_run", actions)
+        self.assertIn("Manual run unavailable in jobs_json mode", actions)
+        self.assertIn(">Locked<", actions)
+        self.assertIn("Safety blocked: this worker can send real Gmail prospect outreach.", actions)
         self.assertIn("isSafetyLockedHermesJob", actions)
         self.assertIn("b03a2d0f1149", safety)
         self.assertIn("Scheduled", employees)
         self.assertIn("isSafetyLockedHermesJob", employees)
-        self.assertIn("Safety Locked", crud)
+        self.assertIn(">Locked<", crud)
+        self.assertIn("Safety blocked: this worker can send real Gmail prospect outreach.", crud)
+
+    def test_connector_capabilities_hide_unsupported_actions(self):
+        actions = read_frontend("components/ActionButtons.tsx")
+        crud = read_frontend("components/CrudPage.tsx")
+        employees = read_frontend("app/employees/page.tsx")
+        scheduler = read_frontend("app/scheduler/page.tsx")
+        campaigns = read_frontend("app/campaigns/page.tsx")
+
+        self.assertIn("supports_manual_run", actions)
+        self.assertIn("supports_dry_run", actions)
+        self.assertIn("data-voryx-manual-run-unavailable", actions)
+        self.assertIn("canShowManualRun(item)", crud)
+        self.assertIn("canShowDryRun(item)", crud)
+        self.assertIn("/connectors/capabilities", employees)
+        self.assertIn("/connectors/capabilities", scheduler)
+        self.assertIn("/connectors/capabilities", campaigns)
+        self.assertIn("capabilities={capabilities}", employees)
+        self.assertIn("capabilities={capabilities}", scheduler)
+        self.assertIn("capabilities={capabilities}", campaigns)
 
     def test_action_runtime_localizes_server_rendered_times(self):
         runtime = read_frontend("public/voryx-action-runtime.js")

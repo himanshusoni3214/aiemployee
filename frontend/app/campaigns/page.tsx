@@ -1,8 +1,10 @@
 import { serverApi } from '../../lib/serverApi';
 import CrudPage from '../../components/CrudPage';
+import { defaultConnectorCapabilities, type ConnectorCapabilities } from '../../components/ActionButtons';
 import { CompanySelector } from '../../components/CompanySelector';
 import { queryString, selectedCompanyId } from '../../lib/companySelection';
 
+type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
 type Campaign = {
   id: string;
@@ -24,12 +26,14 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
   const companies = await serverApi<Company[]>('/companies', []);
   const companyId = selectedCompanyId(companies, params.company_id);
   const companyQuery = queryString({ company_id: companyId || undefined });
-  const [campaigns, jobs] = companyId
+  const [campaigns, jobs, capabilitiesResponse] = companyId
     ? await Promise.all([
         serverApi<Campaign[]>(`/campaigns${companyQuery}`, []),
         serverApi<Job[]>(`/jobs${companyQuery}`, []),
+        serverApi<CapabilitiesResponse>('/connectors/capabilities', {}),
       ])
-    : [[], []] as [Campaign[], Job[]];
+    : [[], [], {}] as [Campaign[], Job[], CapabilitiesResponse];
+  const capabilities = capabilitiesResponse.hermes || defaultConnectorCapabilities;
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
   const companyOptions = companies.filter((company) => company.status !== 'Archived').map((company) => ({ value: company.id, label: company.name }));
 
@@ -88,6 +92,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             end_date: { type: 'date' },
             status: { type: 'select', options: [{ value: 'Active', label: 'Active' }, { value: 'Inactive', label: 'Inactive' }, { value: 'Archived', label: 'Archived' }] },
           }}
+          capabilities={capabilities}
           defaults={{
             company_id: companyId,
             name: '',

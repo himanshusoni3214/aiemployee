@@ -77,6 +77,23 @@ class HermesConnectorModeTests(unittest.TestCase):
             self.assertEqual(health["jobs_api"], "disabled")
             self.assertNotIn("jobs_url", health)
 
+    def test_jobs_json_capabilities_disable_manual_execution(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_jobs(tmp)
+            settings.hermes_connector_mode = "jobs_json"
+            settings.hermes_base_url = "http://hermes-agent:4860"
+            settings.hermes_data_path = tmp
+
+            capabilities = HermesConnector().capabilities()
+            health = asyncio.run(HermesConnector().health())
+
+            self.assertEqual(capabilities["connector_mode"], "jobs_json")
+            self.assertTrue(capabilities["supports_pause_resume"])
+            self.assertFalse(capabilities["supports_manual_run"])
+            self.assertFalse(capabilities["supports_dry_run"])
+            self.assertEqual(health["connector_mode"], "jobs_json")
+            self.assertFalse(health["supports_manual_run"])
+
 
 if __name__ == "__main__":
     unittest.main()

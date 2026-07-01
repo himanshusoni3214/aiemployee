@@ -1,5 +1,5 @@
 import { serverApi } from '../../lib/serverApi';
-import { EmployeeActions } from '../../components/ActionButtons';
+import { EmployeeActions, defaultConnectorCapabilities, type ConnectorCapabilities } from '../../components/ActionButtons';
 import { isSafetyLockedHermesJob } from '../../lib/hermesSafety';
 import { LocalTime } from '../../components/LocalTime';
 import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
@@ -8,6 +8,7 @@ import { CompanySelector } from '../../components/CompanySelector';
 import { QuerySelector } from '../../components/QuerySelector';
 import { firstParam, queryString, selectedCompanyId } from '../../lib/companySelection';
 
+type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
 type Campaign = { id: string; company_id: string; name: string; status: string };
 type Employee = {
@@ -35,6 +36,10 @@ function statusLabel(employee: Employee) {
   return isSafetyLockedHermesJob(employee.hermes_job_id) ? 'Safety Locked' : employee.status;
 }
 
+function manualRunUnavailable(capabilities: ConnectorCapabilities, employee: Employee) {
+  return employee.status === 'Scheduled' && !isSafetyLockedHermesJob(employee.hermes_job_id) && !capabilities.supports_manual_run && !capabilities.supports_dry_run;
+}
+
 export default async function EmployeesPage({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
   const params = (await searchParams) || {};
   const companies = await serverApi<Company[]>('/companies', []);
@@ -45,7 +50,11 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
   const campaignId = requestedCampaignId && campaigns.some((campaign) => campaign.id === requestedCampaignId) ? requestedCampaignId : '';
   const employeeQuery = queryString({ company_id: companyId || undefined, campaign_id: campaignId || undefined });
   const employees = companyId ? await serverApi<Employee[]>(`/employees${employeeQuery}`, []) : [];
-  const sync = await serverApi<SyncInfo>('/sync/status', {});
+  const [sync, capabilitiesResponse] = await Promise.all([
+    serverApi<SyncInfo>('/sync/status', {}),
+    serverApi<CapabilitiesResponse>('/connectors/capabilities', {}),
+  ]);
+  const capabilities = capabilitiesResponse.hermes || defaultConnectorCapabilities;
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
   const campaignName = new Map(campaigns.map((campaign) => [campaign.id, campaign.name]));
   const companyOptions = companies.filter((company) => company.status !== 'Archived').map((company) => ({ value: company.id, label: company.name }));
@@ -87,7 +96,7 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
                 <td>{employee.circuit_breaker_open ? 'Open' : 'Closed'} ({employee.failure_count ?? 0})</td>
                 <td><LocalTime value={employee.last_heartbeat_at} /></td>
                 <td className="max-w-sm truncate text-zinc-400">{reason(employee)}</td>
-                <td><EmployeeActions id={employee.id} status={employee.status} hermesJobId={employee.hermes_job_id} /></td>
+                <td><EmployeeActions id={employee.id} status={employee.status} hermesJobId={employee.hermes_job_id} capabilities={capabilities} showUnavailableMessage={false} />{manualRunUnavailable(capabilities, employee) ? <div className="mt-2 max-w-48 text-xs text-zinc-400" data-voryx-manual-run-unavailable>{capabilities.manual_run_message || 'Manual run unavailable in jobs_json mode'}</div> : null}</td>
               </tr>
             ))}
             {!employees.length ? <tr><td colSpan={10} className="text-zinc-400">{companyId ? 'No workers for selected filters' : 'No company selected'}</td></tr> : null}
@@ -118,6 +127,7 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
             dry_run_mode: { type: 'boolean', label: 'Dry-run mode' },
             status: { type: 'select', options: [{ value: 'Running', label: 'Running' }, { value: 'Scheduled', label: 'Scheduled' }, { value: 'Paused', label: 'Paused' }, { value: 'Stopped', label: 'Stopped' }, { value: 'Error', label: 'Error' }, { value: 'Archived', label: 'Archived' }] },
           }}
+          capabilities={capabilities}
           defaults={{
             company_id: companyId,
             campaign_id: campaignId || campaigns[0]?.id || '',

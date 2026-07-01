@@ -2,6 +2,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import { isSafetyLockedHermesJob } from '../lib/hermesSafety';
+import { ManualRunUnavailable, defaultConnectorCapabilities, type ConnectorCapabilities } from './ActionButtons';
 
 type Option = { value: string; label: string };
 type FieldConfig = {
@@ -63,6 +64,7 @@ export default function CrudPage({
   createLabel,
   emptyLabel,
   displayMaps,
+  capabilities,
 }: {
   title: string;
   path: string;
@@ -73,7 +75,9 @@ export default function CrudPage({
   createLabel?: string;
   emptyLabel?: string;
   displayMaps?: Record<string, Record<string, string>>;
+  capabilities?: ConnectorCapabilities | null;
 }) {
+  const caps = { ...defaultConnectorCapabilities, ...(capabilities || {}) };
   const listPath = useMemo(() => withQuery(path, query), [path, JSON.stringify(query || {})]);
   const [items, setItems] = useState<any[]>(initialItems);
   const [form, setForm] = useState(defaults);
@@ -179,6 +183,14 @@ export default function CrudPage({
     return item.hermes_job_id || payload.hermes_job_id || null;
   }
 
+  function canShowManualRun(item: any) {
+    return Boolean(caps.supports_manual_run) && !isSafetyLockedHermesJob(itemHermesJobId(item));
+  }
+
+  function canShowDryRun(item: any) {
+    return Boolean(caps.supports_dry_run) && !isSafetyLockedHermesJob(itemHermesJobId(item));
+  }
+
   function renderField(key: string) {
     const config = fields[key] || {};
     if (config.hidden) return null;
@@ -261,16 +273,18 @@ export default function CrudPage({
                 <button className="btn-secondary text-xs" type="button" data-voryx-crud-edit onClick={() => edit(item)}>Edit</button>
                 {path === '/campaigns' ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="duplicate" data-voryx-action-path={`${path}/${item.id}/duplicate`} onClick={() => postAction(item, 'duplicate')}>Duplicate</button> : null}
                 {path === '/campaigns' && item.status !== 'Archived' ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label={item.status === 'Inactive' ? 'resume' : 'pause'} data-voryx-action-path={`${path}/${item.id}/${item.status === 'Inactive' ? 'resume' : 'pause'}`} onClick={() => postAction(item, item.status === 'Inactive' ? 'resume' : 'pause')}>{item.status === 'Inactive' ? 'Resume' : 'Pause'}</button> : null}
-                {path === '/employees' && item.status !== 'Archived' && isSafetyLockedHermesJob(itemHermesJobId(item)) ? <span className="rounded border border-amber-700 px-2 py-1 text-xs text-amber-300">Safety Locked</span> : null}
+                {path === '/employees' && item.status !== 'Archived' && isSafetyLockedHermesJob(itemHermesJobId(item)) ? <span className="rounded border border-amber-700 px-2 py-1 text-xs text-amber-300" title="Safety blocked: this worker can send real Gmail prospect outreach.">Locked</span> : null}
                 {path === '/employees' && item.status !== 'Archived' && !isSafetyLockedHermesJob(itemHermesJobId(item)) && ['Running', 'Scheduled'].includes(item.status) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="pause" data-voryx-action-path={`${path}/${item.id}/pause`} onClick={() => postAction(item, 'pause')}>Pause</button> : null}
                 {path === '/employees' && item.status !== 'Archived' && !isSafetyLockedHermesJob(itemHermesJobId(item)) && ['Paused', 'Stopped'].includes(item.status) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="resume" data-voryx-action-path={`${path}/${item.id}/resume`} onClick={() => postAction(item, 'resume')}>Resume</button> : null}
-                {path === '/employees' && item.status === 'Scheduled' && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn text-xs" type="button" data-voryx-action-label="run" data-voryx-action-path={`${path}/${item.id}/run`} onClick={() => postAction(item, 'run')}>Run</button> : null}
-                {path === '/employees' && item.status === 'Scheduled' && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="dry-run" data-voryx-action-path={`${path}/${item.id}/dry-run`} onClick={() => postAction(item, 'dry-run')}>Dry Run</button> : null}
-                {path === '/schedules' && item.status !== 'Archived' && isSafetyLockedHermesJob(itemHermesJobId(item)) ? <span className="rounded border border-amber-700 px-2 py-1 text-xs text-amber-300">Safety Locked</span> : null}
+                {path === '/employees' && item.status === 'Scheduled' && canShowManualRun(item) ? <button className="btn text-xs" type="button" data-voryx-action-label="run" data-voryx-action-path={`${path}/${item.id}/run`} onClick={() => postAction(item, 'run')}>Run</button> : null}
+                {path === '/employees' && item.status === 'Scheduled' && canShowDryRun(item) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="dry-run" data-voryx-action-path={`${path}/${item.id}/dry-run`} onClick={() => postAction(item, 'dry-run')}>Dry Run</button> : null}
+                {path === '/schedules' && item.status !== 'Archived' && isSafetyLockedHermesJob(itemHermesJobId(item)) ? <span className="rounded border border-amber-700 px-2 py-1 text-xs text-amber-300" title="Safety blocked: this schedule can send real Gmail prospect outreach.">Locked</span> : null}
                 {path === '/schedules' && item.status !== 'Archived' && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label={item.is_paused ? 'resume' : 'pause'} data-voryx-action-path={`${path}/${item.id}/${item.is_paused ? 'resume' : 'pause'}`} onClick={() => postAction(item, item.is_paused ? 'resume' : 'pause')}>{item.is_paused ? 'Resume' : 'Pause'}</button> : null}
-                {path === '/schedules' && item.status !== 'Archived' && !item.is_paused && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn text-xs" type="button" data-voryx-action-label="run" data-voryx-action-path={`${path}/${item.id}/run`} onClick={() => postAction(item, 'run')}>Run Now</button> : null}
-                {path === '/schedules' && item.status !== 'Archived' && !item.is_paused && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="dry-run" data-voryx-action-path={`${path}/${item.id}/dry-run`} onClick={() => postAction(item, 'dry-run')}>Dry Run</button> : null}
-                {path === '/schedules' && item.status !== 'Archived' && !item.is_paused && !isSafetyLockedHermesJob(itemHermesJobId(item)) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="test-run" data-voryx-action-path={`${path}/${item.id}/test-run`} onClick={() => postAction(item, 'test-run')}>Test Run</button> : null}
+                {path === '/schedules' && item.status !== 'Archived' && !item.is_paused && canShowManualRun(item) ? <button className="btn text-xs" type="button" data-voryx-action-label="run" data-voryx-action-path={`${path}/${item.id}/run`} onClick={() => postAction(item, 'run')}>Run Now</button> : null}
+                {path === '/schedules' && item.status !== 'Archived' && !item.is_paused && canShowDryRun(item) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="dry-run" data-voryx-action-path={`${path}/${item.id}/dry-run`} onClick={() => postAction(item, 'dry-run')}>Dry Run</button> : null}
+                {path === '/schedules' && item.status !== 'Archived' && !item.is_paused && canShowDryRun(item) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="test-run" data-voryx-action-path={`${path}/${item.id}/test-run`} onClick={() => postAction(item, 'test-run')}>Test Run</button> : null}
+                {path === '/employees' && item.status === 'Scheduled' && !isSafetyLockedHermesJob(itemHermesJobId(item)) && !caps.supports_manual_run && !caps.supports_dry_run ? <ManualRunUnavailable capabilities={caps} /> : null}
+                {path === '/schedules' && item.status !== 'Archived' && !item.is_paused && !isSafetyLockedHermesJob(itemHermesJobId(item)) && !caps.supports_manual_run && !caps.supports_dry_run ? <ManualRunUnavailable capabilities={caps} /> : null}
                 {path !== '/schedules' ? <button className="btn-secondary text-xs" type="button" data-voryx-crud-archive onClick={() => archive(item)}>{item.status === 'Archived' ? 'Restore' : 'Archive'}</button> : null}
               </div>
             </div>

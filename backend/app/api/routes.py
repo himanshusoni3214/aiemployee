@@ -640,6 +640,10 @@ def hermes_live(db: Session=Depends(get_db), user: User=Depends(current_user)):
 def sync_status(user: User=Depends(current_user)):
     return hermes_sync_status()
 
+@router.get('/connectors/capabilities')
+async def connector_capabilities(user: User=Depends(current_user)):
+    return {'hermes': get_connector('hermes').capabilities()}
+
 @router.get('/system/health')
 async def system_health(company_id: str|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):
     platform_import = _sync_hermes_snapshot(db, user.id)

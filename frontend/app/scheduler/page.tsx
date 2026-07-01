@@ -1,5 +1,5 @@
 import { serverApi } from '../../lib/serverApi';
-import { ScheduleActions } from '../../components/ActionButtons';
+import { ScheduleActions, defaultConnectorCapabilities, type ConnectorCapabilities } from '../../components/ActionButtons';
 import { LocalTime } from '../../components/LocalTime';
 import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
 import { CompanySelector } from '../../components/CompanySelector';
@@ -7,6 +7,7 @@ import { QuerySelector } from '../../components/QuerySelector';
 import CrudPage from '../../components/CrudPage';
 import { firstParam, queryString, selectedCompanyId } from '../../lib/companySelection';
 
+type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
 type Campaign = { id: string; company_id: string; name: string; status: string };
 type Employee = { id: string; company_id: string; campaign_id?: string | null; name: string; status: string };
@@ -28,6 +29,11 @@ function hermesId(schedule: Schedule) {
   return typeof value === 'string' ? value : '-';
 }
 
+function manualRunUnavailable(capabilities: ConnectorCapabilities, schedule: Schedule) {
+  const id = hermesId(schedule);
+  return !schedule.is_paused && id !== 'b03a2d0f1149' && !capabilities.supports_manual_run && !capabilities.supports_dry_run;
+}
+
 export default async function SchedulerPage({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
   const params = (await searchParams) || {};
   const companies = await serverApi<Company[]>('/companies', []);
@@ -40,7 +46,11 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
   const requestedEmployeeId = firstParam(params.employee_id);
   const employeeId = requestedEmployeeId && employees.some((employee) => employee.id === requestedEmployeeId) ? requestedEmployeeId : '';
   const schedules = companyId ? await serverApi<Schedule[]>(`/schedules${queryString({ company_id: companyId, campaign_id: campaignId || undefined, employee_id: employeeId || undefined })}`, []) : [];
-  const sync = await serverApi<SyncInfo>('/sync/status', {});
+  const [sync, capabilitiesResponse] = await Promise.all([
+    serverApi<SyncInfo>('/sync/status', {}),
+    serverApi<CapabilitiesResponse>('/connectors/capabilities', {}),
+  ]);
+  const capabilities = capabilitiesResponse.hermes || defaultConnectorCapabilities;
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
   const employeeName = new Map(employees.map((employee) => [employee.id, employee.name]));
   const runningEmployees = new Set(employees.filter((employee) => employee.status === 'Running').map((employee) => employee.id));
@@ -82,7 +92,7 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
                 <td><LocalTime value={schedule.last_run_at} /></td>
                 <td><LocalTime value={schedule.next_run_at} /></td>
                 <td className="text-zinc-400">{hermesId(schedule)}</td>
-                <td><ScheduleActions id={schedule.id} isPaused={schedule.is_paused} hermesJobId={hermesId(schedule) === '-' ? null : hermesId(schedule)} /></td>
+                <td><ScheduleActions id={schedule.id} isPaused={schedule.is_paused} hermesJobId={hermesId(schedule) === '-' ? null : hermesId(schedule)} capabilities={capabilities} showUnavailableMessage={false} />{manualRunUnavailable(capabilities, schedule) ? <div className="mt-2 max-w-48 text-xs text-zinc-400" data-voryx-manual-run-unavailable>{capabilities.manual_run_message || 'Manual run unavailable in jobs_json mode'}</div> : null}</td>
               </tr>
             ))}
             {!schedules.length ? <tr><td colSpan={10} className="text-zinc-400">{companyId ? 'No schedules for selected filters' : 'No company selected'}</td></tr> : null}
@@ -103,6 +113,7 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
             payload: { type: 'json' },
             is_paused: { type: 'boolean', label: 'Paused' },
           }}
+          capabilities={capabilities}
           defaults={{
             employee_id: employeeId || employees[0]?.id || '',
             name: '',
