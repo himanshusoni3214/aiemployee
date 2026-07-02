@@ -51,6 +51,8 @@ function itemMeta(item: any, maps?: Record<string, Record<string, string>>) {
     );
   }
   if (item.status) parts.push(item.status);
+  if (item.campaign_type && item.campaign_type !== 'custom') parts.push(item.campaign_type.replaceAll('_', ' '));
+  if (item.provisioning_state) parts.push(item.provisioning_state);
   return parts.join(' / ');
 }
 
@@ -162,6 +164,21 @@ export default function CrudPage({
     }
   }
 
+  async function postPath(actionPath: string, label: string) {
+    try {
+      setBusy(actionPath);
+      const result = await api(actionPath, { method: 'POST' });
+      setMessage(result?.message || `${label} completed`);
+      setError('');
+      await load();
+    } catch (err: any) {
+      setError(err.message || `${label} failed`);
+      setMessage('');
+    } finally {
+      setBusy('');
+    }
+  }
+
   function edit(item: any) {
     const next = { ...defaults };
     for (const key of Object.keys(defaults)) next[key] = item[key] ?? defaults[key];
@@ -181,6 +198,14 @@ export default function CrudPage({
   function itemHermesJobId(item: any) {
     const payload = item.payload && typeof item.payload === 'object' ? item.payload : {};
     return item.hermes_job_id || payload.hermes_job_id || null;
+  }
+
+  function campaignTemplateAction(item: any) {
+    const type = String(item.campaign_type || 'custom');
+    if (type === 'lead_research') return { action: 'generate-sample', label: 'Generate sample' };
+    if (type === 'daily_reporting') return { action: 'send-internal-test', label: 'Send internal test' };
+    if (type === 'outreach_drafting') return { action: 'generate-sample-draft', label: 'Generate sample draft' };
+    return null;
   }
 
   function canShowManualRun(item: any) {
@@ -273,6 +298,20 @@ export default function CrudPage({
                 <button className="btn-secondary text-xs" type="button" data-voryx-crud-edit onClick={() => edit(item)}>Edit</button>
                 {path === '/campaigns' ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="duplicate" data-voryx-action-path={`${path}/${item.id}/duplicate`} onClick={() => postAction(item, 'duplicate')}>Duplicate</button> : null}
                 {path === '/campaigns' && item.status !== 'Archived' ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label={item.status === 'Inactive' ? 'resume' : 'pause'} data-voryx-action-path={`${path}/${item.id}/${item.status === 'Inactive' ? 'resume' : 'pause'}`} onClick={() => postAction(item, item.status === 'Inactive' ? 'resume' : 'pause')}>{item.status === 'Inactive' ? 'Resume' : 'Pause'}</button> : null}
+                {path === '/campaigns' && campaignTemplateAction(item) ? (
+                  <button
+                    className="btn-secondary text-xs"
+                    type="button"
+                    data-voryx-action-label={campaignTemplateAction(item)?.action}
+                    data-voryx-action-path={`${path}/${item.id}/template/${campaignTemplateAction(item)?.action}`}
+                    onClick={() => {
+                      const templateAction = campaignTemplateAction(item);
+                      if (templateAction) void postPath(`${path}/${item.id}/template/${templateAction.action}`, templateAction.label);
+                    }}
+                  >
+                    {campaignTemplateAction(item)?.label}
+                  </button>
+                ) : null}
                 {path === '/employees' && item.status !== 'Archived' && isSafetyLockedHermesJob(itemHermesJobId(item)) ? <span className="rounded border border-amber-700 px-2 py-1 text-xs text-amber-300" title="Safety blocked: this worker can send real Gmail prospect outreach.">Locked</span> : null}
                 {path === '/employees' && item.status !== 'Archived' && !isSafetyLockedHermesJob(itemHermesJobId(item)) && ['Running', 'Scheduled'].includes(item.status) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="pause" data-voryx-action-path={`${path}/${item.id}/pause`} onClick={() => postAction(item, 'pause')}>Pause</button> : null}
                 {path === '/employees' && item.status !== 'Archived' && !isSafetyLockedHermesJob(itemHermesJobId(item)) && ['Paused', 'Stopped'].includes(item.status) ? <button className="btn-secondary text-xs" type="button" data-voryx-action-label="resume" data-voryx-action-path={`${path}/${item.id}/resume`} onClick={() => postAction(item, 'resume')}>Resume</button> : null}

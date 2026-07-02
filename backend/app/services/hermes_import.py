@@ -225,7 +225,26 @@ class HermesImportService:
         db.flush()
         return company, True, False
 
+    def _company_for_job(self, db: Session, default_company: Company, hermes_job: dict[str, Any]) -> Company:
+        company_id = str(hermes_job.get("company_id") or "").strip()
+        if company_id:
+            company = db.get(Company, company_id)
+            if company:
+                return company
+        return default_company
+
     def _campaign(self, db: Session, company: Company, hermes_job: dict[str, Any]) -> tuple[Campaign, bool, bool]:
+        campaign_id = str(hermes_job.get("campaign_id") or "").strip()
+        if campaign_id:
+            campaign = db.get(Campaign, campaign_id)
+            if campaign:
+                if campaign.status == Status.archived:
+                    return campaign, False, False
+                status = _campaign_status(hermes_job)
+                if campaign.status == Status.active and status == Status.inactive:
+                    status = campaign.status
+                changed = _assign(campaign, status=status)
+                return campaign, False, changed
         name = _campaign_name(hermes_job.get("name") or "")
         campaign = db.scalar(select(Campaign).where(Campaign.company_id == company.id, func.lower(Campaign.name) == name.lower()))
         status = _campaign_status(hermes_job)
@@ -250,7 +269,10 @@ class HermesImportService:
     def _employee(self, db: Session, company: Company, campaign: Campaign, hermes_job: dict[str, Any]) -> tuple[AIEmployee, bool, bool]:
         hermes_id = str(hermes_job.get("id") or _slug(hermes_job.get("name") or "workflow"))
         name = f"Hermes {_human_name(hermes_job.get('name') or hermes_id)}"
-        employee = db.get(AIEmployee, f"employee-hermes-{hermes_id}")
+        employee_id = str(hermes_job.get("employee_id") or "").strip()
+        employee = db.get(AIEmployee, employee_id) if employee_id else None
+        if not employee:
+            employee = db.get(AIEmployee, f"employee-hermes-{hermes_id}")
         if not employee:
             employee = db.scalar(select(AIEmployee).where(AIEmployee.company_id == company.id, func.lower(AIEmployee.name) == name.lower()))
         status = _employee_status(hermes_job)
@@ -286,14 +308,19 @@ class HermesImportService:
 
     def _schedule(self, db: Session, employee: AIEmployee, hermes_job: dict[str, Any]) -> tuple[Schedule, bool, bool]:
         hermes_id = str(hermes_job.get("id") or _slug(hermes_job.get("name") or "workflow"))
-        schedule = db.get(Schedule, f"schedule-hermes-{hermes_id}")
+        schedule_id = str(hermes_job.get("schedule_id") or "").strip()
+        schedule = db.get(Schedule, schedule_id) if schedule_id else None
+        if not schedule:
+            schedule = db.get(Schedule, f"schedule-hermes-{hermes_id}")
+        if not schedule:
+            schedule = db.scalar(select(Schedule).where(Schedule.employee_id == employee.id, Schedule.payload["hermes_job_id"].as_string() == hermes_id))
         schedule_data = hermes_job.get("schedule") if isinstance(hermes_job.get("schedule"), dict) else {}
         cron = schedule_data.get("expr") or hermes_job.get("schedule_display") or schedule_data.get("display") or "manual"
         fields = {
             "employee_id": employee.id,
             "name": hermes_job.get("name") or hermes_id,
             "cron": cron,
-            "task_type": _task_type(hermes_job.get("name") or ""),
+            "task_type": hermes_job.get("task_type") or _task_type(hermes_job.get("name") or ""),
             "payload": {
                 "source": "hermes",
                 "hermes_job_id": hermes_id,
@@ -305,6 +332,7 @@ class HermesImportService:
                 "hermes_last_delivery_error": hermes_job.get("last_delivery_error"),
                 "hermes_paused_at": hermes_job.get("paused_at"),
                 "hermes_paused_reason": hermes_job.get("paused_reason"),
+                "voryx_template": hermes_job.get("source") == "voryx_template",
             },
             "is_paused": _schedule_paused(hermes_job),
             "last_run_at": _parse_dt(hermes_job.get("last_run_at")),
@@ -321,7 +349,7 @@ class HermesImportService:
         hermes_id = str(hermes_job.get("id") or _slug(hermes_job.get("name") or "workflow"))
         job = db.get(Job, f"hermes-schedule-{hermes_id}")
         status = _job_status(hermes_job)
-        last_run = _parse_dt(hermes_job.get("last_run_at")) or _parse_dt(hermes_job.get("created_at")) or datetime.utcnow()
+        last_run = _parse_dt(hermes_job.get("last_run_at")) or _parse_dt(hermes_job.get("created_at")) or (job.created_at if job else datetime.utcnow())
         error = hermes_job.get("last_error") or hermes_job.get("last_delivery_error")
         external_key = f"hermes:schedule:{hermes_id}:{hermes_job.get('last_run_at') or 'never'}"
         verification_reason = error or "Hermes schedule snapshot only; no durable delivery evidence"
@@ -329,9 +357,9 @@ class HermesImportService:
             "employee_id": employee.id,
             "campaign_id": campaign.id,
             "connector": "hermes",
-            "task_type": _task_type(hermes_job.get("name") or ""),
+            "task_type": hermes_job.get("task_type") or _task_type(hermes_job.get("name") or ""),
             "status": status,
-            "payload": {"source": "hermes", "kind": "schedule_state", "hermes_job_id": hermes_id, "name": hermes_job.get("name")},
+            "payload": {"source": "hermes", "kind": "schedule_state", "hermes_job_id": hermes_id, "name": hermes_job.get("name"), "voryx_template": hermes_job.get("source") == "voryx_template"},
             "result": {"hermes": hermes_job},
             "logs": [
                 f"Imported Hermes schedule {hermes_id}",
@@ -363,6 +391,7 @@ class HermesImportService:
     def _workflow(self, db: Session, company: Company, hermes_job: dict[str, Any]) -> tuple[AIEmployee, Campaign, dict[str, int]]:
         created = 0
         updated = 0
+        company = self._company_for_job(db, company, hermes_job)
         campaign, was_created, was_updated = self._campaign(db, company, hermes_job)
         created += int(was_created)
         updated += int(was_updated)

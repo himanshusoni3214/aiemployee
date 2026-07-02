@@ -20,6 +20,13 @@ from app.services.hermes_safety import SAFETY_LOCK_MESSAGE, is_safety_blocked_ac
 from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as _sync_hermes_snapshot
 from app.services.internal_mail_queue import enqueue_daily_report_delivery, ingest_internal_mail_receipts
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, validate_report_recipient
+from app.services.template_provisioning import (
+    PROVISIONED_STATES,
+    create_template_sample_job,
+    mark_provisioning_failed,
+    provision_campaign_template,
+    validate_employee_operational_state,
+)
 
 router = APIRouter()
 oauth2 = OAuth2PasswordBearer(tokenUrl='/api/auth/login', auto_error=False)
@@ -136,6 +143,13 @@ def _coerce_payload(model, payload: dict) -> dict:
         elif model is Lead:
             data['status'] = _enum_member(LeadStatus, data['status'])
     return data
+
+def _validate_model_state(db: Session, obj) -> None:
+    if isinstance(obj, AIEmployee):
+        try:
+            validate_employee_operational_state(db, obj)
+        except ValueError as exc:
+            raise HTTPException(400, str(exc)) from exc
 
 def _control_hermes_job(hermes_job_id: str, action: str) -> dict:
     try:
@@ -259,6 +273,15 @@ def crud(model, schema, label: str):
     @router.post(f'/{label}')
     def create_item(data: schema, db: Session=Depends(get_db), user: User=Depends(require_write)):
         obj = model(**_coerce_payload(model, data.model_dump())); db.add(obj); db.flush()
+        if model is Campaign:
+            try:
+                provision_campaign_template(db, obj, user.id)
+            except Exception as exc:
+                mark_provisioning_failed(obj, exc)
+                db.flush()
+                if (obj.campaign_type or 'custom').strip().lower() != 'custom':
+                    log(db, 'Campaign Template Provisioning Failed', 'Campaign', obj.id, obj.company_id, user.id, {'error': str(exc)})
+        _validate_model_state(db, obj)
         log(db, f'{model.__name__} Created', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id)
         db.commit(); db.refresh(obj); return obj
     @router.put(f'/{label}/{{item_id}}')
@@ -273,7 +296,18 @@ def crud(model, schema, label: str):
             next_timezone = str(payload.get('timezone') or obj.timezone)
             if hermes_id and (next_cron != obj.cron or next_timezone != obj.timezone):
                 metadata = {'hermes_control': HermesControlService().update_schedule(hermes_id, next_cron, next_timezone)}
+        previous_campaign_type = getattr(obj, 'campaign_type', None)
         for k,v in payload.items(): setattr(obj,k,v)
+        if model is Campaign and (obj.campaign_type or 'custom').strip().lower() != 'custom':
+            should_provision = previous_campaign_type != obj.campaign_type or obj.provisioning_state not in {'Provisioned', 'Active', 'Paused'}
+            if should_provision:
+                try:
+                    provision_campaign_template(db, obj, user.id)
+                except Exception as exc:
+                    mark_provisioning_failed(obj, exc)
+                    db.flush()
+                    log(db, 'Campaign Template Provisioning Failed', 'Campaign', obj.id, obj.company_id, user.id, {'error': str(exc)})
+        _validate_model_state(db, obj)
         log(db, f'{model.__name__} Updated', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id, metadata)
         db.commit(); db.refresh(obj); return obj
     @router.delete(f'/{label}/{{item_id}}')
@@ -349,6 +383,9 @@ def _campaign_payload(campaign: Campaign, *, state: str = 'ok', hermes_controls:
         'daily_lead_goal': campaign.daily_lead_goal,
         'daily_email_goal': campaign.daily_email_goal,
         'daily_email_limit': campaign.daily_email_limit,
+        'campaign_type': campaign.campaign_type,
+        'provisioning_state': campaign.provisioning_state,
+        'provisioning_result': campaign.provisioning_result,
         'timezone': campaign.timezone,
         'allowed_sending_days': campaign.allowed_sending_days,
         'allowed_sending_hours': campaign.allowed_sending_hours,
@@ -398,6 +435,9 @@ def campaign_action(campaign_id: str, action: str, db: Session=Depends(get_db), 
             'daily_lead_goal': campaign.daily_lead_goal,
             'daily_email_goal': campaign.daily_email_goal,
             'daily_email_limit': campaign.daily_email_limit,
+            'campaign_type': 'custom',
+            'provisioning_state': 'Draft',
+            'provisioning_result': {'provisioned': False, 'source_campaign_id': campaign.id},
             'timezone': campaign.timezone,
             'allowed_sending_days': campaign.allowed_sending_days,
             'allowed_sending_hours': campaign.allowed_sending_hours,
@@ -414,8 +454,10 @@ def campaign_action(campaign_id: str, action: str, db: Session=Depends(get_db), 
         db.commit(); db.refresh(copy); return copy
     if action == 'pause':
         campaign.status = Status.inactive
+        campaign.provisioning_state = 'Paused' if campaign.provisioning_state in PROVISIONED_STATES else campaign.provisioning_state
     elif action == 'resume':
         campaign.status = Status.active
+        campaign.provisioning_state = 'Active' if campaign.provisioning_state in PROVISIONED_STATES else campaign.provisioning_state
     else:
         raise HTTPException(400, 'Unsupported action')
     controls, blocked = _control_campaign_workers(db, campaign, action)
@@ -463,6 +505,11 @@ def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), 
         control_result = _control_hermes_job(hermes_id, control_action)
         emp = _refresh_employee_from_hermes(db, employee_id, user.id)
     elif action in mapping:
+        if mapping[action] in {EmployeeStatus.running, EmployeeStatus.scheduled}:
+            try:
+                validate_employee_operational_state(db, emp, mapping[action])
+            except ValueError as exc:
+                raise HTTPException(400, str(exc)) from exc
         emp.status = mapping[action]
         if action in {'start', 'resume', 'restart'}:
             emp.circuit_breaker_open = False
@@ -488,6 +535,25 @@ def employee_action(employee_id: str, action: str, db: Session=Depends(get_db), 
         response_payload = _action_response(action, hermes_control=control_result)
     log(db, f'Employee {action.title()}', 'AIEmployee', emp.id, emp.company_id, user.id, {'hermes_control': control_result} if control_result else None)
     db.commit(); return response_payload
+
+@router.post('/campaigns/{campaign_id}/template/{action}')
+def campaign_template_action(campaign_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Not found')
+    try:
+        job = create_template_sample_job(db, campaign, action.lower(), user.id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    db.refresh(job)
+    return {
+        'ok': True,
+        'state': job.status.name,
+        'status': job.status.name,
+        'job_id': job.id,
+        'message': (job.logs or ['Template action completed without sending email.'])[-1],
+        'result': job.result,
+    }
 
 @router.post('/schedules/{schedule_id}/{action}')
 def schedule_action(schedule_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):

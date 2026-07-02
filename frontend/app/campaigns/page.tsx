@@ -13,6 +13,9 @@ type Campaign = {
   industry?: string;
   daily_lead_goal?: number;
   daily_email_goal?: number;
+  campaign_type?: string;
+  provisioning_state?: string;
+  provisioning_result?: Record<string, unknown>;
   status: string;
 };
 type Job = { campaign_id?: string | null; status: string; task_type: string };
@@ -56,19 +59,23 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
       </div>
       <div className="table-wrap">
         <table className="ops-table">
-          <thead><tr><th>Campaign</th><th>Company</th><th>Industry</th><th>Daily Goals</th><th>Imported Jobs</th><th>Status</th></tr></thead>
+          <thead><tr><th>Campaign</th><th>Company</th><th>Template</th><th>Provisioning</th><th>Daily Goals</th><th>Imported Jobs</th><th>Status</th></tr></thead>
           <tbody>
             {campaigns.map((campaign) => (
               <tr key={campaign.id}>
                 <td className="font-medium text-stone-100">{campaign.name}</td>
                 <td>{companyName.get(campaign.company_id) || campaign.company_id}</td>
-                <td>{campaign.industry || '-'}</td>
+                <td>{(campaign.campaign_type || 'custom').replaceAll('_', ' ')}</td>
+                <td>
+                  <div>{campaign.provisioning_state || 'Draft'}</div>
+                  <div className="text-xs text-zinc-500">{String(campaign.provisioning_result?.hermes_job_id || '') || 'No Hermes job'}</div>
+                </td>
                 <td>{campaign.daily_lead_goal ?? 0} leads, {campaign.daily_email_goal ?? 0} emails</td>
                 <td>{countJobs(jobs, campaign.id)} total / {countJobs(jobs, campaign.id, 'Send Outreach')} outreach</td>
                 <td>{campaign.status}</td>
               </tr>
             ))}
-            {!campaigns.length ? <tr><td colSpan={6} className="text-zinc-400">{companyId ? 'No campaigns for selected company' : 'No company selected'}</td></tr> : null}
+            {!campaigns.length ? <tr><td colSpan={7} className="text-zinc-400">{companyId ? 'No campaigns for selected company' : 'No company selected'}</td></tr> : null}
           </tbody>
         </table>
       </div>
@@ -88,6 +95,14 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             allowed_sending_days: { type: 'days', label: 'Allowed sending days' },
             allowed_sending_hours: { type: 'hours', label: 'Allowed sending hours' },
             dry_run_mode: { type: 'boolean', label: 'Dry-run mode' },
+            campaign_type: { type: 'select', label: 'Template', options: [
+              { value: 'lead_research', label: 'Lead Research' },
+              { value: 'daily_reporting', label: 'Daily Reporting' },
+              { value: 'outreach_drafting', label: 'Outreach Drafting' },
+              { value: 'custom', label: 'Custom' },
+            ] },
+            provisioning_state: { type: 'readonly', label: 'Provisioning state', readOnly: true },
+            provisioning_result: { type: 'json', label: 'Provisioning result', readOnly: true },
             start_date: { type: 'date' },
             end_date: { type: 'date' },
             status: { type: 'select', options: [{ value: 'Active', label: 'Active' }, { value: 'Inactive', label: 'Inactive' }, { value: 'Archived', label: 'Archived' }] },
@@ -103,6 +118,9 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             daily_lead_goal: 0,
             daily_email_goal: 0,
             daily_email_limit: 0,
+            campaign_type: 'custom',
+            provisioning_state: 'Draft',
+            provisioning_result: {},
             timezone: 'America/Toronto',
             allowed_sending_days: ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'],
             allowed_sending_hours: { start: '09:00', end: '19:00' },

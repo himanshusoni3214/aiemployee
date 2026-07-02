@@ -151,6 +151,50 @@ class HermesControlService:
             "hermes_job_name": PROCESSOR_JOB_NAME,
         }
 
+    def upsert_provisioned_job(self, desired: dict[str, Any]) -> dict[str, Any]:
+        job_id = str(desired.get("id") or "").strip()
+        if not job_id:
+            raise HermesControlError("Provisioned Hermes job requires an id")
+        raw = self._read_jobs()
+        existing = self._find_job(raw, job_id)
+        if existing:
+            if existing.get("source") not in {"voryx_template", "voryx_ops_template"}:
+                raise HermesControlError(f"Hermes job id already exists and is not template-owned: {job_id}")
+            before = dict(existing)
+            changed = False
+            for key, value in desired.items():
+                if existing.get(key) != value:
+                    existing[key] = value
+                    changed = True
+            if changed:
+                self._write_jobs(raw)
+            return {
+                "status": "ok",
+                "mode": "jobs_json",
+                "action": "upsert_provisioned_job",
+                "created": False,
+                "updated": changed,
+                "hermes_job_id": job_id,
+                "hermes_job_name": str(existing.get("name") or ""),
+                "before": redact(json.dumps(before, default=str)) if changed else None,
+                "backup_path": self.last_backup_path,
+            }
+        self._append_job(raw, desired)
+        self._write_jobs(raw)
+        verified = self._find_job(self._read_jobs(), job_id)
+        if not verified:
+            raise HermesControlError(f"Provisioned Hermes job was not persisted: {job_id}")
+        return {
+            "status": "ok",
+            "mode": "jobs_json",
+            "action": "upsert_provisioned_job",
+            "created": True,
+            "updated": False,
+            "hermes_job_id": job_id,
+            "hermes_job_name": str(desired.get("name") or ""),
+            "backup_path": self.last_backup_path,
+        }
+
     def trigger_internal_mail_processor(self) -> dict[str, Any]:
         ensured = self.ensure_internal_mail_processor_job()
         control = self.control(PROCESSOR_JOB_ID, "run")

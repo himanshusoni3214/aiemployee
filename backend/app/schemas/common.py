@@ -40,6 +40,9 @@ class CampaignIn(BaseModel):
     daily_lead_goal: int=0
     daily_email_goal: int=0
     daily_email_limit: int=0
+    campaign_type: str='custom'
+    provisioning_state: str='Draft'
+    provisioning_result: dict[str, Any]={}
     timezone: str='America/Toronto'
     allowed_sending_days: list[str]=[]
     allowed_sending_hours: dict[str, Any]={}
