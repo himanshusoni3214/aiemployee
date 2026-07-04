@@ -23,6 +23,7 @@ services:
     env_file: ${PRODUCTION_ENV_FILE:-.env.production}
     volumes:
       - /docker/hermes-agent-yepj/data:/hermes-data:rw
+      - /docker/hermes-agent-yepj/data:/opt/data:rw
     depends_on:
       - db
       - redis
@@ -42,6 +43,16 @@ services:
     build: ./backend
     restart: unless-stopped
     env_file: ${PRODUCTION_ENV_FILE:-.env.production}
+    environment:
+      HERMES_EXECUTION_DATA_PATH: /opt/data
+      HERMES_DATA_ROOT: /opt/data
+      HERMES_CONTAINER_DATA_ROOT: /opt/data
+      HIMALAYA_BIN: /opt/data/home/.cargo/bin/himalaya
+      HOME: /opt/data/home
+      PATH: /opt/data/home/.cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+    volumes:
+      - /docker/hermes-agent-yepj/data:/hermes-data:rw
+      - /docker/hermes-agent-yepj/data:/opt/data:rw
     depends_on:
       - db
       - redis
@@ -55,6 +66,9 @@ services:
     build: ./backend
     restart: unless-stopped
     env_file: ${PRODUCTION_ENV_FILE:-.env.production}
+    volumes:
+      - /docker/hermes-agent-yepj/data:/hermes-data:rw
+      - /docker/hermes-agent-yepj/data:/opt/data:rw
     depends_on:
       - db
       - redis

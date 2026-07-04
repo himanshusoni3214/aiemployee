@@ -21,6 +21,7 @@ class HermesConnectorModeTests(unittest.TestCase):
         self.original_jobs_path = settings.hermes_jobs_path
         self.original_data_path = settings.hermes_data_path
         self.original_client = connectors.httpx.AsyncClient
+        self.original_jobs_json_executor = connectors.execute_scheduled_jobs_json_task
 
     def tearDown(self):
         settings.hermes_connector_mode = self.original_mode
@@ -28,6 +29,7 @@ class HermesConnectorModeTests(unittest.TestCase):
         settings.hermes_jobs_path = self.original_jobs_path
         settings.hermes_data_path = self.original_data_path
         connectors.httpx.AsyncClient = self.original_client
+        connectors.execute_scheduled_jobs_json_task = self.original_jobs_json_executor
 
     def write_jobs(self, root):
         cron = Path(root) / "cron"
@@ -46,7 +48,27 @@ class HermesConnectorModeTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "unsupported")
             self.assertEqual(result["mode"], "jobs_json")
-            self.assertIn("No Hermes HTTP request", result["error"])
+            self.assertIn("requires payload.hermes_job_id", result["error"])
+
+    def test_jobs_json_execute_delegates_safe_scheduled_jobs_without_http(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self.write_jobs(tmp)
+            settings.hermes_connector_mode = "jobs_json"
+            settings.hermes_base_url = "http://hermes-agent:4860"
+            settings.hermes_data_path = tmp
+            connectors.httpx.AsyncClient = _ExplodingClient
+            calls = []
+
+            def fake_executor(task_type, payload):
+                calls.append((task_type, payload))
+                return {"status": "ok", "logs": ["safe executor"], "results": {"output_path": "/opt/data/out.csv"}}
+
+            connectors.execute_scheduled_jobs_json_task = fake_executor
+
+            result = asyncio.run(HermesConnector().execute("Generate Leads", {"hermes_job_id": "0d0c20e25f55"}))
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(calls, [("Generate Leads", {"hermes_job_id": "0d0c20e25f55"})])
 
     def test_ttyd_base_url_is_not_treated_as_http_jobs_api(self):
         settings.hermes_connector_mode = "http"

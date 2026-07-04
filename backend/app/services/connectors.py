@@ -5,6 +5,7 @@ from urllib.parse import urlparse
 
 import httpx
 from app.core.config import settings
+from app.services.hermes_jobs_json_executor import execute_scheduled_jobs_json_task
 
 
 class WorkerConnector(ABC):
@@ -74,10 +75,7 @@ class HermesConnector(WorkerConnector):
 
     async def execute(self, task_type: str, payload: dict) -> dict:
         if self.mode == "jobs_json":
-            return self._unsupported(
-                "Hermes connector is in jobs_json mode: jobs.json supports state synchronization and pause/resume/run scheduling, "
-                "but not arbitrary HTTP job execution. No Hermes HTTP request was made."
-            )
+            return execute_scheduled_jobs_json_task(task_type, payload)
         if self._base_url_is_ttyd():
             return self._unsupported(
                 "HERMES_BASE_URL points to ttyd on port 4860, which is the Hermes web terminal, not a jobs API. "
