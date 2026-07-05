@@ -202,9 +202,10 @@ export default function CrudPage({
 
   function campaignTemplateAction(item: any) {
     const type = String(item.campaign_type || 'custom');
-    if (type === 'lead_research') return { action: 'generate-sample', label: 'Generate sample' };
-    if (type === 'daily_reporting') return { action: 'send-internal-test', label: 'Send internal test' };
-    if (type === 'outreach_drafting') return { action: 'generate-sample-draft', label: 'Generate sample draft' };
+    const employees = Array.isArray(item?.provisioning_result?.employees) ? item.provisioning_result.employees : [];
+    if (type === 'lead_research' || employees.some((entry: any) => entry?.employee_template === 'lead_researcher')) return { action: 'generate-sample', label: 'Generate sample' };
+    if (type === 'daily_reporting' || employees.some((entry: any) => entry?.employee_template === 'daily_reporter')) return { action: 'send-internal-test', label: 'Send internal test' };
+    if (type === 'outreach_drafting' || employees.some((entry: any) => entry?.employee_template === 'outreach_draft_writer')) return { action: 'generate-sample-draft', label: 'Generate sample draft' };
     return null;
   }
 

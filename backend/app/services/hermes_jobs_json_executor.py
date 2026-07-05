@@ -97,7 +97,7 @@ def _is_generic_lead_research_job(hermes_job_id: str) -> bool:
     command = str(job.get("command") or "")
     safety = job.get("safety") if isinstance(job.get("safety"), dict) else {}
     return (
-        job.get("source") == "voryx_template"
+        job.get("source") in {"voryx_template", "voryx_employee_template"}
         and str(job.get("task_type") or "").lower() == "generate leads"
         and GENERIC_LEAD_RESEARCH_SCRIPT in command
         and "--no-email" in command

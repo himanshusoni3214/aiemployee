@@ -21,13 +21,16 @@ from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT
 
 APPROVED_INTERNAL_RECIPIENT = INTERNAL_REPORT_RECIPIENT
 PROVISIONED_STATES = {"Provisioned", "Active", "Paused"}
-TEMPLATE_TYPES = {"lead_research", "daily_reporting", "outreach_drafting", "custom"}
+CAMPAIGN_BLUEPRINTS = {"sales_outreach", "lead_generation", "custom"}
+LEGACY_EMPLOYEE_CAMPAIGN_TYPES = {"lead_research", "daily_reporting", "outreach_drafting"}
+TEMPLATE_TYPES = CAMPAIGN_BLUEPRINTS | LEGACY_EMPLOYEE_CAMPAIGN_TYPES
 GENERIC_LEAD_RESEARCH_SCRIPT = "/opt/data/home/leads/voryx_generic_lead_research.py"
 LOCKED_LEAD_FIELDS = [
     "lead_id",
     "created_at",
     "company_id",
     "campaign_id",
+    "employee_id",
     "hermes_job_id",
     "source_run_id",
     "business_name",
@@ -39,6 +42,7 @@ LOCKED_LEAD_FIELDS = [
     "lead_status",
     "verified_at",
     "source_url",
+    "source_file",
     "notes",
 ]
 DEFAULT_CUSTOM_LEAD_FIELDS = [
@@ -51,45 +55,70 @@ DEFAULT_CUSTOM_LEAD_FIELDS = [
     "call_notes",
     "sms_status",
 ]
-TEMPLATE_REGISTRY = {
-    "lead_research": {
-        "label": "Lead Research",
-        "allowed_employee_types": ["Lead Researcher"],
-        "required_fields": ["industry", "geographic_area", "target_audience", "daily_lead_goal", "email_sending_disabled"],
+CAMPAIGN_BLUEPRINT_REGISTRY = {
+    "sales_outreach": {
+        "label": "Sales / Outreach Campaign",
+        "required_fields": ["name", "industry", "geographic_area", "target_audience", "daily_lead_goal", "email_sending_disabled"],
+        "description": "Business objective with lead research, internal reporting, and draft-only outreach workers.",
+    },
+    "lead_generation": {
+        "label": "Lead Generation Campaign",
+        "required_fields": ["name", "industry", "geographic_area", "target_audience", "daily_lead_goal", "email_sending_disabled"],
+        "description": "Lead research objective with optional internal reporting.",
+    },
+    "custom": {
+        "label": "Custom Campaign",
+        "required_fields": ["name", "email_sending_disabled"],
+        "description": "Database-only campaign. Employees require verified manual Hermes provisioning before activation.",
+    },
+}
+EMPLOYEE_TEMPLATE_REGISTRY = {
+    "lead_researcher": {
+        "label": "Lead Researcher",
+        "employee_types": ["Lead Researcher"],
+        "required_fields": ["campaign.industry", "campaign.geographic_area", "campaign.target_audience", "daily_lead_goal", "lead_schema", "email_sending_disabled"],
         "disabled": False,
     },
-    "daily_reporting": {
-        "label": "Daily Reporting",
-        "allowed_employee_types": ["CRM Manager", "Report Manager"],
+    "daily_reporter": {
+        "label": "Daily Reporter / CRM Manager",
+        "employee_types": ["CRM Manager", "Report Manager", "Daily Reporter"],
         "required_fields": ["report_recipient", "timezone", "schedule_time", "internal_only"],
         "disabled": False,
     },
-    "outreach_drafting": {
-        "label": "Outreach Drafting",
-        "allowed_employee_types": ["Email Outreach", "Draft Writer"],
-        "required_fields": ["offer", "target_customer", "tone", "email_sending_disabled"],
+    "outreach_draft_writer": {
+        "label": "Outreach Draft Writer",
+        "employee_types": ["Email Outreach", "Draft Writer", "Outreach Draft Writer"],
+        "required_fields": ["offer", "target_customer", "tone", "no_send_action"],
         "disabled": False,
     },
     "reply_handler": {
         "label": "Reply Handler",
-        "allowed_employee_types": ["Reply Handler"],
+        "employee_types": ["Reply Handler"],
         "required_fields": [],
         "disabled": True,
         "reason": "Unavailable until Gmail/thread monitoring is implemented.",
     },
     "voice_agent": {
         "label": "Voice Agent",
-        "allowed_employee_types": ["Voice Agent"],
+        "employee_types": ["Voice Agent"],
         "required_fields": [],
         "disabled": True,
         "reason": "Unavailable until calling integration exists.",
     },
     "custom": {
         "label": "Custom",
-        "allowed_employee_types": ["Custom"],
-        "required_fields": [],
+        "employee_types": ["Custom"],
+        "required_fields": ["manual_hermes_job_id"],
         "disabled": False,
     },
+}
+TEMPLATE_REGISTRY = {
+    "lead_research": {"label": "Lead Researcher", "allowed_employee_types": ["Lead Researcher"], "required_fields": EMPLOYEE_TEMPLATE_REGISTRY["lead_researcher"]["required_fields"], "disabled": False},
+    "daily_reporting": {"label": "Daily Reporter / CRM Manager", "allowed_employee_types": ["CRM Manager", "Report Manager", "Daily Reporter"], "required_fields": EMPLOYEE_TEMPLATE_REGISTRY["daily_reporter"]["required_fields"], "disabled": False},
+    "outreach_drafting": {"label": "Outreach Draft Writer", "allowed_employee_types": ["Email Outreach", "Draft Writer", "Outreach Draft Writer"], "required_fields": EMPLOYEE_TEMPLATE_REGISTRY["outreach_draft_writer"]["required_fields"], "disabled": False},
+    "reply_handler": {"label": "Reply Handler", "allowed_employee_types": ["Reply Handler"], "required_fields": [], "disabled": True, "reason": EMPLOYEE_TEMPLATE_REGISTRY["reply_handler"]["reason"]},
+    "voice_agent": {"label": "Voice Agent", "allowed_employee_types": ["Voice Agent"], "required_fields": [], "disabled": True, "reason": EMPLOYEE_TEMPLATE_REGISTRY["voice_agent"]["reason"]},
+    "custom": {"label": "Custom", "allowed_employee_types": ["Custom"], "required_fields": [], "disabled": False},
 }
 
 
@@ -111,9 +140,10 @@ def _slug(value: str) -> str:
     return slug[:60] or "campaign"
 
 
-def _stable_job_id(campaign: Campaign) -> str:
-    digest = hashlib.sha1(f"{campaign.id}:{campaign.campaign_type}".encode("utf-8")).hexdigest()[:10]
-    return f"voryx-template-{_slug(campaign.name)}-{digest}"
+def _stable_job_id(campaign: Campaign, template_key: str | None = None, employee_id: str | None = None) -> str:
+    key = template_key or campaign.campaign_type or "custom"
+    digest = hashlib.sha1(f"{campaign.id}:{key}:{employee_id or ''}".encode("utf-8")).hexdigest()[:10]
+    return f"voryx-template-{_slug(campaign.name)}-{_slug(key)}-{digest}"
 
 
 def _company_workspace(company_id: str) -> str:
@@ -147,7 +177,7 @@ def _ensure_generic_lead_script() -> None:
     destination.chmod(0o755)
 
 
-def _lead_research_config(campaign: Campaign) -> dict[str, Any]:
+def _lead_research_config(campaign: Campaign, employee: AIEmployee | None = None, hermes_job_id: str | None = None) -> dict[str, Any]:
     industry = (campaign.industry or "").strip()
     location = (campaign.geographic_area or "").strip()
     target = (campaign.target_audience or "").strip()
@@ -166,6 +196,8 @@ def _lead_research_config(campaign: Campaign) -> dict[str, Any]:
     return {
         "company_id": campaign.company_id,
         "campaign_id": campaign.id,
+        "employee_id": getattr(employee, "id", None),
+        "hermes_job_id": hermes_job_id or getattr(employee, "hermes_job_id", None),
         "industry": industry,
         "location": location,
         "target_customer": target,
@@ -178,18 +210,18 @@ def _lead_research_config(campaign: Campaign) -> dict[str, Any]:
     }
 
 
-def _write_lead_research_config(campaign: Campaign, workspace: str) -> str:
-    config = _lead_research_config(campaign)
+def _write_lead_research_config(campaign: Campaign, workspace: str, employee: AIEmployee | None = None, hermes_job_id: str | None = None) -> str:
+    config = _lead_research_config(campaign, employee, hermes_job_id)
     path = _container_to_data_path(f"{workspace}/lead_research_config.json")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
     return f"{workspace}/lead_research_config.json"
 
 
-def _lead_research_command(campaign: Campaign, workspace: str) -> tuple[str, str, dict[str, Any]]:
+def _lead_research_command(campaign: Campaign, workspace: str, employee: AIEmployee | None = None, hermes_job_id: str | None = None) -> tuple[str, str, dict[str, Any]]:
     _ensure_generic_lead_script()
-    config = _lead_research_config(campaign)
-    config_path = _write_lead_research_config(campaign, workspace)
+    config = _lead_research_config(campaign, employee, hermes_job_id)
+    config_path = _write_lead_research_config(campaign, workspace, employee, hermes_job_id)
     output_dir = f"{workspace}/leads"
     _container_to_data_path(output_dir).mkdir(parents=True, exist_ok=True)
     command = " ".join([
@@ -199,6 +231,10 @@ def _lead_research_command(campaign: Campaign, workspace: str) -> tuple[str, str
         quote(config["company_id"]),
         "--campaign-id",
         quote(config["campaign_id"]),
+        "--employee-id",
+        quote(str(config.get("employee_id") or "")),
+        "--hermes-job-id",
+        quote(str(config.get("hermes_job_id") or "")),
         "--industry",
         quote(config["industry"]),
         "--location",
@@ -259,28 +295,111 @@ def update_campaign_lead_schema(campaign: Campaign, schema: dict[str, Any]) -> d
     result = dict(campaign.provisioning_result or {})
     result["lead_schema"] = next_schema
     campaign.provisioning_result = result
-    if (campaign.campaign_type or "").strip().lower() == "lead_research":
+    if _campaign_supports_lead_research(campaign):
         workspace = _campaign_workspace(campaign)
         _write_lead_research_config(campaign, workspace)
     return next_schema
 
 
+def _campaign_supports_lead_research(campaign: Campaign | None) -> bool:
+    if not campaign:
+        return False
+    return bool((campaign.industry or "").strip() and (campaign.geographic_area or "").strip() and (campaign.target_audience or "").strip() and int(campaign.daily_lead_goal or 0) > 0 and campaign.dry_run_mode is not False and not (campaign.daily_email_goal or campaign.daily_email_limit))
+
+
+def _campaign_supports_daily_reporter(campaign: Campaign | None) -> bool:
+    if not campaign:
+        return False
+    return bool((campaign.report_recipient or campaign.internal_test_recipient or "").strip() and (campaign.timezone or "").strip())
+
+
+def _campaign_supports_outreach_draft(campaign: Campaign | None) -> bool:
+    if not campaign:
+        return False
+    return bool((campaign.target_audience or "").strip() and (campaign.description or "").strip() and campaign.dry_run_mode is not False and not (campaign.daily_email_goal or campaign.daily_email_limit))
+
+
+def _employee_template_key(employee_type: str | None) -> str:
+    value = (employee_type or "Custom").strip().lower()
+    if value in {"lead researcher", "lead_researcher"}:
+        return "lead_researcher"
+    if value in {"crm manager", "report manager", "daily reporter", "daily_reporter"}:
+        return "daily_reporter"
+    if value in {"email outreach", "draft writer", "outreach draft writer", "outreach_draft_writer"}:
+        return "outreach_draft_writer"
+    if value in {"reply handler", "reply_handler"}:
+        return "reply_handler"
+    if value in {"voice agent", "voice_agent"}:
+        return "voice_agent"
+    return "custom"
+
+
 def template_registry_payload() -> dict[str, Any]:
     return {
-        key: {
-            **value,
-            "locked_lead_fields": LOCKED_LEAD_FIELDS if key == "lead_research" else [],
-            "default_custom_lead_fields": DEFAULT_CUSTOM_LEAD_FIELDS if key == "lead_research" else [],
-        }
-        for key, value in TEMPLATE_REGISTRY.items()
+        "campaign_blueprints": CAMPAIGN_BLUEPRINT_REGISTRY,
+        "employee_templates": {
+            key: {
+                **value,
+                "locked_lead_fields": LOCKED_LEAD_FIELDS if key == "lead_researcher" else [],
+                "default_custom_lead_fields": DEFAULT_CUSTOM_LEAD_FIELDS if key == "lead_researcher" else [],
+            }
+            for key, value in EMPLOYEE_TEMPLATE_REGISTRY.items()
+        },
+        "legacy_campaign_templates": {
+            key: {
+                **value,
+                "locked_lead_fields": LOCKED_LEAD_FIELDS if key == "lead_research" else [],
+                "default_custom_lead_fields": DEFAULT_CUSTOM_LEAD_FIELDS if key == "lead_research" else [],
+            }
+            for key, value in TEMPLATE_REGISTRY.items()
+        },
     }
 
 
 def allowed_employee_types_for_campaign(campaign: Campaign | None) -> list[str]:
+    if not campaign:
+        return ["Custom"]
     campaign_type = (getattr(campaign, "campaign_type", None) or "custom").strip().lower()
-    entry = TEMPLATE_REGISTRY.get(campaign_type) or TEMPLATE_REGISTRY["custom"]
-    return list(entry["allowed_employee_types"])
+    if campaign_type in LEGACY_EMPLOYEE_CAMPAIGN_TYPES:
+        entry = TEMPLATE_REGISTRY.get(campaign_type) or TEMPLATE_REGISTRY["custom"]
+        return list(entry["allowed_employee_types"])
+    allowed: list[str] = []
+    if _campaign_supports_lead_research(campaign):
+        allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["lead_researcher"]["employee_types"])
+    if _campaign_supports_daily_reporter(campaign):
+        allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["daily_reporter"]["employee_types"])
+    if _campaign_supports_outreach_draft(campaign):
+        allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["outreach_draft_writer"]["employee_types"])
+    allowed.append("Custom")
+    return list(dict.fromkeys(allowed))
 
+
+def validate_campaign_blueprint(campaign: Campaign) -> None:
+    campaign.campaign_type = (campaign.campaign_type or "custom").strip().lower()
+    if campaign.campaign_type in LEGACY_EMPLOYEE_CAMPAIGN_TYPES:
+        return
+    if campaign.campaign_type not in CAMPAIGN_BLUEPRINTS:
+        raise ValueError(f"Unsupported campaign blueprint: {campaign.campaign_type}")
+    if not (campaign.name or "").strip():
+        raise ValueError("Campaign name is required.")
+    if campaign.dry_run_mode is False or campaign.daily_email_goal or campaign.daily_email_limit:
+        raise ValueError("Campaign email sending must remain disabled.")
+    if campaign.campaign_type in {"sales_outreach", "lead_generation"}:
+        if not (campaign.industry or "").strip():
+            raise ValueError("Campaign requires Industry / niche.")
+        if not (campaign.geographic_area or "").strip():
+            raise ValueError("Campaign requires City / region.")
+        if not (campaign.target_audience or "").strip():
+            raise ValueError("Campaign requires Target customer.")
+        if int(campaign.daily_lead_goal or 0) <= 0:
+            raise ValueError("Campaign requires Lead goal greater than 0.")
+    result = dict(campaign.provisioning_result or {})
+    result.setdefault("campaign_blueprint", campaign.campaign_type)
+    result.setdefault("lead_schema", normalize_lead_schema(result))
+    result.setdefault("message", "Campaign blueprint saved. Add employee templates to provision Hermes jobs.")
+    campaign.provisioning_result = result
+    if campaign.provisioning_state in {None, "Provisioned", "Provisioning"}:
+        campaign.provisioning_state = "Draft"
 
 def verify_hermes_job_exists(hermes_job_id: str | None) -> bool:
     if not hermes_job_id:
@@ -467,6 +586,151 @@ def provision_campaign_template(db: Session, campaign: Campaign, user_id: str | 
     return campaign.provisioning_result
 
 
+
+def _employee_template_spec(campaign: Campaign, employee: AIEmployee, job_id: str) -> TemplateSpec | None:
+    workspace = _campaign_workspace(campaign)
+    key = _employee_template_key(employee.employee_type)
+    if key == "lead_researcher":
+        command, output_dir, config = _lead_research_command(campaign, workspace, employee, job_id)
+        return TemplateSpec(
+            employee_type="Lead Researcher",
+            task_type="Generate Leads",
+            schedule_name=f"{campaign.name} Lead Research",
+            cron="0 13 * * *",
+            command=command,
+            working_directory=workspace,
+            description="Voryx Lead Researcher job. Generates lead CSV files only and never sends email.",
+            safety={"prospect_outreach": False, "email_sending": False, "max_sample_leads": 5, "script": GENERIC_LEAD_RESEARCH_SCRIPT, "config": config},
+            prompt=f"Generate lead research only for {config['industry']} in {config['location']}. Email sending disabled.",
+        )
+    if key == "daily_reporter":
+        recipient = campaign.report_recipient or campaign.internal_test_recipient or APPROVED_INTERNAL_RECIPIENT
+        return TemplateSpec(
+            employee_type="CRM Manager" if employee.employee_type not in {"Report Manager", "Daily Reporter"} else employee.employee_type,
+            task_type="Daily Report",
+            schedule_name=f"{campaign.name} Daily Reporting",
+            cron="0 23 * * *",
+            command=f"python3 /opt/data/home/leads/generate_daily_report.py --recipient {quote(recipient)} --send-email false",
+            working_directory=workspace,
+            description="Voryx Daily Reporter job. Internal reports only.",
+            safety={"prospect_outreach": False, "approved_recipient": APPROVED_INTERNAL_RECIPIENT, "send_email_default": False, "internal_only": True},
+            prompt="Prepare internal daily reporting only for the approved recipient.",
+        )
+    if key == "outreach_draft_writer":
+        return TemplateSpec(
+            employee_type="Email Outreach" if employee.employee_type not in {"Draft Writer", "Outreach Draft Writer"} else employee.employee_type,
+            task_type="Draft Outreach",
+            schedule_name=f"{campaign.name} Outreach Drafting",
+            cron="0 15 * * *",
+            command=f"python3 /opt/data/home/leads/draft_outreach.py --output-dir {quote(workspace + '/drafts')} --no-send",
+            working_directory=workspace,
+            description="Voryx Outreach Draft Writer job. Draft-only automation with no send action.",
+            safety={"prospect_outreach": False, "email_sending": False, "draft_only": True},
+            prompt="Generate outreach draft copy only. Never send email.",
+        )
+    return None
+
+
+def _validate_employee_template_requirements(campaign: Campaign, employee: AIEmployee) -> None:
+    key = _employee_template_key(employee.employee_type)
+    if key == "reply_handler":
+        raise ValueError("Reply Handler is disabled until Gmail/thread monitoring is implemented.")
+    if key == "voice_agent":
+        raise ValueError("Voice Agent is disabled until calling integration exists.")
+    if key == "custom":
+        if employee.status in {EmployeeStatus.running, EmployeeStatus.scheduled} and not employee.hermes_job_id:
+            raise ValueError("Custom employees cannot become active without a verified Hermes job ID.")
+        return
+    if employee.employee_type not in allowed_employee_types_for_campaign(campaign):
+        raise ValueError(f"{employee.employee_type} is not valid for this campaign until required fields are complete. Allowed now: {', '.join(allowed_employee_types_for_campaign(campaign))}")
+    if key == "lead_researcher":
+        _lead_research_config(campaign, employee, employee.hermes_job_id)
+    if key == "daily_reporter":
+        recipient = campaign.report_recipient or campaign.internal_test_recipient
+        if not recipient:
+            raise ValueError("Daily Reporter requires report_recipient on the campaign.")
+        if recipient != APPROVED_INTERNAL_RECIPIENT:
+            raise ValueError(f"Daily Reporter recipient must be {APPROVED_INTERNAL_RECIPIENT}")
+        if not campaign.timezone:
+            raise ValueError("Daily Reporter requires campaign timezone.")
+    if key == "outreach_draft_writer":
+        if not (campaign.description or "").strip():
+            raise ValueError("Outreach Draft Writer requires offer/product and tone in campaign notes.")
+        if campaign.daily_email_goal or campaign.daily_email_limit or campaign.dry_run_mode is False:
+            raise ValueError("Outreach Draft Writer requires no send action and email sending disabled.")
+
+
+def provision_employee_template(db: Session, employee: AIEmployee, user_id: str | None = None) -> dict[str, Any] | None:
+    if not employee.campaign_id:
+        return None
+    campaign = db.get(Campaign, employee.campaign_id)
+    if not campaign:
+        raise ValueError("Employee template requires an existing campaign.")
+    key = _employee_template_key(employee.employee_type)
+    if key == "custom":
+        return None
+    _validate_employee_template_requirements(campaign, employee)
+    job_id = employee.hermes_job_id or _stable_job_id(campaign, key, employee.id)
+    employee.hermes_job_id = job_id
+    spec = _employee_template_spec(campaign, employee, job_id)
+    if not spec:
+        raise ValueError(f"No provisioning spec for employee template: {employee.employee_type}")
+    employee.employee_type = spec.employee_type
+    employee.approved_script = spec.command
+    employee.working_directory = spec.working_directory
+    employee.prompt = employee.prompt or spec.prompt
+    employee.daily_limits = {**(employee.daily_limits or {}), "employee_template": key, "campaign_blueprint": campaign.campaign_type, "hermes_job_id": job_id, "safety": spec.safety}
+    employee.status = EmployeeStatus.paused
+    employee.dry_run_mode = True
+    employee.daily_email_limit = 0 if key != "daily_reporter" else 1
+    employee.paused_reason = "Employee template provisioned paused; resume schedule only after review."
+
+    schedule = db.scalar(select(Schedule).where(Schedule.employee_id == employee.id, Schedule.payload["hermes_job_id"].as_string() == job_id))
+    if not schedule:
+        schedule = Schedule(
+            employee_id=employee.id,
+            name=spec.schedule_name,
+            cron=spec.cron,
+            timezone=campaign.timezone or "America/Toronto",
+            task_type=spec.task_type,
+            payload={"source": "voryx_employee_template", "hermes_job_id": job_id, "employee_template": key, "campaign_blueprint": campaign.campaign_type, "safety": spec.safety},
+            is_paused=True,
+        )
+        db.add(schedule)
+        db.flush()
+    else:
+        schedule.name = spec.schedule_name
+        schedule.cron = spec.cron
+        schedule.timezone = campaign.timezone or "America/Toronto"
+        schedule.task_type = spec.task_type
+        schedule.payload = {**(schedule.payload or {}), "source": "voryx_employee_template", "hermes_job_id": job_id, "employee_template": key, "campaign_blueprint": campaign.campaign_type, "safety": spec.safety}
+        schedule.is_paused = True
+
+    desired_job = _desired_job(campaign, employee, schedule, spec, job_id)
+    desired_job["source"] = "voryx_employee_template"
+    desired_job["name"] = f"voryx-{_slug(campaign.name)}-{_slug(key)}"
+    desired_job["employee_template"] = key
+    control = HermesControlService().upsert_provisioned_job(desired_job)
+    result = dict(campaign.provisioning_result or {})
+    employees = result.get("employees") if isinstance(result.get("employees"), list) else []
+    employees = [item for item in employees if not (isinstance(item, dict) and item.get("employee_id") == employee.id)]
+    employees.append({"employee_id": employee.id, "employee_template": key, "hermes_job_id": job_id, "schedule_id": schedule.id, "task_type": spec.task_type})
+    result.update({
+        "campaign_blueprint": campaign.campaign_type,
+        "provisioned": True,
+        "employees": employees,
+        "lead_schema": normalize_lead_schema(result),
+        "message": "Employee template provisioned disabled/paused Hermes job and paused Voryx schedule.",
+    })
+    if key == "lead_researcher":
+        result["latest_lead_research_job_id"] = job_id
+        result["working_directory"] = spec.working_directory
+    campaign.provisioning_result = result
+    if campaign.provisioning_state in {"Draft", "Provisioning", "Provisioning Failed", None}:
+        campaign.provisioning_state = "Provisioned"
+    log(db, "Employee Template Provisioned", "AIEmployee", employee.id, employee.company_id, user_id, {"employee_template": key, "hermes_job_id": job_id, "hermes_control": control})
+    return {"provisioned": True, "employee_template": key, "hermes_job_id": job_id, "schedule_id": schedule.id, "hermes_control": control}
+
 def mark_provisioning_failed(campaign: Campaign, exc: Exception) -> None:
     campaign.provisioning_state = "Provisioning Failed"
     campaign.provisioning_result = {"provisioned": False, "error": str(exc)}
@@ -496,12 +760,22 @@ def validate_employee_operational_state(db: Session, employee: AIEmployee, next_
 
 def create_template_sample_job(db: Session, campaign: Campaign, action: str, user_id: str | None = None) -> Job:
     campaign_type = (campaign.campaign_type or "custom").strip().lower()
-    employee = db.scalar(select(AIEmployee).where(AIEmployee.campaign_id == campaign.id).order_by(AIEmployee.name).limit(1))
+    employees = db.scalars(select(AIEmployee).where(AIEmployee.campaign_id == campaign.id).order_by(AIEmployee.name)).all()
+    lead_employee = next((item for item in employees if _employee_template_key(item.employee_type) == "lead_researcher"), None)
+    report_employee = next((item for item in employees if _employee_template_key(item.employee_type) == "daily_reporter"), None)
+    draft_employee = next((item for item in employees if _employee_template_key(item.employee_type) == "outreach_draft_writer"), None)
+    if campaign_type == "lead_research" and not lead_employee:
+        lead_employee = db.scalar(select(AIEmployee).where(AIEmployee.campaign_id == campaign.id).order_by(AIEmployee.name).limit(1))
+    if campaign_type == "daily_reporting" and not report_employee:
+        report_employee = db.scalar(select(AIEmployee).where(AIEmployee.campaign_id == campaign.id).order_by(AIEmployee.name).limit(1))
+    if campaign_type == "outreach_drafting" and not draft_employee:
+        draft_employee = db.scalar(select(AIEmployee).where(AIEmployee.campaign_id == campaign.id).order_by(AIEmployee.name).limit(1))
     now = datetime.utcnow()
-    if action == "generate-sample" and campaign_type == "lead_research":
+    if action == "generate-sample":
+        employee = lead_employee
         if not employee or not employee.hermes_job_id:
-            raise ValueError("Lead Research sample requires a provisioned Hermes job.")
-        _lead_research_config(campaign)
+            raise ValueError("Lead Research sample requires a provisioned Lead Researcher Hermes job.")
+        _lead_research_config(campaign, employee, employee.hermes_job_id)
         requested_limit = min(max(int(campaign.daily_lead_goal or 5), 1), 5)
         result = execute_scheduled_jobs_json_task(
             "Generate Leads",
@@ -509,6 +783,7 @@ def create_template_sample_job(db: Session, campaign: Campaign, action: str, use
                 "source": "dashboard_generate_sample",
                 "hermes_job_id": employee.hermes_job_id,
                 "campaign_type": "lead_research",
+                "employee_template": "lead_researcher",
                 "sample": True,
                 "limit": requested_limit,
                 "send_email": False,
@@ -528,7 +803,10 @@ def create_template_sample_job(db: Session, campaign: Campaign, action: str, use
             started_at=now,
             ended_at=datetime.utcnow(),
         )
-    elif action == "send-internal-test" and campaign_type == "daily_reporting":
+    elif action == "send-internal-test":
+        employee = report_employee
+        if not employee or not employee.hermes_job_id:
+            raise ValueError("Internal report test requires a provisioned Daily Reporter Hermes job.")
         recipient = campaign.report_recipient or campaign.internal_test_recipient or APPROVED_INTERNAL_RECIPIENT
         if recipient != APPROVED_INTERNAL_RECIPIENT:
             raise ValueError(f"Internal test recipient must be {APPROVED_INTERNAL_RECIPIENT}")
@@ -538,27 +816,30 @@ def create_template_sample_job(db: Session, campaign: Campaign, action: str, use
             connector="hermes",
             task_type="Daily Report Internal Test",
             status=JobStatus.completed,
-            payload={"internal_test": True, "recipient": recipient, "send_email": False},
+            payload={"internal_test": True, "recipient": recipient, "send_email": False, "hermes_job_id": employee.hermes_job_id},
             result={"recipient": recipient, "email_sent": False, "message": "Internal test rendered without sending email."},
             logs=[f"Internal test restricted to {recipient}; no email sent during template QA."],
             started_at=now,
             ended_at=now,
         )
-    elif action == "generate-sample-draft" and campaign_type == "outreach_drafting":
+    elif action == "generate-sample-draft":
+        employee = draft_employee
+        if not employee or not employee.hermes_job_id:
+            raise ValueError("Sample draft requires a provisioned Outreach Draft Writer Hermes job.")
         job = Job(
             employee_id=getattr(employee, "id", None),
             campaign_id=campaign.id,
             connector="hermes",
             task_type="Generate Sample Draft",
             status=JobStatus.completed,
-            payload={"draft_only": True, "send_email": False},
+            payload={"draft_only": True, "send_email": False, "hermes_job_id": employee.hermes_job_id},
             result={"draft": "QA sample outreach draft generated for review only.", "email_sent": False},
             logs=["Generated sample draft only; no send action exists."],
             started_at=now,
             ended_at=now,
         )
     else:
-        raise ValueError(f"Unsupported template action {action} for {campaign_type}")
+        raise ValueError(f"Unsupported template action {action} for campaign {campaign.id}")
     db.add(job)
     db.flush()
     log(db, "Campaign Template Sample", "Job", job.id, campaign.company_id, user_id, {"campaign_id": campaign.id, "action": action, "send_email": False})

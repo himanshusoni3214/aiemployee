@@ -30,8 +30,10 @@ from app.services.template_provisioning import (
     mark_provisioning_failed,
     normalize_lead_schema,
     provision_campaign_template,
+    provision_employee_template,
     template_registry_payload,
     update_campaign_lead_schema,
+    validate_campaign_blueprint,
     validate_employee_operational_state,
 )
 
@@ -252,31 +254,49 @@ def _container_path_for_physical(path: Path) -> str:
     relative = path.resolve().relative_to(root)
     return f"/opt/data/{relative.as_posix()}"
 
-def _latest_lead_outputs(campaign: Campaign, limit: int = 10) -> list[dict]:
+def _lead_output_dirs_for_campaign(db: Session, campaign: Campaign) -> list[str]:
+    dirs: list[str] = []
     result = campaign.provisioning_result if isinstance(campaign.provisioning_result, dict) else {}
     safety = result.get('safety') if isinstance(result.get('safety'), dict) else {}
     config = safety.get('config') if isinstance(safety.get('config'), dict) else {}
-    output_dir = config.get('output_dir') or f"/opt/data/home/voryx_workspaces/{campaign.company_id}/{campaign.id}/leads"
-    directory = _hermes_physical_path(str(output_dir))
-    if not directory.exists():
-        return []
+    if config.get('output_dir'):
+        dirs.append(str(config['output_dir']))
+    employees = db.scalars(select(AIEmployee).where(AIEmployee.campaign_id == campaign.id)).all()
+    for employee in employees:
+        limits = employee.daily_limits if isinstance(employee.daily_limits, dict) else {}
+        safety = limits.get('safety') if isinstance(limits.get('safety'), dict) else {}
+        config = safety.get('config') if isinstance(safety.get('config'), dict) else {}
+        if config.get('output_dir'):
+            dirs.append(str(config['output_dir']))
+    dirs.append(f"/opt/data/home/voryx_workspaces/{campaign.company_id}/{campaign.id}/leads")
+    return list(dict.fromkeys(dirs))
+
+
+def _latest_lead_outputs(campaign: Campaign, db: Session | None = None, limit: int = 10) -> list[dict]:
+    directories = _lead_output_dirs_for_campaign(db, campaign) if db else [f"/opt/data/home/voryx_workspaces/{campaign.company_id}/{campaign.id}/leads"]
     outputs = []
-    for path in sorted(directory.glob('*.csv'), key=lambda item: item.stat().st_mtime, reverse=True)[:limit]:
-        try:
-            with path.open(newline='', encoding='utf-8') as handle:
-                rows = list(csv.DictReader(handle))
-        except Exception:
-            rows = []
-        container_path = _container_path_for_physical(path)
-        outputs.append({
-            'path': container_path,
-            'download_url': f"/api/campaigns/{campaign.id}/lead-outputs/download?path={quote(container_path, safe='')}",
-            'row_count': len(rows),
-            'generated_at': datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + 'Z',
-            'columns': list(rows[0].keys()) if rows else [],
-            'metadata_path': container_path.removesuffix('.csv') + '.metadata.json',
-        })
-    return outputs
+    for output_dir in directories:
+        directory = _hermes_physical_path(str(output_dir))
+        if not directory.exists():
+            continue
+        for path in directory.glob('*.csv'):
+            try:
+                with path.open(newline='', encoding='utf-8') as handle:
+                    rows = list(csv.DictReader(handle))
+            except Exception:
+                rows = []
+            container_path = _container_path_for_physical(path)
+            outputs.append({
+                'path': container_path,
+                'file_name': path.name,
+                'download_url': f"/api/campaigns/{campaign.id}/lead-outputs/download?path={quote(container_path, safe='')}",
+                'row_count': len(rows),
+                'generated_at': datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + 'Z',
+                'columns': list(rows[0].keys()) if rows else [],
+                'metadata_path': container_path.removesuffix('.csv') + '.metadata.json',
+            })
+    outputs.sort(key=lambda item: item['generated_at'], reverse=True)
+    return outputs[:limit]
 
 def _filter_lead_rows(rows: list[dict], filter_name: str) -> list[dict]:
     value = (filter_name or 'all').strip().lower()
@@ -348,15 +368,23 @@ def crud(model, schema, label: str):
         obj = model(**_coerce_payload(model, data.model_dump())); db.add(obj); db.flush()
         if model is Campaign:
             try:
-                provision_campaign_template(db, obj, user.id)
+                validate_campaign_blueprint(obj)
+                if (obj.campaign_type or 'custom').strip().lower() in {'lead_research', 'daily_reporting', 'outreach_drafting'}:
+                    provision_campaign_template(db, obj, user.id)
             except ValueError as exc:
                 db.rollback()
                 raise HTTPException(400, str(exc)) from exc
             except Exception as exc:
                 mark_provisioning_failed(obj, exc)
                 db.flush()
-                if (obj.campaign_type or 'custom').strip().lower() != 'custom':
+                if (obj.campaign_type or 'custom').strip().lower() not in {'custom', 'sales_outreach', 'lead_generation'}:
                     log(db, 'Campaign Template Provisioning Failed', 'Campaign', obj.id, obj.company_id, user.id, {'error': str(exc)})
+        if model is AIEmployee:
+            try:
+                provision_employee_template(db, obj, user.id)
+            except ValueError as exc:
+                db.rollback()
+                raise HTTPException(400, str(exc)) from exc
         _validate_model_state(db, obj)
         log(db, f'{model.__name__} Created', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id)
         db.commit(); db.refresh(obj); return obj
@@ -374,18 +402,26 @@ def crud(model, schema, label: str):
                 metadata = {'hermes_control': HermesControlService().update_schedule(hermes_id, next_cron, next_timezone)}
         previous_campaign_type = getattr(obj, 'campaign_type', None)
         for k,v in payload.items(): setattr(obj,k,v)
-        if model is Campaign and (obj.campaign_type or 'custom').strip().lower() != 'custom':
-            should_provision = previous_campaign_type != obj.campaign_type or obj.provisioning_state not in {'Provisioned', 'Active', 'Paused'}
-            if should_provision:
-                try:
-                    provision_campaign_template(db, obj, user.id)
-                except ValueError as exc:
-                    db.rollback()
-                    raise HTTPException(400, str(exc)) from exc
-                except Exception as exc:
-                    mark_provisioning_failed(obj, exc)
-                    db.flush()
-                    log(db, 'Campaign Template Provisioning Failed', 'Campaign', obj.id, obj.company_id, user.id, {'error': str(exc)})
+        if model is Campaign:
+            try:
+                validate_campaign_blueprint(obj)
+                if (obj.campaign_type or 'custom').strip().lower() in {'lead_research', 'daily_reporting', 'outreach_drafting'}:
+                    should_provision = previous_campaign_type != obj.campaign_type or obj.provisioning_state not in {'Provisioned', 'Active', 'Paused'}
+                    if should_provision:
+                        provision_campaign_template(db, obj, user.id)
+            except ValueError as exc:
+                db.rollback()
+                raise HTTPException(400, str(exc)) from exc
+            except Exception as exc:
+                mark_provisioning_failed(obj, exc)
+                db.flush()
+                log(db, 'Campaign Template Provisioning Failed', 'Campaign', obj.id, obj.company_id, user.id, {'error': str(exc)})
+        if model is AIEmployee:
+            try:
+                provision_employee_template(db, obj, user.id)
+            except ValueError as exc:
+                db.rollback()
+                raise HTTPException(400, str(exc)) from exc
         _validate_model_state(db, obj)
         log(db, f'{model.__name__} Updated', model.__name__, obj.id, getattr(obj, 'company_id', None), user.id, metadata)
         db.commit(); db.refresh(obj); return obj
@@ -479,7 +515,7 @@ def campaign_lead_outputs(
 ):
     campaign = db.get(Campaign, campaign_id)
     if not campaign: raise HTTPException(404, 'Not found')
-    outputs = _latest_lead_outputs(campaign)
+    outputs = _latest_lead_outputs(campaign, db)
     latest_rows = []
     if outputs:
         path = _hermes_physical_path(outputs[0]['path'])
@@ -491,7 +527,7 @@ def campaign_lead_outputs(
 def download_campaign_lead_output(campaign_id: str, path: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
     campaign = db.get(Campaign, campaign_id)
     if not campaign: raise HTTPException(404, 'Not found')
-    outputs = _latest_lead_outputs(campaign, limit=50)
+    outputs = _latest_lead_outputs(campaign, db, limit=50)
     allowed = {item['path'] for item in outputs}
     if path not in allowed:
         raise HTTPException(403, 'Requested file is not a known output for this campaign')

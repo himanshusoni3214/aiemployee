@@ -10,7 +10,7 @@ import { firstParam, queryString, selectedCompanyId } from '../../lib/companySel
 
 type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
-type Campaign = { id: string; company_id: string; name: string; status: string; campaign_type?: string };
+type Campaign = { id: string; company_id: string; name: string; status: string; campaign_type?: string; industry?: string; geographic_area?: string; target_audience?: string; description?: string; daily_lead_goal?: number; daily_email_goal?: number; daily_email_limit?: number; dry_run_mode?: boolean; report_recipient?: string; internal_test_recipient?: string; timezone?: string };
 type Employee = {
   id: string;
   company_id: string;
@@ -40,14 +40,26 @@ function manualRunUnavailable(capabilities: ConnectorCapabilities, employee: Emp
   return employee.status === 'Scheduled' && !isSafetyLockedHermesJob(employee.hermes_job_id) && !capabilities.supports_manual_run && !capabilities.supports_dry_run;
 }
 
+function campaignReadyForLeadResearch(campaign?: Campaign) {
+  return Boolean(campaign?.industry && campaign?.geographic_area && campaign?.target_audience && Number(campaign?.daily_lead_goal || 0) > 0 && campaign?.dry_run_mode !== false && !campaign?.daily_email_goal && !campaign?.daily_email_limit);
+}
+function campaignReadyForDailyReporter(campaign?: Campaign) {
+  return Boolean((campaign?.report_recipient || campaign?.internal_test_recipient) && campaign?.timezone);
+}
+function campaignReadyForOutreachDraft(campaign?: Campaign) {
+  return Boolean(campaign?.target_audience && campaign?.description && campaign?.dry_run_mode !== false && !campaign?.daily_email_goal && !campaign?.daily_email_limit);
+}
 function allowedEmployeeTypes(campaign?: Campaign) {
-  const type = campaign?.campaign_type || 'custom';
-  if (type === 'lead_research') return ['Lead Researcher'];
-  if (type === 'daily_reporting') return ['CRM Manager', 'Report Manager'];
-  if (type === 'outreach_drafting') return ['Email Outreach', 'Draft Writer'];
-  if (type === 'reply_handler') return ['Reply Handler'];
-  if (type === 'voice_agent') return ['Voice Agent'];
-  return ['Custom'];
+  const legacy = campaign?.campaign_type || '';
+  if (legacy === 'lead_research') return ['Lead Researcher'];
+  if (legacy === 'daily_reporting') return ['CRM Manager', 'Report Manager', 'Daily Reporter'];
+  if (legacy === 'outreach_drafting') return ['Email Outreach', 'Draft Writer', 'Outreach Draft Writer'];
+  const values: string[] = [];
+  if (campaignReadyForLeadResearch(campaign)) values.push('Lead Researcher');
+  if (campaignReadyForDailyReporter(campaign)) values.push('CRM Manager', 'Report Manager', 'Daily Reporter');
+  if (campaignReadyForOutreachDraft(campaign)) values.push('Email Outreach', 'Draft Writer', 'Outreach Draft Writer');
+  values.push('Custom');
+  return Array.from(new Set(values));
 }
 
 export default async function EmployeesPage({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
@@ -67,7 +79,7 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
   const capabilities = capabilitiesResponse.hermes || defaultConnectorCapabilities;
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
   const campaignName = new Map(campaigns.map((campaign) => [campaign.id, campaign.name]));
-  const selectedCampaign = campaigns.find((campaign) => campaign.id === campaignId) || campaigns[0];
+  const selectedCampaign = campaigns.find((campaign) => campaign.id === campaignId) || undefined;
   const employeeTypes = allowedEmployeeTypes(selectedCampaign);
   const employeeTypeOptions = employeeTypes.map((value) => ({ value, label: value }));
   const companyOptions = companies.filter((company) => company.status !== 'Archived').map((company) => ({ value: company.id, label: company.name }));
@@ -87,6 +99,15 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
         <QuerySelector label="Campaign" param="campaign_id" value={campaignId} options={campaignOptions} allLabel="All campaigns" resetParams={['employee_id']} />
       </div>
       {!companyId ? <div className="card text-sm text-amber-300">Select a company to manage AI employees.</div> : null}
+      {companyId && selectedCampaign ? (
+        <div className="card grid gap-2 text-sm text-zinc-300" data-voryx-employee-template-readiness>
+          <div>Available employee templates for {selectedCampaign.name}: {employeeTypes.join(', ')}</div>
+          <div className="text-xs text-zinc-500">Lead Researcher: {campaignReadyForLeadResearch(selectedCampaign) ? 'available' : 'requires industry, city/region, target customer, lead goal and email disabled'}</div>
+          <div className="text-xs text-zinc-500">Daily Reporter / CRM Manager: {campaignReadyForDailyReporter(selectedCampaign) ? 'available' : 'requires report recipient and timezone'}</div>
+          <div className="text-xs text-zinc-500">Outreach Draft Writer: {campaignReadyForOutreachDraft(selectedCampaign) ? 'available' : 'requires offer/product, target customer, tone and no send action'}</div>
+          <div className="text-xs text-zinc-500">Reply Handler: disabled, not connected. Voice Agent: disabled, not connected.</div>
+        </div>
+      ) : null}
       <div className="grid gap-3 md:grid-cols-5">
         <div className="card"><p className="text-sm text-zinc-400">Running</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.status === 'Running').length}</p></div>
         <div className="card"><p className="text-sm text-zinc-400">Scheduled</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.status === 'Scheduled').length}</p></div>
@@ -136,7 +157,7 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
           fields={{
             company_id: { type: 'select', label: 'Company', options: companyOptions },
             campaign_id: { type: 'select', label: 'Campaign', options: campaignOptions },
-            employee_type: { type: 'select', label: 'Employee type', options: employeeTypeOptions },
+            employee_type: { type: 'select', label: 'Employee template *', options: employeeTypeOptions },
             hermes_job_id: { type: 'readonly', label: 'Hermes job ID', readOnly: true },
             approved_script: { type: 'readonly', label: 'Approved script', readOnly: true },
             working_directory: { type: 'readonly', label: 'Working directory', readOnly: true },
@@ -148,7 +169,7 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
           capabilities={capabilities}
           defaults={{
             company_id: companyId,
-            campaign_id: campaignId || campaigns[0]?.id || '',
+            campaign_id: campaignId || '',
             name: '',
             employee_type: employeeTypes[0] || 'Custom',
             hermes_job_id: '',

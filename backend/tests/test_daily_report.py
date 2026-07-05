@@ -28,13 +28,15 @@ class DailyReportTests(unittest.TestCase):
         self.assertEqual(winter.utc_start.hour, 5)
         self.assertEqual(summer.utc_start.hour, 4)
 
-    def test_missing_lead_timestamps_are_unavailable_not_today_count(self):
+    def test_legacy_lead_timestamps_are_labeled_and_excluded_from_today_count(self):
         root = self.make_root()
         self.write_csv(root / "home" / "leads" / "leads_verified.csv", [{"Public Email": "buyer@example.com"}])
         report = generate_daily_report("2026-06-26", str(root))
         metric = report["metrics"]["leads_created_today"]
-        self.assertFalse(metric["verified"])
-        self.assertIn("Unavailable", metric["value"])
+        self.assertTrue(metric["verified"])
+        self.assertEqual(metric["value"], 0)
+        self.assertIn("legacy files without row timestamps", metric["note"])
+        self.assertIn("legacy lead rows", "\n".join(report["errors_and_blockers"]))
 
     def test_legacy_sent_without_message_id_is_not_confirmed_sent(self):
         root = self.make_root()

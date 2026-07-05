@@ -10,7 +10,7 @@ import { firstParam, queryString, selectedCompanyId } from '../../lib/companySel
 type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
 type Campaign = { id: string; company_id: string; name: string; status: string };
-type Employee = { id: string; company_id: string; campaign_id?: string | null; name: string; status: string };
+type Employee = { id: string; company_id: string; campaign_id?: string | null; name: string; status: string; employee_type?: string; hermes_job_id?: string | null };
 type Schedule = {
   id: string;
   employee_id: string;
@@ -61,6 +61,9 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
   const capabilities = capabilitiesResponse.hermes || defaultConnectorCapabilities;
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
   const employeeName = new Map(employees.map((employee) => [employee.id, employee.name]));
+  const employeeType = new Map(employees.map((employee) => [employee.id, employee.employee_type || '-']));
+  const employeeCampaign = new Map(employees.map((employee) => [employee.id, employee.campaign_id || '']));
+  const campaignName = new Map(campaigns.map((campaign) => [campaign.id, campaign.name]));
   const runningEmployees = new Set(employees.filter((employee) => employee.status === 'Running').map((employee) => employee.id));
   const campaignOptions = campaigns.filter((campaign) => campaign.status !== 'Archived').map((campaign) => ({ value: campaign.id, label: campaign.name }));
   const employeeOptions = employees.map((employee) => ({ value: employee.id, label: employee.name }));
@@ -87,12 +90,14 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
       </div>
       <div className="table-wrap">
         <table className="ops-table">
-          <thead><tr><th>Schedule</th><th>Employee</th><th>Task</th><th>Cron</th><th>Timezone</th><th>Status</th><th>Last Run</th><th>Next Run</th><th>Hermes Sync</th><th>Hermes ID</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Schedule</th><th>Campaign</th><th>Employee</th><th>Employee Template</th><th>Task</th><th>Cron</th><th>Timezone</th><th>Status</th><th>Last Run</th><th>Next Run</th><th>Hermes Sync</th><th>Hermes ID</th><th>Actions</th></tr></thead>
           <tbody>
             {schedules.map((schedule) => (
               <tr key={schedule.id}>
                 <td className="font-medium text-stone-100">{schedule.name}</td>
+                <td>{campaignName.get(employeeCampaign.get(schedule.employee_id) || '') || '-'}</td>
                 <td>{employeeName.get(schedule.employee_id) || schedule.employee_id}</td>
+                <td>{employeeType.get(schedule.employee_id) || '-'}</td>
                 <td>{schedule.task_type}</td>
                 <td>{schedule.cron}</td>
                 <td>{schedule.timezone || 'America/Toronto'}</td>
@@ -104,7 +109,7 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
                 <td><ScheduleActions id={schedule.id} isPaused={schedule.is_paused} hermesJobId={hermesId(schedule) === '-' ? null : hermesId(schedule)} capabilities={capabilities} showUnavailableMessage={false} />{manualRunUnavailable(capabilities, schedule) ? <div className="mt-2 max-w-48 text-xs text-zinc-400" data-voryx-manual-run-unavailable>{capabilities.manual_run_message || 'Manual run unavailable in jobs_json mode'}</div> : null}</td>
               </tr>
             ))}
-            {!schedules.length ? <tr><td colSpan={11} className="text-zinc-400">{companyId ? 'No schedules for selected filters' : 'No company selected'}</td></tr> : null}
+            {!schedules.length ? <tr><td colSpan={13} className="text-zinc-400">{companyId ? 'No schedules for selected filters' : 'No company selected'}</td></tr> : null}
           </tbody>
         </table>
       </div>

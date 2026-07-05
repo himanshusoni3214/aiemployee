@@ -22,6 +22,9 @@ type Campaign = {
   campaign_type?: string;
   provisioning_state?: string;
   provisioning_result?: Record<string, unknown>;
+  timezone?: string;
+  report_recipient?: string;
+  dry_run_mode?: boolean;
   status: string;
 };
 type Job = { campaign_id?: string | null; status: string; task_type: string };
@@ -46,7 +49,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
     : [[], [], {}] as [Campaign[], Job[], CapabilitiesResponse];
   const capabilities = capabilitiesResponse.hermes || defaultConnectorCapabilities;
   const leadDetails = companyId
-    ? Object.fromEntries(await Promise.all(campaigns.filter((campaign) => campaign.campaign_type === 'lead_research').map(async (campaign) => {
+    ? Object.fromEntries(await Promise.all(campaigns.map(async (campaign) => {
         const [schema, outputs] = await Promise.all([
           serverApi<LeadSchema>(`/campaigns/${campaign.id}/lead-schema`, {}),
           serverApi<LeadOutputs>(`/campaigns/${campaign.id}/lead-outputs`, { outputs: [], rows: [] }),
@@ -76,7 +79,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
       </div>
       <div className="table-wrap">
         <table className="ops-table">
-          <thead><tr><th>Campaign</th><th>Company</th><th>Template</th><th>Lead Research Config</th><th>Provisioning</th><th>Daily Goals</th><th>Imported Jobs</th><th>Status</th></tr></thead>
+          <thead><tr><th>Campaign</th><th>Company</th><th>Blueprint</th><th>Target Definition</th><th>Provisioning</th><th>Daily Goals</th><th>Imported Jobs</th><th>Status</th></tr></thead>
           <tbody>
             {campaigns.map((campaign) => (
               <tr key={campaign.id}>
@@ -84,13 +87,13 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                 <td>{companyName.get(campaign.company_id) || campaign.company_id}</td>
                 <td>{(campaign.campaign_type || 'custom').replaceAll('_', ' ')}</td>
                 <td>
-                  {campaign.campaign_type === 'lead_research' ? (
-                    <div className="max-w-md text-xs text-zinc-400">
-                      <div>{campaign.industry || 'Industry missing'} / {campaign.geographic_area || 'Location missing'}</div>
-                      <div>{campaign.target_audience || 'Target customer not set'}</div>
-                      <div>Lead generation only. Email sending disabled.</div>
-                    </div>
-                  ) : '-'}
+                  <div className="max-w-md text-xs text-zinc-400">
+                    <div>{campaign.industry || 'Industry missing'} / {campaign.geographic_area || 'Location missing'}</div>
+                    <div>{campaign.target_audience || 'Target customer not set'}</div>
+                    <div>{campaign.description || 'Offer/product and notes not set'}</div>
+                    <div>{campaign.dry_run_mode === false ? 'Email sending enabled' : 'Lead generation only. Email sending disabled.'}</div>
+                    <div>Report: {campaign.report_recipient || 'not set'} / {campaign.timezone || 'America/Toronto'}</div>
+                  </div>
                 </td>
                 <td>
                   <div>{campaign.provisioning_state || 'Draft'}</div>
@@ -108,14 +111,15 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
       </div>
       {companyId ? (
         <div className="space-y-3">
-          {campaigns.filter((campaign) => campaign.campaign_type === 'lead_research').map((campaign) => {
+          {campaigns.map((campaign) => {
             const detail = (leadDetails as Record<string, { schema: LeadSchema; outputs: LeadOutputs }>)[campaign.id] || { schema: {}, outputs: { outputs: [], rows: [] } };
             return (
               <div className="card" key={campaign.id}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
                     <h2 className="text-lg font-semibold">{campaign.name}</h2>
-                    <p className="text-sm text-zinc-400">Lead generation only. Email sending disabled.</p>
+                    <p className="text-sm text-zinc-400">Lead Sheet Fields and Generated Files. Locked fields are preserved; custom fields save to PostgreSQL and workspace config.</p>
+                    <p className="mt-1 text-xs text-zinc-500">Add Lead Researcher / Add Daily Reporter / Add Outreach Draft Writer from AI Employees. Reply Handler and Voice Agent are not connected.</p>
                   </div>
                   <div className="text-xs text-zinc-500">{String(campaign.provisioning_result?.hermes_job_id || 'No Hermes job')}</div>
                 </div>
@@ -137,21 +141,20 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
           displayMaps={{ company_id: Object.fromEntries(companies.map((company) => [company.id, company.name])) }}
           fields={{
             company_id: { type: 'select', label: 'Company', options: companyOptions },
-            industry: { type: 'text', label: 'Industry / niche' },
-            geographic_area: { type: 'text', label: 'City / region' },
-            target_audience: { type: 'textarea', label: 'Target customer' },
-            description: { type: 'textarea', label: 'Exclusions / notes' },
-            daily_lead_goal: { type: 'number', label: 'Lead count' },
+            industry: { type: 'text', label: 'Industry / niche *' },
+            geographic_area: { type: 'text', label: 'City / region *' },
+            target_audience: { type: 'textarea', label: 'Target customer *' },
+            description: { type: 'textarea', label: 'Offer/product, exclusions, tone and notes' },
+            daily_lead_goal: { type: 'number', label: 'Lead goal *' },
             daily_email_goal: { type: 'number', label: 'Daily email goal' },
             daily_email_limit: { type: 'number', label: 'Max emails per day' },
             allowed_sending_days: { type: 'days', label: 'Allowed sending days' },
             allowed_sending_hours: { type: 'hours', label: 'Allowed sending hours' },
-            dry_run_mode: { type: 'boolean', label: 'Email sending disabled' },
-            campaign_type: { type: 'select', label: 'Template', options: [
-              { value: 'lead_research', label: 'Lead Research' },
-              { value: 'daily_reporting', label: 'Daily Reporting' },
-              { value: 'outreach_drafting', label: 'Outreach Drafting' },
-              { value: 'custom', label: 'Custom' },
+            dry_run_mode: { type: 'boolean', label: 'Email sending disabled *' },
+            campaign_type: { type: 'select', label: 'Campaign blueprint', options: [
+              { value: 'sales_outreach', label: 'Sales / Outreach Campaign' },
+              { value: 'lead_generation', label: 'Lead Generation Campaign' },
+              { value: 'custom', label: 'Custom Campaign' },
             ] },
             provisioning_state: { type: 'readonly', label: 'Provisioning state', readOnly: true },
             provisioning_result: { type: 'json', label: 'Provisioning result', readOnly: true },
@@ -170,7 +173,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             daily_lead_goal: 5,
             daily_email_goal: 0,
             daily_email_limit: 0,
-            campaign_type: 'custom',
+            campaign_type: 'sales_outreach',
             provisioning_state: 'Draft',
             provisioning_result: {},
             timezone: 'America/Toronto',

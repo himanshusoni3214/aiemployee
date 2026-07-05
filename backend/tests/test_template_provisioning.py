@@ -12,7 +12,7 @@ from app.api import routes
 from app.core.config import settings
 from app.models.base import Base
 from app.models.entities import AIEmployee, Campaign, Company, EmployeeStatus, Job, Schedule, Status, User, Role
-from app.services.template_provisioning import APPROVED_INTERNAL_RECIPIENT, provision_campaign_template
+from app.services.template_provisioning import APPROVED_INTERNAL_RECIPIENT, provision_campaign_template, provision_employee_template, validate_campaign_blueprint
 
 
 class TemplateProvisioningTests(unittest.TestCase):
@@ -122,6 +122,51 @@ class TemplateProvisioningTests(unittest.TestCase):
             self.assertEqual(len(self.jobs_json()["jobs"]), 1)
             self.assertEqual(db.query(AIEmployee).count(), 1)
             self.assertEqual(db.query(Schedule).count(), 1)
+        finally:
+            db.close()
+
+
+    def test_campaign_blueprint_does_not_auto_provision_but_employee_templates_do(self):
+        db = self.Session()
+        try:
+            company, user = self.make_base(db)
+            campaign = Campaign(
+                company_id=company.id,
+                name="Cafe Outreach QA",
+                campaign_type="sales_outreach",
+                industry="cafes",
+                geographic_area="Toronto",
+                target_audience="independent cafe owners",
+                description="Offer: coffee concentrate pilot; Tone: helpful; Exclude franchises",
+                daily_lead_goal=5,
+                report_recipient=APPROVED_INTERNAL_RECIPIENT,
+                dry_run_mode=True,
+            )
+            db.add(campaign)
+            db.flush()
+            validate_campaign_blueprint(campaign)
+            self.assertEqual(db.query(AIEmployee).count(), 0)
+
+            lead_employee = AIEmployee(company_id=company.id, campaign_id=campaign.id, name="QA Lead Researcher", employee_type="Lead Researcher")
+            report_employee = AIEmployee(company_id=company.id, campaign_id=campaign.id, name="QA Daily Reporter", employee_type="CRM Manager")
+            db.add_all([lead_employee, report_employee])
+            db.flush()
+            lead_result = provision_employee_template(db, lead_employee, user.id)
+            report_result = provision_employee_template(db, report_employee, user.id)
+            db.commit()
+
+            self.assertTrue(lead_result["provisioned"])
+            self.assertTrue(report_result["provisioned"])
+            self.assertEqual(db.query(AIEmployee).count(), 2)
+            self.assertEqual(db.query(Schedule).count(), 2)
+            jobs = self.jobs_json()["jobs"]
+            self.assertEqual(len(jobs), 2)
+            lead_job = next(job for job in jobs if job["id"] == lead_employee.hermes_job_id)
+            self.assertIn("voryx_generic_lead_research.py", lead_job["command"])
+            self.assertIn("--employee-id", lead_job["command"])
+            self.assertIn("--hermes-job-id", lead_job["command"])
+            self.assertFalse(lead_job["enabled"])
+            self.assertFalse(report_employee.daily_limits["safety"]["prospect_outreach"])
         finally:
             db.close()
 

@@ -153,21 +153,29 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
     evidence: list[dict[str, Any]] = []
     blockers: list[str] = []
 
-    lead_files = sorted(leads_dir.glob("leads*.csv"))
-    leads_created_today: int | None = 0
-    leads_verified_today: int | None = 0
+    lead_files = sorted([*leads_dir.glob("leads*.csv"), *(root / "home" / "voryx_workspaces").glob("**/leads*.csv")])
+    leads_created_today = 0
+    leads_verified_today = 0
     timestamped_lead_rows = 0
+    legacy_lead_rows_without_timestamps = 0
+    latest_lead_file = str(lead_files[-1]) if lead_files else ""
+    latest_lead_file_rows = 0
     verified_available_emails: set[str] = set()
     all_lead_rows = 0
+    latest_mtime = 0.0
     for path in lead_files:
         rows, headers = _read_csv(path)
         all_lead_rows += len(rows)
+        mtime = path.stat().st_mtime if path.exists() else 0.0
+        if mtime >= latest_mtime:
+            latest_mtime = mtime
+            latest_lead_file = str(path)
+            latest_lead_file_rows = len(rows)
         missing = [column for column in ("created_at",) if column not in headers]
         included_created = 0
         included_verified = 0
         if "created_at" not in headers:
-            leads_created_today = None
-            leads_verified_today = None
+            legacy_lead_rows_without_timestamps += len(rows)
         for row in rows:
             email = _email(row)
             if email and "@" in email and "inferred" not in email:
@@ -180,9 +188,8 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
                 included_created += 1
                 if email and "@" in email:
                     included_verified += 1
-        if leads_created_today is not None:
-            leads_created_today += included_created
-            leads_verified_today = (leads_verified_today or 0) + included_verified
+        leads_created_today += included_created
+        leads_verified_today += included_verified
         evidence.append(_file_evidence(path, len(rows), included_created, "created_at inside selected Toronto day", missing, window))
 
     verified_path = leads_dir / "leads_verified.csv"
@@ -246,14 +253,17 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
                 unverified_sent_rows += 1
     evidence.append(_file_evidence(legacy_log, len(legacy_rows), included_legacy, "timestamp inside selected Toronto day; sent requires message_id/receipt", legacy_missing, window))
 
-    if leads_created_today is None:
-        blockers.append("Leads found today unavailable: lead CSV rows do not contain reliable created_at timestamps.")
+    if legacy_lead_rows_without_timestamps:
+        blockers.append(f"{legacy_lead_rows_without_timestamps} legacy lead rows are present without row timestamps; new generated CSV rows are counted by created_at.")
     if unverified_sent_rows:
         blockers.append(f"{unverified_sent_rows} legacy sent rows were excluded because they lack durable message_id/receipt evidence.")
 
     metrics = {
-        "leads_created_today": _metric(leads_created_today if leads_created_today is not None else "Unavailable - source does not contain a reliable creation timestamp", leads_created_today is not None, "lead CSV created_at"),
-        "leads_verified_today": _metric(leads_verified_today if leads_verified_today is not None else "Unavailable - source does not contain a reliable creation timestamp", leads_verified_today is not None, "lead CSV created_at + email"),
+        "leads_generated_today": _metric(leads_created_today, True, "new lead CSV created_at", "legacy files without row timestamps excluded" if legacy_lead_rows_without_timestamps else ""),
+        "leads_created_today": _metric(leads_created_today, True, "new lead CSV created_at", "legacy files without row timestamps excluded" if legacy_lead_rows_without_timestamps else ""),
+        "latest_lead_file": _metric(latest_lead_file or "none", bool(latest_lead_file), "Hermes lead workspace"),
+        "latest_lead_file_rows": _metric(latest_lead_file_rows, True, "latest lead CSV row count"),
+        "leads_verified_today": _metric(leads_verified_today, True, "new lead CSV created_at + email", "legacy files without row timestamps excluded" if legacy_lead_rows_without_timestamps else ""),
         "verified_leads_available": _metric(len(verified_available_emails), True, "current verified lead CSVs"),
         "outreach_attempts_today": _metric(attempts_today, True, "structured outreach events and legacy outreach_log.csv timestamps"),
         "emails_confirmed_sent_today": _metric(sent_today, True, "success status plus durable message_id/receipt"),
@@ -276,7 +286,7 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "metrics": metrics,
         "errors_and_blockers": blockers,
-        "source_summary": {"lead_files": len(lead_files), "lead_rows_examined": all_lead_rows, "timestamped_lead_rows": timestamped_lead_rows},
+        "source_summary": {"lead_files": len(lead_files), "lead_rows_examined": all_lead_rows, "timestamped_lead_rows": timestamped_lead_rows, "legacy_lead_rows_without_timestamps": legacy_lead_rows_without_timestamps, "latest_lead_file": latest_lead_file, "latest_lead_file_rows": latest_lead_file_rows},
         "evidence": evidence,
         "next_recommended_action": next_action,
     }

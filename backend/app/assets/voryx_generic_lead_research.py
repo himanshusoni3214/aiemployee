@@ -16,6 +16,8 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Voryx generic safe lead research generator")
     parser.add_argument("--company-id", required=True)
     parser.add_argument("--campaign-id", required=True)
+    parser.add_argument("--employee-id", default="")
+    parser.add_argument("--hermes-job-id", default="")
     parser.add_argument("--industry", required=True)
     parser.add_argument("--location", required=True)
     parser.add_argument("--target-customer", default="")
@@ -33,6 +35,7 @@ LOCKED_FIELDS = [
     "created_at",
     "company_id",
     "campaign_id",
+    "employee_id",
     "hermes_job_id",
     "source_run_id",
     "business_name",
@@ -44,6 +47,7 @@ LOCKED_FIELDS = [
     "lead_status",
     "verified_at",
     "source_url",
+    "source_file",
     "notes",
 ]
 
@@ -73,11 +77,12 @@ def schema_columns(config):
     return result
 
 
-def build_rows(args, limit: int, columns):
+def build_rows(args, limit: int, columns, source_file: str):
     industry = args.industry.strip()
     location = args.location.strip()
     target = args.target_customer.strip() or f"{industry} operators"
     exclusions = args.exclude.strip()
+    row_notes = args.notes.strip() or f"Target: {target}; Exclude: {exclusions}"
     rows = []
     for index in range(limit):
         number = index + 1
@@ -86,8 +91,9 @@ def build_rows(args, limit: int, columns):
             "created_at": datetime.now(timezone.utc).isoformat(),
             "company_id": args.company_id,
             "campaign_id": args.campaign_id,
-            "hermes_job_id": "",
-            "source_run_id": "",
+            "employee_id": args.employee_id,
+            "hermes_job_id": args.hermes_job_id,
+            "source_run_id": source_file.rsplit("/", 1)[-1].replace(".csv", ""),
             "business_name": f"{location} {industry.title()} Prospect {number}",
             "website": "",
             "email": "",
@@ -97,7 +103,8 @@ def build_rows(args, limit: int, columns):
             "lead_status": "Generated",
             "verified_at": "",
             "source_url": "",
-            "notes": args.notes.strip(),
+            "source_file": source_file,
+            "notes": row_notes,
             "owner_name": "",
             "instagram": "",
             "google_rating": "",
@@ -133,7 +140,7 @@ def main() -> int:
     csv_path = output_dir / f"{base}.csv"
     metadata_path = output_dir / f"{base}.metadata.json"
     fields = schema_columns(config)
-    rows = build_rows(args, limit, fields)
+    rows = build_rows(args, limit, fields, str(csv_path))
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -143,6 +150,8 @@ def main() -> int:
         "script": "voryx_generic_lead_research.py",
         "company_id": args.company_id,
         "campaign_id": args.campaign_id,
+        "employee_id": args.employee_id,
+        "hermes_job_id": args.hermes_job_id,
         "industry": industry,
         "location": location,
         "target_customer": args.target_customer.strip(),
