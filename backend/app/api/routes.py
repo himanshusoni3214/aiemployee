@@ -1,6 +1,9 @@
+import csv
 from datetime import datetime, date
+from pathlib import Path
+from urllib.parse import quote
 from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response
-from fastapi.responses import RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
 from redis import Redis
@@ -22,9 +25,13 @@ from app.services.internal_mail_queue import enqueue_daily_report_delivery, inge
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, validate_report_recipient
 from app.services.template_provisioning import (
     PROVISIONED_STATES,
+    allowed_employee_types_for_campaign,
     create_template_sample_job,
     mark_provisioning_failed,
+    normalize_lead_schema,
     provision_campaign_template,
+    template_registry_payload,
+    update_campaign_lead_schema,
     validate_employee_operational_state,
 )
 
@@ -224,6 +231,72 @@ def _record_manual_run(db: Session, schedule: Schedule, user: User, control_resu
     log(db, 'Manual Hermes Run Requested', 'Job', job.id, user_id=user.id)
     return job
 
+def _hermes_physical_path(container_path: str) -> Path:
+    text = str(container_path or '').strip()
+    if not settings.hermes_data_path:
+        raise HTTPException(500, 'HERMES_DATA_PATH is not configured')
+    if text == '/opt/data':
+        candidate = Path(settings.hermes_data_path)
+    elif text.startswith('/opt/data/'):
+        candidate = Path(settings.hermes_data_path) / text.removeprefix('/opt/data/')
+    else:
+        candidate = Path(settings.hermes_data_path) / text.lstrip('/')
+    root = Path(settings.hermes_data_path).resolve()
+    resolved = candidate.resolve()
+    if root != resolved and root not in resolved.parents:
+        raise HTTPException(400, 'Path is outside Hermes workspace')
+    return resolved
+
+def _container_path_for_physical(path: Path) -> str:
+    root = Path(settings.hermes_data_path).resolve()
+    relative = path.resolve().relative_to(root)
+    return f"/opt/data/{relative.as_posix()}"
+
+def _latest_lead_outputs(campaign: Campaign, limit: int = 10) -> list[dict]:
+    result = campaign.provisioning_result if isinstance(campaign.provisioning_result, dict) else {}
+    safety = result.get('safety') if isinstance(result.get('safety'), dict) else {}
+    config = safety.get('config') if isinstance(safety.get('config'), dict) else {}
+    output_dir = config.get('output_dir') or f"/opt/data/home/voryx_workspaces/{campaign.company_id}/{campaign.id}/leads"
+    directory = _hermes_physical_path(str(output_dir))
+    if not directory.exists():
+        return []
+    outputs = []
+    for path in sorted(directory.glob('*.csv'), key=lambda item: item.stat().st_mtime, reverse=True)[:limit]:
+        try:
+            with path.open(newline='', encoding='utf-8') as handle:
+                rows = list(csv.DictReader(handle))
+        except Exception:
+            rows = []
+        container_path = _container_path_for_physical(path)
+        outputs.append({
+            'path': container_path,
+            'download_url': f"/api/campaigns/{campaign.id}/lead-outputs/download?path={quote(container_path, safe='')}",
+            'row_count': len(rows),
+            'generated_at': datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + 'Z',
+            'columns': list(rows[0].keys()) if rows else [],
+            'metadata_path': container_path.removesuffix('.csv') + '.metadata.json',
+        })
+    return outputs
+
+def _filter_lead_rows(rows: list[dict], filter_name: str) -> list[dict]:
+    value = (filter_name or 'all').strip().lower()
+    if value == 'verified':
+        return [row for row in rows if str(row.get('lead_status') or '').lower() == 'verified' or row.get('verified_at')]
+    if value == 'missing_email':
+        return [row for row in rows if not str(row.get('email') or '').strip()]
+    if value == 'no_website':
+        return [row for row in rows if not str(row.get('website') or '').strip()]
+    if value == 'duplicate_suspects':
+        seen = set()
+        dupes = []
+        for row in rows:
+            key = (str(row.get('business_name') or '').strip().lower(), str(row.get('city') or '').strip().lower())
+            if key in seen:
+                dupes.append(row)
+            seen.add(key)
+        return dupes
+    return rows
+
 def _filtered_job_stmt(company_id: str | None = None, campaign_id: str | None = None, employee_id: str | None = None):
     stmt = select(Job)
     if company_id:
@@ -276,6 +349,9 @@ def crud(model, schema, label: str):
         if model is Campaign:
             try:
                 provision_campaign_template(db, obj, user.id)
+            except ValueError as exc:
+                db.rollback()
+                raise HTTPException(400, str(exc)) from exc
             except Exception as exc:
                 mark_provisioning_failed(obj, exc)
                 db.flush()
@@ -303,6 +379,9 @@ def crud(model, schema, label: str):
             if should_provision:
                 try:
                     provision_campaign_template(db, obj, user.id)
+                except ValueError as exc:
+                    db.rollback()
+                    raise HTTPException(400, str(exc)) from exc
                 except Exception as exc:
                     mark_provisioning_failed(obj, exc)
                     db.flush()
@@ -370,6 +449,56 @@ def logout(response: Response):
 def password_reset(): return {'message': 'Password reset workflow placeholder: connect SMTP provider in credential vault.'}
 
 crud(Company, CompanyIn, 'companies'); crud(AIEmployee, EmployeeIn, 'employees'); crud(Campaign, CampaignIn, 'campaigns'); crud(Lead, LeadIn, 'leads'); crud(Schedule, ScheduleIn, 'schedules')
+
+@router.get('/templates/registry')
+def template_registry(user: User=Depends(current_user)):
+    return template_registry_payload()
+
+@router.get('/campaigns/{campaign_id}/lead-schema')
+def get_campaign_lead_schema(campaign_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Not found')
+    result = campaign.provisioning_result if isinstance(campaign.provisioning_result, dict) else {}
+    return normalize_lead_schema(result)
+
+@router.put('/campaigns/{campaign_id}/lead-schema')
+def put_campaign_lead_schema(campaign_id: str, schema: dict, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Not found')
+    updated = update_campaign_lead_schema(campaign, schema)
+    log(db, 'Campaign Lead Schema Updated', 'Campaign', campaign.id, campaign.company_id, user.id, {'lead_schema': updated})
+    db.commit()
+    return {'ok': True, 'lead_schema': updated, 'message': 'Lead schema saved to Voryx DB and Hermes workspace config.'}
+
+@router.get('/campaigns/{campaign_id}/lead-outputs')
+def campaign_lead_outputs(
+    campaign_id: str,
+    db: Session=Depends(get_db),
+    user: User=Depends(current_user),
+    filter: str='all',
+):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Not found')
+    outputs = _latest_lead_outputs(campaign)
+    latest_rows = []
+    if outputs:
+        path = _hermes_physical_path(outputs[0]['path'])
+        with path.open(newline='', encoding='utf-8') as handle:
+            latest_rows = _filter_lead_rows(list(csv.DictReader(handle)), filter)
+    return {'campaign_id': campaign.id, 'outputs': outputs, 'filter': filter, 'rows': latest_rows[:200], 'row_count': len(latest_rows)}
+
+@router.get('/campaigns/{campaign_id}/lead-outputs/download')
+def download_campaign_lead_output(campaign_id: str, path: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Not found')
+    outputs = _latest_lead_outputs(campaign, limit=50)
+    allowed = {item['path'] for item in outputs}
+    if path not in allowed:
+        raise HTTPException(403, 'Requested file is not a known output for this campaign')
+    physical = _hermes_physical_path(path)
+    if not physical.exists():
+        raise HTTPException(404, 'Output file not found')
+    return FileResponse(str(physical), media_type='text/csv', filename=physical.name)
 
 def _campaign_payload(campaign: Campaign, *, state: str = 'ok', hermes_controls: list | None = None, blocked: list | None = None) -> dict:
     return {

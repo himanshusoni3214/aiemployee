@@ -29,6 +29,14 @@ function hermesId(schedule: Schedule) {
   return typeof value === 'string' ? value : '-';
 }
 
+function hermesState(schedule: Schedule) {
+  const enabled = schedule.payload?.hermes_enabled;
+  const state = typeof schedule.payload?.hermes_state === 'string' ? schedule.payload.hermes_state : '';
+  const lastStatus = typeof schedule.payload?.hermes_last_status === 'string' ? schedule.payload.hermes_last_status : '';
+  if (enabled === undefined && !state && !lastStatus) return 'Not verified';
+  return `${enabled ? 'Enabled' : 'Disabled'} / ${state || 'unknown'} / ${lastStatus || 'no runs'}`;
+}
+
 function manualRunUnavailable(capabilities: ConnectorCapabilities, schedule: Schedule) {
   const id = hermesId(schedule);
   return !schedule.is_paused && id !== 'b03a2d0f1149' && !capabilities.supports_manual_run && !capabilities.supports_dry_run;
@@ -79,7 +87,7 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
       </div>
       <div className="table-wrap">
         <table className="ops-table">
-          <thead><tr><th>Schedule</th><th>Employee</th><th>Task</th><th>Cron</th><th>Timezone</th><th>Status</th><th>Last Run</th><th>Next Run</th><th>Hermes ID</th><th>Actions</th></tr></thead>
+          <thead><tr><th>Schedule</th><th>Employee</th><th>Task</th><th>Cron</th><th>Timezone</th><th>Status</th><th>Last Run</th><th>Next Run</th><th>Hermes Sync</th><th>Hermes ID</th><th>Actions</th></tr></thead>
           <tbody>
             {schedules.map((schedule) => (
               <tr key={schedule.id}>
@@ -91,11 +99,12 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
                 <td>{schedule.is_paused ? 'Paused' : 'Active'}</td>
                 <td><LocalTime value={schedule.last_run_at} /></td>
                 <td><LocalTime value={schedule.next_run_at} /></td>
+                <td className="text-zinc-400">{hermesState(schedule)}</td>
                 <td className="text-zinc-400">{hermesId(schedule)}</td>
                 <td><ScheduleActions id={schedule.id} isPaused={schedule.is_paused} hermesJobId={hermesId(schedule) === '-' ? null : hermesId(schedule)} capabilities={capabilities} showUnavailableMessage={false} />{manualRunUnavailable(capabilities, schedule) ? <div className="mt-2 max-w-48 text-xs text-zinc-400" data-voryx-manual-run-unavailable>{capabilities.manual_run_message || 'Manual run unavailable in jobs_json mode'}</div> : null}</td>
               </tr>
             ))}
-            {!schedules.length ? <tr><td colSpan={10} className="text-zinc-400">{companyId ? 'No schedules for selected filters' : 'No company selected'}</td></tr> : null}
+            {!schedules.length ? <tr><td colSpan={11} className="text-zinc-400">{companyId ? 'No schedules for selected filters' : 'No company selected'}</td></tr> : null}
           </tbody>
         </table>
       </div>
@@ -121,7 +130,7 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
             timezone: 'America/Toronto',
             task_type: 'Generate Leads',
             payload: {},
-            is_paused: false,
+            is_paused: true,
           }}
         />
       ) : null}

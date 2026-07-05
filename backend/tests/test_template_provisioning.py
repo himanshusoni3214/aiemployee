@@ -144,9 +144,9 @@ class TemplateProvisioningTests(unittest.TestCase):
         db = self.Session()
         try:
             company, user = self.make_base(db)
-            lead_campaign = Campaign(company_id=company.id, name="Sample Leads", campaign_type="lead_research", industry="cafes", geographic_area="Toronto", daily_lead_goal=20)
+            lead_campaign = Campaign(company_id=company.id, name="Sample Leads", campaign_type="lead_research", industry="cafes", geographic_area="Toronto", target_audience="independent cafe owners", daily_lead_goal=20)
             report_campaign = Campaign(company_id=company.id, name="Sample Report", campaign_type="daily_reporting", report_recipient=APPROVED_INTERNAL_RECIPIENT)
-            draft_campaign = Campaign(company_id=company.id, name="Sample Draft", campaign_type="outreach_drafting")
+            draft_campaign = Campaign(company_id=company.id, name="Sample Draft", campaign_type="outreach_drafting", target_audience="independent cafe owners", description="Offer: 14-day pilot; Tone: helpful")
             db.add_all([lead_campaign, report_campaign, draft_campaign])
             db.flush()
             for campaign in (lead_campaign, report_campaign, draft_campaign):
@@ -158,7 +158,9 @@ class TemplateProvisioningTests(unittest.TestCase):
             db.commit()
 
             self.assertEqual(db.query(Job).count(), 3)
-            self.assertLessEqual(lead_job["result"]["leads_generated"], 5)
+            self.assertLessEqual(lead_job["result"]["lead_count"], 5)
+            self.assertIn("output_path", lead_job["result"])
+            self.assertFalse(lead_job["result"]["email_sending"])
             self.assertFalse(report_job["result"]["email_sent"])
             self.assertEqual(report_job["result"]["recipient"], APPROVED_INTERNAL_RECIPIENT)
             self.assertFalse(draft_job["result"]["email_sent"])

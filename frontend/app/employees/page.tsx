@@ -10,7 +10,7 @@ import { firstParam, queryString, selectedCompanyId } from '../../lib/companySel
 
 type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
-type Campaign = { id: string; company_id: string; name: string; status: string };
+type Campaign = { id: string; company_id: string; name: string; status: string; campaign_type?: string };
 type Employee = {
   id: string;
   company_id: string;
@@ -40,6 +40,16 @@ function manualRunUnavailable(capabilities: ConnectorCapabilities, employee: Emp
   return employee.status === 'Scheduled' && !isSafetyLockedHermesJob(employee.hermes_job_id) && !capabilities.supports_manual_run && !capabilities.supports_dry_run;
 }
 
+function allowedEmployeeTypes(campaign?: Campaign) {
+  const type = campaign?.campaign_type || 'custom';
+  if (type === 'lead_research') return ['Lead Researcher'];
+  if (type === 'daily_reporting') return ['CRM Manager', 'Report Manager'];
+  if (type === 'outreach_drafting') return ['Email Outreach', 'Draft Writer'];
+  if (type === 'reply_handler') return ['Reply Handler'];
+  if (type === 'voice_agent') return ['Voice Agent'];
+  return ['Custom'];
+}
+
 export default async function EmployeesPage({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
   const params = (await searchParams) || {};
   const companies = await serverApi<Company[]>('/companies', []);
@@ -57,6 +67,9 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
   const capabilities = capabilitiesResponse.hermes || defaultConnectorCapabilities;
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
   const campaignName = new Map(campaigns.map((campaign) => [campaign.id, campaign.name]));
+  const selectedCampaign = campaigns.find((campaign) => campaign.id === campaignId) || campaigns[0];
+  const employeeTypes = allowedEmployeeTypes(selectedCampaign);
+  const employeeTypeOptions = employeeTypes.map((value) => ({ value, label: value }));
   const companyOptions = companies.filter((company) => company.status !== 'Archived').map((company) => ({ value: company.id, label: company.name }));
   const campaignOptions = campaigns.filter((campaign) => campaign.status !== 'Archived').map((campaign) => ({ value: campaign.id, label: campaign.name }));
 
@@ -90,7 +103,12 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
                 <td className="font-medium text-stone-100">{employee.name}</td>
                 <td>{companyName.get(employee.company_id) || employee.company_id}</td>
                 <td>{employee.campaign_id ? campaignName.get(employee.campaign_id) || employee.campaign_id : '-'}</td>
-                <td>{employee.employee_type}</td>
+                <td>
+                  <div>{employee.employee_type}</div>
+                  {employee.campaign_id && !allowedEmployeeTypes(campaigns.find((campaign) => campaign.id === employee.campaign_id)).includes(employee.employee_type)
+                    ? <div className="text-xs text-amber-300">Not allowed for template</div>
+                    : null}
+                </td>
                 <td>{statusLabel(employee)}</td>
                 <td>{employee.rate_limit_per_hour ?? 0}/hr, {employee.daily_email_limit ?? 0}/day</td>
                 <td>{employee.circuit_breaker_open ? 'Open' : 'Closed'} ({employee.failure_count ?? 0})</td>
@@ -118,7 +136,7 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
           fields={{
             company_id: { type: 'select', label: 'Company', options: companyOptions },
             campaign_id: { type: 'select', label: 'Campaign', options: campaignOptions },
-            employee_type: { type: 'select', label: 'Employee type', options: ['Lead Researcher', 'Email Outreach', 'Reply Handler', 'Appointment Setter', 'CRM Manager', 'Voice Agent', 'Custom'].map((value) => ({ value, label: value })) },
+            employee_type: { type: 'select', label: 'Employee type', options: employeeTypeOptions },
             hermes_job_id: { type: 'readonly', label: 'Hermes job ID', readOnly: true },
             approved_script: { type: 'readonly', label: 'Approved script', readOnly: true },
             working_directory: { type: 'readonly', label: 'Working directory', readOnly: true },
@@ -132,7 +150,7 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
             company_id: companyId,
             campaign_id: campaignId || campaigns[0]?.id || '',
             name: '',
-            employee_type: 'Custom',
+            employee_type: employeeTypes[0] || 'Custom',
             hermes_job_id: '',
             approved_script: '',
             working_directory: '/opt/data/home/leads',

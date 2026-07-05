@@ -2,6 +2,8 @@ import { serverApi } from '../../lib/serverApi';
 import CrudPage from '../../components/CrudPage';
 import { defaultConnectorCapabilities, type ConnectorCapabilities } from '../../components/ActionButtons';
 import { CompanySelector } from '../../components/CompanySelector';
+import { LeadOutputsPanel } from '../../components/LeadOutputsPanel';
+import { LeadSchemaEditor } from '../../components/LeadSchemaEditor';
 import { queryString, selectedCompanyId } from '../../lib/companySelection';
 
 type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
@@ -23,6 +25,8 @@ type Campaign = {
   status: string;
 };
 type Job = { campaign_id?: string | null; status: string; task_type: string };
+type LeadSchema = { locked_fields?: string[]; custom_fields?: Array<{ name: string; label?: string; hidden?: boolean; order?: number }>; columns?: string[] };
+type LeadOutputs = { outputs: Array<{ path: string; download_url: string; row_count: number; generated_at: string; columns?: string[] }>; rows: Record<string, unknown>[] };
 
 function countJobs(jobs: Job[], campaignId: string, task?: string) {
   return jobs.filter((job) => job.campaign_id === campaignId && (!task || job.task_type === task)).length;
@@ -41,6 +45,15 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
       ])
     : [[], [], {}] as [Campaign[], Job[], CapabilitiesResponse];
   const capabilities = capabilitiesResponse.hermes || defaultConnectorCapabilities;
+  const leadDetails = companyId
+    ? Object.fromEntries(await Promise.all(campaigns.filter((campaign) => campaign.campaign_type === 'lead_research').map(async (campaign) => {
+        const [schema, outputs] = await Promise.all([
+          serverApi<LeadSchema>(`/campaigns/${campaign.id}/lead-schema`, {}),
+          serverApi<LeadOutputs>(`/campaigns/${campaign.id}/lead-outputs`, { outputs: [], rows: [] }),
+        ]);
+        return [campaign.id, { schema, outputs }];
+      })))
+    : {};
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
   const companyOptions = companies.filter((company) => company.status !== 'Archived').map((company) => ({ value: company.id, label: company.name }));
 
@@ -93,6 +106,26 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
           </tbody>
         </table>
       </div>
+      {companyId ? (
+        <div className="space-y-3">
+          {campaigns.filter((campaign) => campaign.campaign_type === 'lead_research').map((campaign) => {
+            const detail = (leadDetails as Record<string, { schema: LeadSchema; outputs: LeadOutputs }>)[campaign.id] || { schema: {}, outputs: { outputs: [], rows: [] } };
+            return (
+              <div className="card" key={campaign.id}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-lg font-semibold">{campaign.name}</h2>
+                    <p className="text-sm text-zinc-400">Lead generation only. Email sending disabled.</p>
+                  </div>
+                  <div className="text-xs text-zinc-500">{String(campaign.provisioning_result?.hermes_job_id || 'No Hermes job')}</div>
+                </div>
+                <LeadOutputsPanel outputs={detail.outputs.outputs || []} rows={detail.outputs.rows || []} />
+                <LeadSchemaEditor campaignId={campaign.id} initialSchema={detail.schema || {}} />
+              </div>
+            );
+          })}
+        </div>
+      ) : null}
       {companyId ? (
         <CrudPage
           title="Campaign Management"

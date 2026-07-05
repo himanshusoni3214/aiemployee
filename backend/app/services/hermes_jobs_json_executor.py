@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from app.core.config import settings
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, validate_report_recipient
 
 LEAD_RESEARCH_JOB_ID = "0d0c20e25f55"
@@ -64,7 +65,15 @@ def _hermes_job_id(payload: dict[str, Any]) -> str:
 
 
 def _jobs_json_path() -> Path:
-    return DATA_ROOT / "cron" / "jobs.json"
+    if DATA_ROOT != Path("/opt/data"):
+        return DATA_ROOT / "cron" / "jobs.json"
+    if settings.hermes_data_path and str(settings.hermes_data_path) != "/hermes-data":
+        return Path(settings.hermes_data_path) / "cron" / "jobs.json"
+    data_root_jobs = DATA_ROOT / "cron" / "jobs.json"
+    if data_root_jobs.exists():
+        return data_root_jobs
+    configured = Path(settings.hermes_data_path) / "cron" / "jobs.json" if settings.hermes_data_path else None
+    return configured or data_root_jobs
 
 
 def _jobs_json_entry(hermes_job_id: str) -> dict[str, Any] | None:
@@ -99,10 +108,16 @@ def _is_generic_lead_research_job(hermes_job_id: str) -> bool:
 
 def _container_path(path: str) -> Path:
     value = str(path or "")
+    if DATA_ROOT != Path("/opt/data"):
+        root = DATA_ROOT
+    else:
+        root = Path(settings.hermes_data_path) if settings.hermes_data_path and str(settings.hermes_data_path) != "/hermes-data" else DATA_ROOT
+    if not root.exists() and settings.hermes_data_path:
+        root = Path(settings.hermes_data_path)
     if value == "/opt/data":
-        return DATA_ROOT
+        return root
     if value.startswith("/opt/data/"):
-        return DATA_ROOT / value.removeprefix("/opt/data/")
+        return root / value.removeprefix("/opt/data/")
     return Path(value)
 
 
@@ -166,6 +181,8 @@ def _execute_generic_lead_research(hermes_job_id: str, task_type: str, payload: 
         args = shlex.split(command)
     except ValueError as exc:
         return _failed(f"Could not parse generic lead research command: {exc}")
+    if payload.get("sample"):
+        args = _replace_arg(args, "--limit", str(min(max(int(payload.get("limit") or 5), 1), 5)))
     if len(args) < 2 or args[0] != "python3" or args[1] != GENERIC_LEAD_RESEARCH_SCRIPT:
         return _failed("Generic lead research command must call the approved script with python3")
     script = _container_path(GENERIC_LEAD_RESEARCH_SCRIPT)
@@ -176,7 +193,8 @@ def _execute_generic_lead_research(hermes_job_id: str, task_type: str, payload: 
     if not output_dir or not output_dir.startswith("/opt/data/home/voryx_workspaces/"):
         return _failed("Generic lead research output directory must be under /opt/data/home/voryx_workspaces")
     before = _latest_generic_lead_output(_container_path(output_dir))
-    result = _run(args, cwd=_container_path(str(job.get("working_directory") or output_dir)))
+    run_args = _physicalize_args(args)
+    result = _run(run_args, cwd=_container_path(str(job.get("working_directory") or output_dir)))
     logs = _logs_from_completed_process(result)
     if result.returncode != 0:
         return _failed("Generic Lead Research execution failed", logs=logs, results={"returncode": result.returncode})
@@ -408,6 +426,27 @@ def _arg_value(args: list[str], name: str) -> str:
     if index + 1 >= len(args):
         return ""
     return args[index + 1]
+
+
+def _replace_arg(args: list[str], name: str, value: str) -> list[str]:
+    next_args = list(args)
+    try:
+        index = next_args.index(name)
+    except ValueError:
+        return next_args + [name, value]
+    if index + 1 < len(next_args):
+        next_args[index + 1] = value
+    else:
+        next_args.append(value)
+    return next_args
+
+
+def _physicalize_args(args: list[str]) -> list[str]:
+    next_args = list(args)
+    for index, value in enumerate(next_args):
+        if value.startswith("/opt/data/"):
+            next_args[index] = str(_container_path(value))
+    return next_args
 
 
 def _latest_generic_lead_output(output_dir: Path) -> Path | None:

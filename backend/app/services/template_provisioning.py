@@ -15,6 +15,7 @@ from app.core.config import settings
 from app.models.entities import AIEmployee, Campaign, EmployeeStatus, Job, JobStatus, Lead, LeadStatus, Schedule
 from app.services.audit import log
 from app.services.hermes_control import HermesControlError, HermesControlService
+from app.services.hermes_jobs_json_executor import execute_scheduled_jobs_json_task
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT
 
 
@@ -22,6 +23,74 @@ APPROVED_INTERNAL_RECIPIENT = INTERNAL_REPORT_RECIPIENT
 PROVISIONED_STATES = {"Provisioned", "Active", "Paused"}
 TEMPLATE_TYPES = {"lead_research", "daily_reporting", "outreach_drafting", "custom"}
 GENERIC_LEAD_RESEARCH_SCRIPT = "/opt/data/home/leads/voryx_generic_lead_research.py"
+LOCKED_LEAD_FIELDS = [
+    "lead_id",
+    "created_at",
+    "company_id",
+    "campaign_id",
+    "hermes_job_id",
+    "source_run_id",
+    "business_name",
+    "website",
+    "email",
+    "phone",
+    "city",
+    "category",
+    "lead_status",
+    "verified_at",
+    "source_url",
+    "notes",
+]
+DEFAULT_CUSTOM_LEAD_FIELDS = [
+    "owner_name",
+    "instagram",
+    "google_rating",
+    "number_of_locations",
+    "decision_maker_title",
+    "priority",
+    "call_notes",
+    "sms_status",
+]
+TEMPLATE_REGISTRY = {
+    "lead_research": {
+        "label": "Lead Research",
+        "allowed_employee_types": ["Lead Researcher"],
+        "required_fields": ["industry", "geographic_area", "target_audience", "daily_lead_goal", "email_sending_disabled"],
+        "disabled": False,
+    },
+    "daily_reporting": {
+        "label": "Daily Reporting",
+        "allowed_employee_types": ["CRM Manager", "Report Manager"],
+        "required_fields": ["report_recipient", "timezone", "schedule_time", "internal_only"],
+        "disabled": False,
+    },
+    "outreach_drafting": {
+        "label": "Outreach Drafting",
+        "allowed_employee_types": ["Email Outreach", "Draft Writer"],
+        "required_fields": ["offer", "target_customer", "tone", "email_sending_disabled"],
+        "disabled": False,
+    },
+    "reply_handler": {
+        "label": "Reply Handler",
+        "allowed_employee_types": ["Reply Handler"],
+        "required_fields": [],
+        "disabled": True,
+        "reason": "Unavailable until Gmail/thread monitoring is implemented.",
+    },
+    "voice_agent": {
+        "label": "Voice Agent",
+        "allowed_employee_types": ["Voice Agent"],
+        "required_fields": [],
+        "disabled": True,
+        "reason": "Unavailable until calling integration exists.",
+    },
+    "custom": {
+        "label": "Custom",
+        "allowed_employee_types": ["Custom"],
+        "required_fields": [],
+        "disabled": False,
+    },
+}
 
 
 @dataclass(frozen=True)
@@ -81,22 +150,31 @@ def _ensure_generic_lead_script() -> None:
 def _lead_research_config(campaign: Campaign) -> dict[str, Any]:
     industry = (campaign.industry or "").strip()
     location = (campaign.geographic_area or "").strip()
+    target = (campaign.target_audience or "").strip()
     if not industry:
         raise ValueError("Lead Research template requires Industry / niche.")
     if not location:
         raise ValueError("Lead Research template requires City / region.")
+    if not target:
+        raise ValueError("Lead Research template requires Target customer.")
+    if int(campaign.daily_lead_goal or 0) <= 0:
+        raise ValueError("Lead Research template requires Lead count greater than 0.")
+    if campaign.daily_email_goal or campaign.daily_email_limit or campaign.dry_run_mode is False:
+        raise ValueError("Lead Research template requires email sending disabled.")
     limit = max(int(campaign.daily_lead_goal or 0), 1)
+    schema = normalize_lead_schema(campaign.provisioning_result if isinstance(campaign.provisioning_result, dict) else {})
     return {
         "company_id": campaign.company_id,
         "campaign_id": campaign.id,
         "industry": industry,
         "location": location,
-        "target_customer": (campaign.target_audience or "").strip(),
+        "target_customer": target,
         "exclude": (campaign.description or "").strip(),
         "limit": limit,
         "notes": (campaign.provisioning_result or {}).get("notes") if isinstance(campaign.provisioning_result, dict) else None,
         "email_sending": False,
         "prospect_outreach": False,
+        "lead_schema": schema,
     }
 
 
@@ -133,6 +211,8 @@ def _lead_research_command(campaign: Campaign, workspace: str) -> tuple[str, str
         str(config["limit"]),
         "--output-dir",
         quote(output_dir),
+        "--config",
+        quote(config_path),
         "--notes",
         quote(str(config.get("notes") or "")),
         "--no-email",
@@ -141,6 +221,75 @@ def _lead_research_command(campaign: Campaign, workspace: str) -> tuple[str, str
     config["output_dir"] = output_dir
     config["script"] = GENERIC_LEAD_RESEARCH_SCRIPT
     return command, output_dir, config
+
+
+def normalize_lead_schema(source: dict[str, Any] | None = None) -> dict[str, Any]:
+    source = source or {}
+    raw_schema = source.get("lead_schema") if isinstance(source.get("lead_schema"), dict) else source
+    custom_source = raw_schema.get("custom_fields") if isinstance(raw_schema, dict) else None
+    custom_fields = []
+    if isinstance(custom_source, list):
+        for item in custom_source:
+            if isinstance(item, dict):
+                name = _slug(str(item.get("name") or item.get("key") or "")).replace("-", "_")
+                if not name or name in LOCKED_LEAD_FIELDS:
+                    continue
+                custom_fields.append({
+                    "name": name,
+                    "label": str(item.get("label") or name.replace("_", " ").title()),
+                    "hidden": bool(item.get("hidden", False)),
+                    "order": int(item.get("order") or len(custom_fields) + 1),
+                })
+            elif isinstance(item, str):
+                name = _slug(item).replace("-", "_")
+                if name and name not in LOCKED_LEAD_FIELDS:
+                    custom_fields.append({"name": name, "label": name.replace("_", " ").title(), "hidden": False, "order": len(custom_fields) + 1})
+    if not custom_fields:
+        custom_fields = [{"name": name, "label": name.replace("_", " ").title(), "hidden": False, "order": index + 1} for index, name in enumerate(DEFAULT_CUSTOM_LEAD_FIELDS)]
+    custom_fields = sorted(custom_fields, key=lambda item: item.get("order", 0))
+    return {
+        "locked_fields": LOCKED_LEAD_FIELDS,
+        "custom_fields": custom_fields,
+        "columns": LOCKED_LEAD_FIELDS + [field["name"] for field in custom_fields if not field.get("hidden")],
+    }
+
+
+def update_campaign_lead_schema(campaign: Campaign, schema: dict[str, Any]) -> dict[str, Any]:
+    next_schema = normalize_lead_schema({"lead_schema": schema})
+    result = dict(campaign.provisioning_result or {})
+    result["lead_schema"] = next_schema
+    campaign.provisioning_result = result
+    if (campaign.campaign_type or "").strip().lower() == "lead_research":
+        workspace = _campaign_workspace(campaign)
+        _write_lead_research_config(campaign, workspace)
+    return next_schema
+
+
+def template_registry_payload() -> dict[str, Any]:
+    return {
+        key: {
+            **value,
+            "locked_lead_fields": LOCKED_LEAD_FIELDS if key == "lead_research" else [],
+            "default_custom_lead_fields": DEFAULT_CUSTOM_LEAD_FIELDS if key == "lead_research" else [],
+        }
+        for key, value in TEMPLATE_REGISTRY.items()
+    }
+
+
+def allowed_employee_types_for_campaign(campaign: Campaign | None) -> list[str]:
+    campaign_type = (getattr(campaign, "campaign_type", None) or "custom").strip().lower()
+    entry = TEMPLATE_REGISTRY.get(campaign_type) or TEMPLATE_REGISTRY["custom"]
+    return list(entry["allowed_employee_types"])
+
+
+def verify_hermes_job_exists(hermes_job_id: str | None) -> bool:
+    if not hermes_job_id:
+        return False
+    try:
+        raw = HermesControlService()._read_jobs()
+        return HermesControlService()._find_job(raw, hermes_job_id) is not None
+    except Exception:
+        return False
 
 
 def template_spec(campaign: Campaign) -> TemplateSpec | None:
@@ -215,16 +364,30 @@ def provision_campaign_template(db: Session, campaign: Campaign, user_id: str | 
     campaign.campaign_type = (campaign.campaign_type or "custom").strip().lower()
     if campaign.campaign_type not in TEMPLATE_TYPES:
         raise ValueError(f"Unsupported campaign template: {campaign.campaign_type}")
+    entry = TEMPLATE_REGISTRY.get(campaign.campaign_type)
+    if entry and entry.get("disabled"):
+        raise ValueError(f"{entry['label']} template is unavailable: {entry.get('reason')}")
     if campaign.campaign_type == "custom":
         campaign.provisioning_state = campaign.provisioning_state or "Draft"
         campaign.provisioning_result = {"provisioned": False, "message": "Custom campaign requires manual Hermes provisioning."}
         return campaign.provisioning_result
     if campaign.campaign_type == "lead_research":
         _lead_research_config(campaign)
-    if campaign.campaign_type in {"daily_reporting", "outreach_drafting"}:
+    if campaign.campaign_type == "daily_reporting":
         recipient = campaign.report_recipient or campaign.internal_test_recipient
-        if campaign.campaign_type == "daily_reporting" and recipient and recipient != APPROVED_INTERNAL_RECIPIENT:
+        if not recipient:
+            raise ValueError("Daily Reporting template requires report_recipient.")
+        if not campaign.timezone:
+            raise ValueError("Daily Reporting template requires timezone.")
+        if recipient != APPROVED_INTERNAL_RECIPIENT:
             raise ValueError(f"Daily Reporting template recipient must be {APPROVED_INTERNAL_RECIPIENT}")
+    if campaign.campaign_type == "outreach_drafting":
+        if not (campaign.description or "").strip():
+            raise ValueError("Outreach Drafting template requires offer/tone in Exclusions / notes.")
+        if not (campaign.target_audience or "").strip():
+            raise ValueError("Outreach Drafting template requires target_customer.")
+        if campaign.daily_email_goal or campaign.daily_email_limit or campaign.dry_run_mode is False:
+            raise ValueError("Outreach Drafting template requires email sending disabled.")
     spec = template_spec(campaign)
     if not spec:
         raise ValueError(f"No provisioning spec for campaign template: {campaign.campaign_type}")
@@ -288,6 +451,7 @@ def provision_campaign_template(db: Session, campaign: Campaign, user_id: str | 
     control = HermesControlService().upsert_provisioned_job(desired_job)
     campaign.provisioning_state = "Provisioned"
     campaign.provisioning_result = {
+        **(campaign.provisioning_result or {}),
         "provisioned": True,
         "hermes_job_id": job_id,
         "employee_id": employee.id,
@@ -313,9 +477,17 @@ def validate_employee_operational_state(db: Session, employee: AIEmployee, next_
     if status is None and next_status is not None:
         status = next((member for member in EmployeeStatus if str(next_status) in {member.value, member.name}), None)
     status = status or employee.status
+    campaign = db.get(Campaign, employee.campaign_id) if employee.campaign_id else None
+    if campaign:
+        allowed_types = allowed_employee_types_for_campaign(campaign)
+        if employee.employee_type not in allowed_types:
+            if status in {EmployeeStatus.running, EmployeeStatus.scheduled}:
+                raise ValueError(f"{employee.employee_type} is not allowed for {campaign.campaign_type}. Allowed: {', '.join(allowed_types)}")
     hermes_job_id = (employee.hermes_job_id or "").strip()
     if status in {EmployeeStatus.running, EmployeeStatus.scheduled} and not hermes_job_id:
         raise ValueError("Employee cannot become Running or Scheduled without a Hermes job ID.")
+    if status in {EmployeeStatus.running, EmployeeStatus.scheduled} and not verify_hermes_job_exists(hermes_job_id):
+        raise ValueError("Employee cannot become Running or Scheduled until the Hermes job exists in jobs.json.")
     if status == EmployeeStatus.scheduled:
         schedule = db.scalar(select(Schedule).where(Schedule.employee_id == employee.id).limit(1))
         if not schedule:
@@ -327,30 +499,34 @@ def create_template_sample_job(db: Session, campaign: Campaign, action: str, use
     employee = db.scalar(select(AIEmployee).where(AIEmployee.campaign_id == campaign.id).order_by(AIEmployee.name).limit(1))
     now = datetime.utcnow()
     if action == "generate-sample" and campaign_type == "lead_research":
-        limit = min(max(int(campaign.daily_lead_goal or 5), 1), 5)
-        leads = []
-        for index in range(limit):
-            lead = Lead(
-                company_id=campaign.company_id,
-                campaign_id=campaign.id,
-                name=f"QA Sample Lead {index + 1}",
-                business=f"QA Sample Business {index + 1}",
-                email=None,
-                status=LeadStatus.generated,
-            )
-            db.add(lead)
-            leads.append(lead)
+        if not employee or not employee.hermes_job_id:
+            raise ValueError("Lead Research sample requires a provisioned Hermes job.")
+        _lead_research_config(campaign)
+        requested_limit = min(max(int(campaign.daily_lead_goal or 5), 1), 5)
+        result = execute_scheduled_jobs_json_task(
+            "Generate Leads",
+            {
+                "source": "dashboard_generate_sample",
+                "hermes_job_id": employee.hermes_job_id,
+                "campaign_type": "lead_research",
+                "sample": True,
+                "limit": requested_limit,
+                "send_email": False,
+            },
+        )
+        status = JobStatus.completed if result.get("status") == "ok" else JobStatus.failed
         job = Job(
             employee_id=getattr(employee, "id", None),
             campaign_id=campaign.id,
             connector="hermes",
             task_type="Generate Lead Sample",
-            status=JobStatus.completed,
-            payload={"sample": True, "send_email": False, "limit": limit},
-            result={"leads_generated": limit, "prospect_email_sent": 0},
-            logs=["Generated QA sample leads only; no email was sent."],
+            status=status,
+            payload={"sample": True, "send_email": False, "limit": requested_limit, "hermes_job_id": employee.hermes_job_id},
+            result=result.get("results", result),
+            logs=result.get("logs", []),
+            error_message=result.get("error") if status == JobStatus.failed else None,
             started_at=now,
-            ended_at=now,
+            ended_at=datetime.utcnow(),
         )
     elif action == "send-internal-test" and campaign_type == "daily_reporting":
         recipient = campaign.report_recipient or campaign.internal_test_recipient or APPROVED_INTERNAL_RECIPIENT
