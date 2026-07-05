@@ -11,8 +11,12 @@ type Campaign = {
   company_id: string;
   name: string;
   industry?: string;
+  geographic_area?: string;
+  target_audience?: string;
+  description?: string;
   daily_lead_goal?: number;
   daily_email_goal?: number;
+  daily_email_limit?: number;
   campaign_type?: string;
   provisioning_state?: string;
   provisioning_result?: Record<string, unknown>;
@@ -59,7 +63,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
       </div>
       <div className="table-wrap">
         <table className="ops-table">
-          <thead><tr><th>Campaign</th><th>Company</th><th>Template</th><th>Provisioning</th><th>Daily Goals</th><th>Imported Jobs</th><th>Status</th></tr></thead>
+          <thead><tr><th>Campaign</th><th>Company</th><th>Template</th><th>Lead Research Config</th><th>Provisioning</th><th>Daily Goals</th><th>Imported Jobs</th><th>Status</th></tr></thead>
           <tbody>
             {campaigns.map((campaign) => (
               <tr key={campaign.id}>
@@ -67,15 +71,25 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                 <td>{companyName.get(campaign.company_id) || campaign.company_id}</td>
                 <td>{(campaign.campaign_type || 'custom').replaceAll('_', ' ')}</td>
                 <td>
+                  {campaign.campaign_type === 'lead_research' ? (
+                    <div className="max-w-md text-xs text-zinc-400">
+                      <div>{campaign.industry || 'Industry missing'} / {campaign.geographic_area || 'Location missing'}</div>
+                      <div>{campaign.target_audience || 'Target customer not set'}</div>
+                      <div>Lead generation only. Email sending disabled.</div>
+                    </div>
+                  ) : '-'}
+                </td>
+                <td>
                   <div>{campaign.provisioning_state || 'Draft'}</div>
                   <div className="text-xs text-zinc-500">{String(campaign.provisioning_result?.hermes_job_id || '') || 'No Hermes job'}</div>
+                  <div className="text-xs text-zinc-500">{String(campaign.provisioning_result?.approved_script || '').includes('voryx_generic_lead_research.py') ? 'Generic lead script' : ''}</div>
                 </td>
                 <td>{campaign.daily_lead_goal ?? 0} leads, {campaign.daily_email_goal ?? 0} emails</td>
                 <td>{countJobs(jobs, campaign.id)} total / {countJobs(jobs, campaign.id, 'Send Outreach')} outreach</td>
                 <td>{campaign.status}</td>
               </tr>
             ))}
-            {!campaigns.length ? <tr><td colSpan={7} className="text-zinc-400">{companyId ? 'No campaigns for selected company' : 'No company selected'}</td></tr> : null}
+            {!campaigns.length ? <tr><td colSpan={8} className="text-zinc-400">{companyId ? 'No campaigns for selected company' : 'No company selected'}</td></tr> : null}
           </tbody>
         </table>
       </div>
@@ -90,11 +104,16 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
           displayMaps={{ company_id: Object.fromEntries(companies.map((company) => [company.id, company.name])) }}
           fields={{
             company_id: { type: 'select', label: 'Company', options: companyOptions },
-            description: { type: 'textarea' },
-            target_audience: { type: 'textarea' },
+            industry: { type: 'text', label: 'Industry / niche' },
+            geographic_area: { type: 'text', label: 'City / region' },
+            target_audience: { type: 'textarea', label: 'Target customer' },
+            description: { type: 'textarea', label: 'Exclusions / notes' },
+            daily_lead_goal: { type: 'number', label: 'Lead count' },
+            daily_email_goal: { type: 'number', label: 'Daily email goal' },
+            daily_email_limit: { type: 'number', label: 'Max emails per day' },
             allowed_sending_days: { type: 'days', label: 'Allowed sending days' },
             allowed_sending_hours: { type: 'hours', label: 'Allowed sending hours' },
-            dry_run_mode: { type: 'boolean', label: 'Dry-run mode' },
+            dry_run_mode: { type: 'boolean', label: 'Email sending disabled' },
             campaign_type: { type: 'select', label: 'Template', options: [
               { value: 'lead_research', label: 'Lead Research' },
               { value: 'daily_reporting', label: 'Daily Reporting' },
@@ -115,7 +134,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             industry: '',
             target_audience: '',
             geographic_area: '',
-            daily_lead_goal: 0,
+            daily_lead_goal: 5,
             daily_email_goal: 0,
             daily_email_limit: 0,
             campaign_type: 'custom',

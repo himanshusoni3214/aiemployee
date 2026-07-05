@@ -1,12 +1,17 @@
 import hashlib
+import json
 import re
+import shutil
 from dataclasses import dataclass
 from datetime import datetime
+from pathlib import Path
+from shlex import quote
 from typing import Any
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.entities import AIEmployee, Campaign, EmployeeStatus, Job, JobStatus, Lead, LeadStatus, Schedule
 from app.services.audit import log
 from app.services.hermes_control import HermesControlError, HermesControlService
@@ -16,6 +21,7 @@ from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT
 APPROVED_INTERNAL_RECIPIENT = INTERNAL_REPORT_RECIPIENT
 PROVISIONED_STATES = {"Provisioned", "Active", "Paused"}
 TEMPLATE_TYPES = {"lead_research", "daily_reporting", "outreach_drafting", "custom"}
+GENERIC_LEAD_RESEARCH_SCRIPT = "/opt/data/home/leads/voryx_generic_lead_research.py"
 
 
 @dataclass(frozen=True)
@@ -45,20 +51,113 @@ def _company_workspace(company_id: str) -> str:
     return f"/opt/data/home/voryx_workspaces/{_slug(company_id)}"
 
 
+def _campaign_workspace(campaign: Campaign) -> str:
+    return f"{_company_workspace(campaign.company_id)}/{_slug(campaign.id)}"
+
+
+def _container_to_data_path(container_path: str) -> Path:
+    if not settings.hermes_data_path:
+        raise ValueError("HERMES_DATA_PATH is required for template provisioning")
+    value = container_path.strip()
+    if not value.startswith("/opt/data/"):
+        raise ValueError(f"Refusing to write outside /opt/data: {container_path}")
+    relative = value.removeprefix("/opt/data/")
+    return Path(settings.hermes_data_path) / relative
+
+
+def _asset_path(name: str) -> Path:
+    return Path(__file__).resolve().parents[1] / "assets" / name
+
+
+def _ensure_generic_lead_script() -> None:
+    source = _asset_path("voryx_generic_lead_research.py")
+    destination = _container_to_data_path(GENERIC_LEAD_RESEARCH_SCRIPT)
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if not destination.exists() or destination.read_text(encoding="utf-8") != source.read_text(encoding="utf-8"):
+        shutil.copy2(source, destination)
+    destination.chmod(0o755)
+
+
+def _lead_research_config(campaign: Campaign) -> dict[str, Any]:
+    industry = (campaign.industry or "").strip()
+    location = (campaign.geographic_area or "").strip()
+    if not industry:
+        raise ValueError("Lead Research template requires Industry / niche.")
+    if not location:
+        raise ValueError("Lead Research template requires City / region.")
+    limit = max(int(campaign.daily_lead_goal or 0), 1)
+    return {
+        "company_id": campaign.company_id,
+        "campaign_id": campaign.id,
+        "industry": industry,
+        "location": location,
+        "target_customer": (campaign.target_audience or "").strip(),
+        "exclude": (campaign.description or "").strip(),
+        "limit": limit,
+        "notes": (campaign.provisioning_result or {}).get("notes") if isinstance(campaign.provisioning_result, dict) else None,
+        "email_sending": False,
+        "prospect_outreach": False,
+    }
+
+
+def _write_lead_research_config(campaign: Campaign, workspace: str) -> str:
+    config = _lead_research_config(campaign)
+    path = _container_to_data_path(f"{workspace}/lead_research_config.json")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return f"{workspace}/lead_research_config.json"
+
+
+def _lead_research_command(campaign: Campaign, workspace: str) -> tuple[str, str, dict[str, Any]]:
+    _ensure_generic_lead_script()
+    config = _lead_research_config(campaign)
+    config_path = _write_lead_research_config(campaign, workspace)
+    output_dir = f"{workspace}/leads"
+    _container_to_data_path(output_dir).mkdir(parents=True, exist_ok=True)
+    command = " ".join([
+        "python3",
+        quote(GENERIC_LEAD_RESEARCH_SCRIPT),
+        "--company-id",
+        quote(config["company_id"]),
+        "--campaign-id",
+        quote(config["campaign_id"]),
+        "--industry",
+        quote(config["industry"]),
+        "--location",
+        quote(config["location"]),
+        "--target-customer",
+        quote(config["target_customer"]),
+        "--exclude",
+        quote(config["exclude"]),
+        "--limit",
+        str(config["limit"]),
+        "--output-dir",
+        quote(output_dir),
+        "--notes",
+        quote(str(config.get("notes") or "")),
+        "--no-email",
+    ])
+    config["config_path"] = config_path
+    config["output_dir"] = output_dir
+    config["script"] = GENERIC_LEAD_RESEARCH_SCRIPT
+    return command, output_dir, config
+
+
 def template_spec(campaign: Campaign) -> TemplateSpec | None:
-    workspace = _company_workspace(campaign.company_id)
+    workspace = _campaign_workspace(campaign)
     campaign_type = (campaign.campaign_type or "custom").strip().lower()
     if campaign_type == "lead_research":
+        command, output_dir, config = _lead_research_command(campaign, workspace)
         return TemplateSpec(
             employee_type="Lead Researcher",
             task_type="Generate Leads",
             schedule_name=f"{campaign.name} Lead Research",
             cron="0 13 * * *",
-            command=f"python3 /opt/data/home/leads/brew_it_by_sash.py --output-dir {workspace}/leads --limit {max(int(campaign.daily_lead_goal or 5), 1)} --no-email",
+            command=command,
             working_directory=workspace,
             description="Voryx template Lead Research job. Generates leads only and never sends email.",
-            safety={"prospect_outreach": False, "email_sending": False, "max_sample_leads": 5},
-            prompt="Generate qualified lead research only. Do not send email.",
+            safety={"prospect_outreach": False, "email_sending": False, "max_sample_leads": 5, "script": GENERIC_LEAD_RESEARCH_SCRIPT, "config": config},
+            prompt=f"Generate lead research only for {config['industry']} in {config['location']}. Email sending disabled.",
         )
     if campaign_type == "daily_reporting":
         recipient = campaign.report_recipient or campaign.internal_test_recipient or APPROVED_INTERNAL_RECIPIENT
@@ -120,6 +219,8 @@ def provision_campaign_template(db: Session, campaign: Campaign, user_id: str | 
         campaign.provisioning_state = campaign.provisioning_state or "Draft"
         campaign.provisioning_result = {"provisioned": False, "message": "Custom campaign requires manual Hermes provisioning."}
         return campaign.provisioning_result
+    if campaign.campaign_type == "lead_research":
+        _lead_research_config(campaign)
     if campaign.campaign_type in {"daily_reporting", "outreach_drafting"}:
         recipient = campaign.report_recipient or campaign.internal_test_recipient
         if campaign.campaign_type == "daily_reporting" and recipient and recipient != APPROVED_INTERNAL_RECIPIENT:
@@ -192,6 +293,9 @@ def provision_campaign_template(db: Session, campaign: Campaign, user_id: str | 
         "employee_id": employee.id,
         "schedule_id": schedule.id,
         "template": campaign.campaign_type,
+        "approved_script": spec.command,
+        "working_directory": spec.working_directory,
+        "safety": spec.safety,
         "hermes_control": control,
         "message": "Template provisioned disabled/paused Hermes job and paused Voryx schedule.",
     }

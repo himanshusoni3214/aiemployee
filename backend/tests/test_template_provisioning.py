@@ -50,7 +50,10 @@ class TemplateProvisioningTests(unittest.TestCase):
             campaign = Campaign(
                 company_id=company.id,
                 name="Template Lead Research",
-                industry="QA",
+                industry="cafes",
+                geographic_area="Toronto",
+                target_audience="independent cafe owners",
+                description="Exclude franchises and chains",
                 campaign_type="lead_research",
                 daily_lead_goal=25,
             )
@@ -72,6 +75,35 @@ class TemplateProvisioningTests(unittest.TestCase):
             self.assertFalse(hermes_job["enabled"])
             self.assertEqual(hermes_job["state"], "paused")
             self.assertFalse(hermes_job["safety"]["email_sending"])
+            self.assertIn("voryx_generic_lead_research.py", hermes_job["command"])
+            self.assertNotIn("brew_it_by_sash.py", hermes_job["command"])
+            self.assertIn("--no-email", hermes_job["command"])
+            self.assertEqual(hermes_job["safety"]["config"]["industry"], "cafes")
+            self.assertEqual(hermes_job["safety"]["config"]["location"], "Toronto")
+            config_path = Path(self.tmp.name) / "home" / "voryx_workspaces" / "company-template-qa" / campaign.id / "lead_research_config.json"
+            self.assertTrue(config_path.exists())
+        finally:
+            db.close()
+
+    def test_lead_research_template_requires_industry_and_location(self):
+        db = self.Session()
+        try:
+            company, user = self.make_base(db)
+            campaign = Campaign(
+                company_id=company.id,
+                name="Missing Lead Config",
+                industry="cafes",
+                geographic_area="",
+                campaign_type="lead_research",
+                daily_lead_goal=5,
+            )
+            db.add(campaign)
+            db.flush()
+
+            with self.assertRaises(ValueError) as ctx:
+                provision_campaign_template(db, campaign, user.id)
+
+            self.assertIn("City / region", str(ctx.exception))
         finally:
             db.close()
 
@@ -112,7 +144,7 @@ class TemplateProvisioningTests(unittest.TestCase):
         db = self.Session()
         try:
             company, user = self.make_base(db)
-            lead_campaign = Campaign(company_id=company.id, name="Sample Leads", campaign_type="lead_research", daily_lead_goal=20)
+            lead_campaign = Campaign(company_id=company.id, name="Sample Leads", campaign_type="lead_research", industry="cafes", geographic_area="Toronto", daily_lead_goal=20)
             report_campaign = Campaign(company_id=company.id, name="Sample Report", campaign_type="daily_reporting", report_recipient=APPROVED_INTERNAL_RECIPIENT)
             draft_campaign = Campaign(company_id=company.id, name="Sample Draft", campaign_type="outreach_drafting")
             db.add_all([lead_campaign, report_campaign, draft_campaign])

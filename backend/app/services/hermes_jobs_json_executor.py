@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import subprocess
 import uuid
 from datetime import datetime, timezone
@@ -15,6 +16,7 @@ OUTREACH_DRAFT_JOB_ID = "47caae0a6a59"
 OUTREACH_FOLLOWUP_JOB_ID = "b03a2d0f1149"
 APPROVED_JOB_IDS = {LEAD_RESEARCH_JOB_ID, DAILY_REPORT_JOB_ID}
 BLOCKED_JOB_IDS = {OUTREACH_DRAFT_JOB_ID, OUTREACH_FOLLOWUP_JOB_ID}
+GENERIC_LEAD_RESEARCH_SCRIPT = "/opt/data/home/leads/voryx_generic_lead_research.py"
 
 DATA_ROOT = Path(os.getenv("HERMES_EXECUTION_DATA_PATH", "/opt/data"))
 LEADS_DIR = DATA_ROOT / "home" / "leads"
@@ -29,7 +31,7 @@ def execute_scheduled_jobs_json_task(task_type: str, payload: dict[str, Any] | N
         return _unsupported("jobs_json scheduled execution requires payload.hermes_job_id")
     if hermes_job_id in BLOCKED_JOB_IDS:
         return _unsupported(f"Hermes job {hermes_job_id} is not executable from Voryx scheduled execution")
-    if hermes_job_id not in APPROVED_JOB_IDS:
+    if hermes_job_id not in APPROVED_JOB_IDS and not _is_generic_lead_research_job(hermes_job_id):
         return _unsupported(f"Hermes job {hermes_job_id} is not approved for jobs_json scheduled execution")
 
     if _payload_mentions_send_outreach(payload):
@@ -37,6 +39,10 @@ def execute_scheduled_jobs_json_task(task_type: str, payload: dict[str, Any] | N
 
     if hermes_job_id == LEAD_RESEARCH_JOB_ID:
         result = _execute_lead_research(task_type, payload)
+        _record_jobs_json_execution(hermes_job_id, result)
+        return result
+    if _is_generic_lead_research_job(hermes_job_id):
+        result = _execute_generic_lead_research(hermes_job_id, task_type, payload)
         _record_jobs_json_execution(hermes_job_id, result)
         return result
     if hermes_job_id == DAILY_REPORT_JOB_ID:
@@ -55,6 +61,49 @@ def _hermes_job_id(payload: dict[str, Any]) -> str:
     if isinstance(nested, dict):
         return _hermes_job_id(nested)
     return ""
+
+
+def _jobs_json_path() -> Path:
+    return DATA_ROOT / "cron" / "jobs.json"
+
+
+def _jobs_json_entry(hermes_job_id: str) -> dict[str, Any] | None:
+    path = _jobs_json_path()
+    if not path.exists():
+        return None
+    try:
+        raw = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    jobs = raw.get("jobs") if isinstance(raw, dict) else raw
+    if not isinstance(jobs, list):
+        return None
+    return next((job for job in jobs if isinstance(job, dict) and str(job.get("id")) == hermes_job_id), None)
+
+
+def _is_generic_lead_research_job(hermes_job_id: str) -> bool:
+    job = _jobs_json_entry(hermes_job_id)
+    if not job:
+        return False
+    command = str(job.get("command") or "")
+    safety = job.get("safety") if isinstance(job.get("safety"), dict) else {}
+    return (
+        job.get("source") == "voryx_template"
+        and str(job.get("task_type") or "").lower() == "generate leads"
+        and GENERIC_LEAD_RESEARCH_SCRIPT in command
+        and "--no-email" in command
+        and safety.get("email_sending") is False
+        and safety.get("prospect_outreach") is False
+    )
+
+
+def _container_path(path: str) -> Path:
+    value = str(path or "")
+    if value == "/opt/data":
+        return DATA_ROOT
+    if value.startswith("/opt/data/"):
+        return DATA_ROOT / value.removeprefix("/opt/data/")
+    return Path(value)
 
 
 def _payload_mentions_send_outreach(payload: Any) -> bool:
@@ -102,6 +151,66 @@ def _execute_lead_research(task_type: str, payload: dict[str, Any]) -> dict[str,
             "hermes_output_path": str(output_record),
             "sent_count": 0,
             "prospect_emails_sent": 0,
+        },
+    }
+
+
+def _execute_generic_lead_research(hermes_job_id: str, task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
+    job = _jobs_json_entry(hermes_job_id)
+    if not job:
+        return _failed(f"Hermes job not found in jobs.json: {hermes_job_id}")
+    command = str(job.get("command") or "")
+    if "send_outreach.py" in command or "--no-email" not in command or GENERIC_LEAD_RESEARCH_SCRIPT not in command:
+        return _failed("Blocked unsafe generic lead research command")
+    try:
+        args = shlex.split(command)
+    except ValueError as exc:
+        return _failed(f"Could not parse generic lead research command: {exc}")
+    if len(args) < 2 or args[0] != "python3" or args[1] != GENERIC_LEAD_RESEARCH_SCRIPT:
+        return _failed("Generic lead research command must call the approved script with python3")
+    script = _container_path(GENERIC_LEAD_RESEARCH_SCRIPT)
+    if not script.exists():
+        return _failed(f"Generic Lead Research script not found: {GENERIC_LEAD_RESEARCH_SCRIPT}")
+    output_dir = _arg_value(args, "--output-dir")
+    limit = int(_arg_value(args, "--limit") or "0")
+    if not output_dir or not output_dir.startswith("/opt/data/home/voryx_workspaces/"):
+        return _failed("Generic lead research output directory must be under /opt/data/home/voryx_workspaces")
+    before = _latest_generic_lead_output(_container_path(output_dir))
+    result = _run(args, cwd=_container_path(str(job.get("working_directory") or output_dir)))
+    logs = _logs_from_completed_process(result)
+    if result.returncode != 0:
+        return _failed("Generic Lead Research execution failed", logs=logs, results={"returncode": result.returncode})
+    output_path = _generic_output_from_stdout(result.stdout) or _latest_generic_lead_output(_container_path(output_dir))
+    physical_output_path = _container_path(str(output_path)) if output_path else None
+    if physical_output_path is None or (before is not None and physical_output_path == before and not _file_touched_now(physical_output_path)):
+        return _failed("Generic Lead Research completed without a current output file", logs=logs)
+    lead_count = _csv_row_count(physical_output_path)
+    if limit and lead_count > limit:
+        return _failed(f"Generic Lead Research exceeded limit: {lead_count}>{limit}", logs=logs, results={"output_path": str(output_path)})
+    output_record = _write_cron_output(
+        hermes_job_id,
+        "Generic Lead Research scheduled execution",
+        task_type,
+        payload,
+        logs,
+        {
+            "output_path": str(output_path),
+            "lead_count": lead_count,
+            "sent_count": 0,
+            "command": command,
+        },
+    )
+    return {
+        "status": "ok",
+        "logs": logs + [f"HERMES_OUTPUT_WRITTEN path={output_record}"],
+        "results": {
+            "hermes_job_id": hermes_job_id,
+            "output_path": str(output_path),
+            "hermes_output_path": str(output_record),
+            "lead_count": lead_count,
+            "sent_count": 0,
+            "prospect_emails_sent": 0,
+            "email_sending": False,
         },
     }
 
@@ -284,6 +393,37 @@ def _lead_output_from_stdout(stdout: str) -> Path | None:
     return Path(match.group(1).strip())
 
 
+def _generic_output_from_stdout(stdout: str) -> Path | None:
+    match = re.search(r"GENERIC_LEAD_RESEARCH_OUTPUT\s+path=(.+)", stdout or "")
+    if not match:
+        return None
+    return Path(match.group(1).strip())
+
+
+def _arg_value(args: list[str], name: str) -> str:
+    try:
+        index = args.index(name)
+    except ValueError:
+        return ""
+    if index + 1 >= len(args):
+        return ""
+    return args[index + 1]
+
+
+def _latest_generic_lead_output(output_dir: Path) -> Path | None:
+    if not output_dir.exists():
+        return None
+    candidates = sorted(output_dir.glob("leads_*.csv"), key=lambda path: path.stat().st_mtime, reverse=True)
+    return candidates[0] if candidates else None
+
+
+def _csv_row_count(path: Path) -> int:
+    import csv
+
+    with path.open(newline="", encoding="utf-8") as handle:
+        return sum(1 for _ in csv.DictReader(handle))
+
+
 def _latest_lead_output() -> Path | None:
     candidates = sorted(LEADS_DIR.glob("leads_brew_it_combined_*.csv"), key=lambda path: path.stat().st_mtime, reverse=True)
     return candidates[0] if candidates else None
@@ -327,7 +467,7 @@ def _write_cron_output(
 
 
 def _record_jobs_json_execution(hermes_job_id: str, result: dict[str, Any]) -> None:
-    path = DATA_ROOT / "cron" / "jobs.json"
+    path = _jobs_json_path()
     if not path.exists():
         return
     lock_path = path.with_suffix(".lock")

@@ -1,6 +1,7 @@
 import tempfile
 import unittest
 import json
+import subprocess
 from pathlib import Path
 from unittest.mock import patch
 
@@ -94,6 +95,50 @@ class HermesJobsJsonExecutorTests(unittest.TestCase):
             self.assertEqual(job["last_output_path"], "/opt/data/cron/output/lead.md")
             self.assertEqual(job["state"], "scheduled")
             self.assertIsNotNone(job["last_run_at"])
+
+    def test_generic_template_lead_research_executes_without_email(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            script = root / "home" / "leads" / "voryx_generic_lead_research.py"
+            script.parent.mkdir(parents=True)
+            script.write_text("print('ok')\n", encoding="utf-8")
+            output_dir = root / "home" / "voryx_workspaces" / "company" / "campaign" / "leads"
+            output_dir.mkdir(parents=True)
+            output = output_dir / "leads_company_campaign_20260704T000000Z.csv"
+            output.write_text("business,industry,location,target_customer,exclusions,email_sending\nA,cafes,Toronto,independent,chains,false\n", encoding="utf-8")
+            cron = root / "cron"
+            cron.mkdir()
+            jobs_path = cron / "jobs.json"
+            jobs_path.write_text(
+                json.dumps({
+                    "jobs": [{
+                        "id": "voryx-template-generic",
+                        "source": "voryx_template",
+                        "enabled": True,
+                        "state": "scheduled",
+                        "task_type": "Generate Leads",
+                        "command": "python3 /opt/data/home/leads/voryx_generic_lead_research.py --company-id company --campaign-id campaign --industry cafes --location Toronto --target-customer independent --exclude chains --limit 1 --output-dir /opt/data/home/voryx_workspaces/company/campaign/leads --no-email",
+                        "working_directory": "/opt/data/home/voryx_workspaces/company/campaign",
+                        "safety": {"email_sending": False, "prospect_outreach": False},
+                    }]
+                }),
+                encoding="utf-8",
+            )
+
+            def fake_run(args, *, cwd):
+                self.assertIn("--no-email", args)
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout=f"GENERIC_LEAD_RESEARCH_OUTPUT path={output}\nLEADS_GENERATED=1\n", stderr="")
+
+            with patch.object(executor, "DATA_ROOT", root), \
+                patch.object(executor, "CRON_OUTPUT_DIR", root / "cron" / "output"), \
+                patch.object(executor, "_run", side_effect=fake_run):
+                result = executor.execute_scheduled_jobs_json_task("Generate Leads", {"hermes_job_id": "voryx-template-generic"})
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["results"]["lead_count"], 1)
+            self.assertFalse(result["results"]["email_sending"])
+            updated = json.loads(jobs_path.read_text(encoding="utf-8"))["jobs"][0]
+            self.assertEqual(updated["last_status"], "ok")
 
 
 if __name__ == "__main__":
