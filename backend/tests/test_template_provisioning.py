@@ -43,6 +43,12 @@ class TemplateProvisioningTests(unittest.TestCase):
     def jobs_json(self):
         return json.loads((Path(self.tmp.name) / "cron" / "jobs.json").read_text(encoding="utf-8"))
 
+    def write_seed_csv(self):
+        path = Path(self.tmp.name) / "home" / "leads" / "seed.csv"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("business_name,website,phone,email,city,category,source_url\nReal Cafe,http://realcafe.example,416-555-0101,hello@realcafe.example,Toronto,cafes,http://source.example/real-cafe\n", encoding="utf-8")
+        return "/opt/data/home/leads/seed.csv"
+
     def test_lead_research_template_provisions_disabled_hermes_job_and_paused_schedule(self):
         db = self.Session()
         try:
@@ -141,6 +147,7 @@ class TemplateProvisioningTests(unittest.TestCase):
                 daily_lead_goal=5,
                 report_recipient=APPROVED_INTERNAL_RECIPIENT,
                 dry_run_mode=True,
+                provisioning_result={"lead_source": {"type": "uploaded_seed_csv", "file": self.write_seed_csv()}},
             )
             db.add(campaign)
             db.flush()
@@ -185,11 +192,29 @@ class TemplateProvisioningTests(unittest.TestCase):
         finally:
             db.close()
 
+
+    def test_generate_sample_without_real_source_fails_without_fake_csv(self):
+        db = self.Session()
+        try:
+            company, user = self.make_base(db)
+            campaign = Campaign(company_id=company.id, name="No Source Leads", campaign_type="lead_research", industry="cafes", geographic_area="Toronto", target_audience="independent cafe owners", daily_lead_goal=5)
+            db.add(campaign)
+            db.flush()
+            provision_campaign_template(db, campaign, user.id)
+            result = routes.campaign_template_action(campaign.id, "generate-sample", db=db, user=user)
+            db.commit()
+            self.assertEqual(result["status"], "failed")
+            self.assertIn("real_source_not_configured", json.dumps(result["result"]))
+            output_dir = Path(self.tmp.name) / "home" / "voryx_workspaces" / "company-template-qa" / campaign.id / "leads"
+            self.assertFalse(list(output_dir.glob("*.csv")))
+        finally:
+            db.close()
+
     def test_template_sample_actions_send_no_email_and_restrict_recipient(self):
         db = self.Session()
         try:
             company, user = self.make_base(db)
-            lead_campaign = Campaign(company_id=company.id, name="Sample Leads", campaign_type="lead_research", industry="cafes", geographic_area="Toronto", target_audience="independent cafe owners", daily_lead_goal=20)
+            lead_campaign = Campaign(company_id=company.id, name="Sample Leads", campaign_type="lead_research", industry="cafes", geographic_area="Toronto", target_audience="independent cafe owners", daily_lead_goal=20, provisioning_result={"lead_source": {"type": "uploaded_seed_csv", "file": self.write_seed_csv()}})
             report_campaign = Campaign(company_id=company.id, name="Sample Report", campaign_type="daily_reporting", report_recipient=APPROVED_INTERNAL_RECIPIENT)
             draft_campaign = Campaign(company_id=company.id, name="Sample Draft", campaign_type="outreach_drafting", target_audience="independent cafe owners", description="Offer: 14-day pilot; Tone: helpful")
             db.add_all([lead_campaign, report_campaign, draft_campaign])
@@ -206,6 +231,10 @@ class TemplateProvisioningTests(unittest.TestCase):
             self.assertLessEqual(lead_job["result"]["lead_count"], 5)
             self.assertIn("output_path", lead_job["result"])
             self.assertFalse(lead_job["result"]["email_sending"])
+            output_path = Path(str(lead_job["result"]["output_path"]).replace("/opt/data/", f"{self.tmp.name}/"))
+            csv_text = output_path.read_text(encoding="utf-8")
+            self.assertIn("Real Cafe", csv_text)
+            self.assertNotIn("Prospect 1", csv_text)
             self.assertFalse(report_job["result"]["email_sent"])
             self.assertEqual(report_job["result"]["recipient"], APPROVED_INTERNAL_RECIPIENT)
             self.assertFalse(draft_job["result"]["email_sent"])

@@ -28,8 +28,9 @@ type Campaign = {
   status: string;
 };
 type Job = { campaign_id?: string | null; status: string; task_type: string };
+type Employee = { id: string; campaign_id?: string | null; name: string; employee_type: string; hermes_job_id?: string | null; status: string };
 type LeadSchema = { locked_fields?: string[]; custom_fields?: Array<{ name: string; label?: string; hidden?: boolean; order?: number }>; columns?: string[] };
-type LeadOutputs = { outputs: Array<{ path: string; download_url: string; row_count: number; generated_at: string; columns?: string[] }>; rows: Record<string, unknown>[] };
+type LeadOutputs = { outputs: Array<{ path: string; file_name?: string; download_url: string; row_count: number; generated_at: string; modified_at?: string; columns?: string[]; kind?: string }>; rows: Record<string, unknown>[] };
 
 function countJobs(jobs: Job[], campaignId: string, task?: string) {
   return jobs.filter((job) => job.campaign_id === campaignId && (!task || job.task_type === task)).length;
@@ -40,13 +41,14 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
   const companies = await serverApi<Company[]>('/companies', []);
   const companyId = selectedCompanyId(companies, params.company_id);
   const companyQuery = queryString({ company_id: companyId || undefined });
-  const [campaigns, jobs, capabilitiesResponse] = companyId
+  const [campaigns, jobs, employees, capabilitiesResponse] = companyId
     ? await Promise.all([
         serverApi<Campaign[]>(`/campaigns${companyQuery}`, []),
         serverApi<Job[]>(`/jobs${companyQuery}`, []),
+        serverApi<Employee[]>(`/employees${companyQuery}`, []),
         serverApi<CapabilitiesResponse>('/connectors/capabilities', {}),
       ])
-    : [[], [], {}] as [Campaign[], Job[], CapabilitiesResponse];
+    : [[], [], [], {}] as [Campaign[], Job[], Employee[], CapabilitiesResponse];
   const capabilities = capabilitiesResponse.hermes || defaultConnectorCapabilities;
   const leadDetails = companyId
     ? Object.fromEntries(await Promise.all(campaigns.map(async (campaign) => {
@@ -58,6 +60,16 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
       })))
     : {};
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
+  const statusRank = (status: string) => ({ Running: 0, Scheduled: 1, Paused: 2, Stopped: 3, Error: 4 }[status] ?? 5);
+  const hermesIdsByCampaign = new Map<string, string[]>();
+  campaigns.forEach((campaign) => {
+    const values = employees
+      .filter((employee) => employee.campaign_id === campaign.id && employee.hermes_job_id && employee.status !== 'Archived')
+      .sort((a, b) => statusRank(a.status) - statusRank(b.status) || a.name.localeCompare(b.name))
+      .map((employee) => `${employee.employee_type}: ${employee.hermes_job_id}`);
+    const unique = Array.from(new Set(values));
+    hermesIdsByCampaign.set(campaign.id, unique.length > 4 ? [...unique.slice(0, 4), `+${unique.length - 4} more`] : unique);
+  });
   const companyOptions = companies.filter((company) => company.status !== 'Archived').map((company) => ({ value: company.id, label: company.name }));
 
   return (
@@ -97,7 +109,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                 </td>
                 <td>
                   <div>{campaign.provisioning_state || 'Draft'}</div>
-                  <div className="text-xs text-zinc-500">{String(campaign.provisioning_result?.hermes_job_id || '') || 'No Hermes job'}</div>
+                  <div className="text-xs text-zinc-500">{(hermesIdsByCampaign.get(campaign.id) || []).join(' / ') || String(campaign.provisioning_result?.hermes_job_id || '') || 'No Hermes job'}</div>
                   <div className="text-xs text-zinc-500">{String(campaign.provisioning_result?.approved_script || '').includes('voryx_generic_lead_research.py') ? 'Generic lead script' : ''}</div>
                 </td>
                 <td>{campaign.daily_lead_goal ?? 0} leads, {campaign.daily_email_goal ?? 0} emails</td>
@@ -121,7 +133,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                     <p className="text-sm text-zinc-400">Lead Sheet Fields and Generated Files. Locked fields are preserved; custom fields save to PostgreSQL and workspace config.</p>
                     <p className="mt-1 text-xs text-zinc-500">Add Lead Researcher / Add Daily Reporter / Add Outreach Draft Writer from AI Employees. Reply Handler and Voice Agent are not connected.</p>
                   </div>
-                  <div className="text-xs text-zinc-500">{String(campaign.provisioning_result?.hermes_job_id || 'No Hermes job')}</div>
+                  <div className="text-xs text-zinc-500">{(hermesIdsByCampaign.get(campaign.id) || []).join(' / ') || String(campaign.provisioning_result?.hermes_job_id || 'No Hermes job')}</div>
                 </div>
                 <LeadOutputsPanel outputs={detail.outputs.outputs || []} rows={detail.outputs.rows || []} />
                 <LeadSchemaEditor campaignId={campaign.id} initialSchema={detail.schema || {}} />
@@ -145,6 +157,15 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             geographic_area: { type: 'text', label: 'City / region *' },
             target_audience: { type: 'textarea', label: 'Target customer *' },
             description: { type: 'textarea', label: 'Offer/product, exclusions, tone and notes' },
+            lead_source_type: { type: 'select', label: 'Lead source *', options: [
+              { value: 'uploaded_seed_csv', label: 'Uploaded seed CSV' },
+              { value: 'existing_legacy_file', label: 'Existing legacy file' },
+              { value: 'manual_import', label: 'Manual import CSV' },
+              { value: 'real_directory', label: 'Real directory (not configured)' },
+            ] },
+            lead_source_file: { type: 'text', label: 'Lead source file (/opt/data/...)' },
+            lead_source_url: { type: 'text', label: 'Lead source URL' },
+            lead_source_query: { type: 'text', label: 'Search query / source query' },
             daily_lead_goal: { type: 'number', label: 'Lead goal *' },
             daily_email_goal: { type: 'number', label: 'Daily email goal' },
             daily_email_limit: { type: 'number', label: 'Max emails per day' },
@@ -167,6 +188,10 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             company_id: companyId,
             name: '',
             description: '',
+            lead_source_type: '',
+            lead_source_file: '',
+            lead_source_url: '',
+            lead_source_query: '',
             industry: '',
             target_audience: '',
             geographic_area: '',

@@ -142,8 +142,22 @@ def _enum_member(enum_cls, value):
             return member
     return value
 
+def _campaign_source_payload(payload: dict) -> dict:
+    source_type = str(payload.pop('lead_source_type', '') or '').strip()
+    source_file = str(payload.pop('lead_source_file', '') or '').strip()
+    source_url = str(payload.pop('lead_source_url', '') or '').strip()
+    source_query = str(payload.pop('lead_source_query', '') or '').strip()
+    result = payload.get('provisioning_result') if isinstance(payload.get('provisioning_result'), dict) else dict(payload.get('provisioning_result') or {})
+    if source_type or source_file or source_url or source_query:
+        result = dict(result)
+        result['lead_source'] = {'type': source_type, 'file': source_file, 'url': source_url, 'query': source_query}
+        payload['provisioning_result'] = result
+    return payload
+
 def _coerce_payload(model, payload: dict) -> dict:
     data = dict(payload)
+    if model is Campaign:
+        data = _campaign_source_payload(data)
     if 'status' in data:
         if model in {Company, Campaign}:
             data['status'] = _enum_member(Status, data['status'])
@@ -254,6 +268,64 @@ def _container_path_for_physical(path: Path) -> str:
     relative = path.resolve().relative_to(root)
     return f"/opt/data/{relative.as_posix()}"
 
+def _campaign_employee_hermes_ids(db: Session, campaign: Campaign) -> list[str]:
+    employees = db.scalars(select(AIEmployee).where(AIEmployee.campaign_id == campaign.id, AIEmployee.status != EmployeeStatus.archived)).all()
+    ids = []
+    for employee in employees:
+        hermes_id = _employee_hermes_job_id(employee)
+        if hermes_id:
+            ids.append(hermes_id)
+    return list(dict.fromkeys(ids))
+
+
+def _legacy_bibs_files(campaign: Campaign) -> list[Path]:
+    cid = str(campaign.id or '')
+    if not settings.hermes_data_path:
+        return []
+    root = Path(settings.hermes_data_path)
+    leads_dir = root / 'home' / 'leads'
+    files: list[Path] = []
+    if cid == 'campaign-brew-it-by-sash-lead-research':
+        patterns = ['leads_brew_it_combined_*.csv', 'leads_brew_it_*.csv', 'leads_verified.csv']
+        for pattern in patterns:
+            files.extend(leads_dir.glob(pattern))
+    elif cid == 'campaign-brew-it-by-sash-reporting':
+        report = leads_dir / 'brew_daily_report.txt'
+        if report.exists():
+            files.append(report)
+        files.extend((root / 'cron' / 'output' / '5881b72113ce').glob('*.md'))
+    unique: dict[Path, Path] = {}
+    for path in files:
+        if path.exists() and path.is_file():
+            unique[path.resolve()] = path
+    return list(unique.values())
+
+
+def _output_record(campaign: Campaign, path: Path) -> dict:
+    rows = []
+    columns: list[str] = []
+    if path.suffix.lower() == '.csv':
+        try:
+            with path.open(newline='', encoding='utf-8', errors='replace') as handle:
+                rows = list(csv.DictReader(handle))
+                columns = list(rows[0].keys()) if rows else []
+        except Exception:
+            rows = []
+            columns = []
+    container_path = _container_path_for_physical(path)
+    return {
+        'path': container_path,
+        'file_name': path.name,
+        'download_url': f"/api/campaigns/{campaign.id}/lead-outputs/download?path={quote(container_path, safe='')}",
+        'row_count': len(rows),
+        'generated_at': datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + 'Z',
+        'modified_at': datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + 'Z',
+        'columns': columns,
+        'metadata_path': container_path.removesuffix('.csv') + '.metadata.json' if path.suffix.lower() == '.csv' else None,
+        'kind': 'csv' if path.suffix.lower() == '.csv' else 'report',
+        'linked_campaign_id': campaign.id,
+    }
+
 def _lead_output_dirs_for_campaign(db: Session, campaign: Campaign) -> list[str]:
     dirs: list[str] = []
     result = campaign.provisioning_result if isinstance(campaign.provisioning_result, dict) else {}
@@ -274,27 +346,13 @@ def _lead_output_dirs_for_campaign(db: Session, campaign: Campaign) -> list[str]
 
 def _latest_lead_outputs(campaign: Campaign, db: Session | None = None, limit: int = 10) -> list[dict]:
     directories = _lead_output_dirs_for_campaign(db, campaign) if db else [f"/opt/data/home/voryx_workspaces/{campaign.company_id}/{campaign.id}/leads"]
-    outputs = []
+    outputs = [_output_record(campaign, path) for path in _legacy_bibs_files(campaign)]
     for output_dir in directories:
         directory = _hermes_physical_path(str(output_dir))
         if not directory.exists():
             continue
         for path in directory.glob('*.csv'):
-            try:
-                with path.open(newline='', encoding='utf-8') as handle:
-                    rows = list(csv.DictReader(handle))
-            except Exception:
-                rows = []
-            container_path = _container_path_for_physical(path)
-            outputs.append({
-                'path': container_path,
-                'file_name': path.name,
-                'download_url': f"/api/campaigns/{campaign.id}/lead-outputs/download?path={quote(container_path, safe='')}",
-                'row_count': len(rows),
-                'generated_at': datetime.utcfromtimestamp(path.stat().st_mtime).isoformat() + 'Z',
-                'columns': list(rows[0].keys()) if rows else [],
-                'metadata_path': container_path.removesuffix('.csv') + '.metadata.json',
-            })
+            outputs.append(_output_record(campaign, path))
     outputs.sort(key=lambda item: item['generated_at'], reverse=True)
     return outputs[:limit]
 
@@ -517,9 +575,9 @@ def campaign_lead_outputs(
     if not campaign: raise HTTPException(404, 'Not found')
     outputs = _latest_lead_outputs(campaign, db)
     latest_rows = []
-    if outputs:
+    if outputs and outputs[0].get('kind') == 'csv':
         path = _hermes_physical_path(outputs[0]['path'])
-        with path.open(newline='', encoding='utf-8') as handle:
+        with path.open(newline='', encoding='utf-8', errors='replace') as handle:
             latest_rows = _filter_lead_rows(list(csv.DictReader(handle)), filter)
     return {'campaign_id': campaign.id, 'outputs': outputs, 'filter': filter, 'rows': latest_rows[:200], 'row_count': len(latest_rows)}
 
@@ -534,7 +592,7 @@ def download_campaign_lead_output(campaign_id: str, path: str, db: Session=Depen
     physical = _hermes_physical_path(path)
     if not physical.exists():
         raise HTTPException(404, 'Output file not found')
-    return FileResponse(str(physical), media_type='text/csv', filename=physical.name)
+    return FileResponse(str(physical), media_type='text/csv' if physical.suffix.lower() == '.csv' else 'text/plain', filename=physical.name)
 
 def _campaign_payload(campaign: Campaign, *, state: str = 'ok', hermes_controls: list | None = None, blocked: list | None = None) -> dict:
     return {

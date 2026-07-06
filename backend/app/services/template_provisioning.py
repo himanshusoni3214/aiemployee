@@ -192,7 +192,9 @@ def _lead_research_config(campaign: Campaign, employee: AIEmployee | None = None
     if campaign.daily_email_goal or campaign.daily_email_limit or campaign.dry_run_mode is False:
         raise ValueError("Lead Research template requires email sending disabled.")
     limit = max(int(campaign.daily_lead_goal or 0), 1)
-    schema = normalize_lead_schema(campaign.provisioning_result if isinstance(campaign.provisioning_result, dict) else {})
+    result = campaign.provisioning_result if isinstance(campaign.provisioning_result, dict) else {}
+    schema = normalize_lead_schema(result)
+    lead_source = result.get("lead_source") if isinstance(result.get("lead_source"), dict) else {}
     return {
         "company_id": campaign.company_id,
         "campaign_id": campaign.id,
@@ -207,6 +209,12 @@ def _lead_research_config(campaign: Campaign, employee: AIEmployee | None = None
         "email_sending": False,
         "prospect_outreach": False,
         "lead_schema": schema,
+        "lead_source": {
+            "type": str(lead_source.get("type") or "").strip(),
+            "file": str(lead_source.get("file") or "").strip(),
+            "url": str(lead_source.get("url") or "").strip(),
+            "query": str(lead_source.get("query") or "").strip(),
+        },
     }
 
 

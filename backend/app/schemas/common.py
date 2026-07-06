@@ -43,6 +43,10 @@ class CampaignIn(BaseModel):
     campaign_type: str='custom'
     provisioning_state: str='Draft'
     provisioning_result: dict[str, Any]={}
+    lead_source_type: str|None=None
+    lead_source_file: str|None=None
+    lead_source_url: str|None=None
+    lead_source_query: str|None=None
     timezone: str='America/Toronto'
     allowed_sending_days: list[str]=[]
     allowed_sending_hours: dict[str, Any]={}

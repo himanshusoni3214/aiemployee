@@ -197,7 +197,12 @@ def _execute_generic_lead_research(hermes_job_id: str, task_type: str, payload: 
     result = _run(run_args, cwd=_container_path(str(job.get("working_directory") or output_dir)))
     logs = _logs_from_completed_process(result)
     if result.returncode != 0:
-        return _failed("Generic Lead Research execution failed", logs=logs, results={"returncode": result.returncode})
+        error_text = _first_error_line(logs) or "Generic Lead Research execution failed"
+        return _failed(
+            error_text,
+            logs=logs,
+            results={"returncode": result.returncode, "error": error_text},
+        )
     output_path = _generic_output_from_stdout(result.stdout) or _latest_generic_lead_output(_container_path(output_dir))
     physical_output_path = _container_path(str(output_path)) if output_path else None
     if physical_output_path is None or (before is not None and physical_output_path == before and not _file_touched_now(physical_output_path)):
@@ -311,11 +316,12 @@ def _execute_daily_report(task_type: str, payload: dict[str, Any]) -> dict[str, 
 
 def _run(command: list[str], *, cwd: Path) -> subprocess.CompletedProcess:
     env = os.environ.copy()
-    env["HOME"] = str(DATA_ROOT / "home")
-    env["PATH"] = f"{DATA_ROOT / 'home' / '.cargo' / 'bin'}:{env.get('PATH', '')}"
-    env.setdefault("HIMALAYA_BIN", str(DATA_ROOT / "home" / ".cargo" / "bin" / "himalaya"))
-    env.setdefault("HERMES_DATA_ROOT", str(DATA_ROOT))
-    env.setdefault("HERMES_CONTAINER_DATA_ROOT", str(DATA_ROOT))
+    execution_root = _container_path("/opt/data")
+    env["HOME"] = str(execution_root / "home")
+    env["PATH"] = f"{execution_root / 'home' / '.cargo' / 'bin'}:{env.get('PATH', '')}"
+    env.setdefault("HIMALAYA_BIN", str(execution_root / "home" / ".cargo" / "bin" / "himalaya"))
+    env["HERMES_DATA_ROOT"] = str(execution_root)
+    env["HERMES_CONTAINER_DATA_ROOT"] = str(execution_root)
     return subprocess.run(
         command,
         cwd=str(cwd),
@@ -543,6 +549,17 @@ def _record_jobs_json_execution(hermes_job_id: str, result: dict[str, Any]) -> N
             tmp_path.replace(path)
     except Exception:
         return
+
+
+def _first_error_line(logs: list[str]) -> str:
+    for line in logs:
+        value = str(line or "").strip()
+        if not value:
+            continue
+        lowered = value.lower()
+        if "error" in lowered or "failed" in lowered or "not configured" in lowered:
+            return value[-1000:]
+    return ""
 
 
 def _logs_from_completed_process(result: subprocess.CompletedProcess) -> list[str]:

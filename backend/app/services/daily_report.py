@@ -160,6 +160,11 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
     legacy_lead_rows_without_timestamps = 0
     latest_lead_file = str(lead_files[-1]) if lead_files else ""
     latest_lead_file_rows = 0
+    latest_lead_file_modified = ""
+    legacy_latest_file = ""
+    legacy_latest_file_rows = 0
+    legacy_latest_file_modified = ""
+    legacy_latest_mtime = 0.0
     verified_available_emails: set[str] = set()
     all_lead_rows = 0
     latest_mtime = 0.0
@@ -171,11 +176,17 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
             latest_mtime = mtime
             latest_lead_file = str(path)
             latest_lead_file_rows = len(rows)
+            latest_lead_file_modified = datetime.fromtimestamp(mtime, timezone.utc).isoformat() if mtime else ""
         missing = [column for column in ("created_at",) if column not in headers]
         included_created = 0
         included_verified = 0
         if "created_at" not in headers:
             legacy_lead_rows_without_timestamps += len(rows)
+            if mtime >= legacy_latest_mtime:
+                legacy_latest_mtime = mtime
+                legacy_latest_file = str(path)
+                legacy_latest_file_rows = len(rows)
+                legacy_latest_file_modified = datetime.fromtimestamp(mtime, timezone.utc).isoformat() if mtime else ""
         for row in rows:
             email = _email(row)
             if email and "@" in email and "inferred" not in email:
@@ -263,6 +274,10 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
         "leads_created_today": _metric(leads_created_today, True, "new lead CSV created_at", "legacy files without row timestamps excluded" if legacy_lead_rows_without_timestamps else ""),
         "latest_lead_file": _metric(latest_lead_file or "none", bool(latest_lead_file), "Hermes lead workspace"),
         "latest_lead_file_rows": _metric(latest_lead_file_rows, True, "latest lead CSV row count"),
+        "latest_lead_file_modified": _metric(latest_lead_file_modified or "none", bool(latest_lead_file_modified), "latest lead CSV modified time"),
+        "legacy_latest_file": _metric(legacy_latest_file or "none", bool(legacy_latest_file), "legacy lead CSV without created_at"),
+        "legacy_latest_file_rows": _metric(legacy_latest_file_rows, True, "legacy latest lead CSV row count"),
+        "legacy_latest_file_modified": _metric(legacy_latest_file_modified or "none", bool(legacy_latest_file_modified), "legacy latest lead CSV modified time"),
         "leads_verified_today": _metric(leads_verified_today, True, "new lead CSV created_at + email", "legacy files without row timestamps excluded" if legacy_lead_rows_without_timestamps else ""),
         "verified_leads_available": _metric(len(verified_available_emails), True, "current verified lead CSVs"),
         "outreach_attempts_today": _metric(attempts_today, True, "structured outreach events and legacy outreach_log.csv timestamps"),
@@ -286,7 +301,7 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "metrics": metrics,
         "errors_and_blockers": blockers,
-        "source_summary": {"lead_files": len(lead_files), "lead_rows_examined": all_lead_rows, "timestamped_lead_rows": timestamped_lead_rows, "legacy_lead_rows_without_timestamps": legacy_lead_rows_without_timestamps, "latest_lead_file": latest_lead_file, "latest_lead_file_rows": latest_lead_file_rows},
+        "source_summary": {"lead_files": len(lead_files), "lead_rows_examined": all_lead_rows, "timestamped_lead_rows": timestamped_lead_rows, "legacy_lead_rows_without_timestamps": legacy_lead_rows_without_timestamps, "latest_lead_file": latest_lead_file, "latest_lead_file_rows": latest_lead_file_rows, "latest_lead_file_modified": latest_lead_file_modified, "legacy_latest_file": legacy_latest_file, "legacy_latest_file_rows": legacy_latest_file_rows, "legacy_latest_file_modified": legacy_latest_file_modified},
         "evidence": evidence,
         "next_recommended_action": next_action,
     }

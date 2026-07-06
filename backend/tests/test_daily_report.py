@@ -36,6 +36,8 @@ class DailyReportTests(unittest.TestCase):
         self.assertTrue(metric["verified"])
         self.assertEqual(metric["value"], 0)
         self.assertIn("legacy files without row timestamps", metric["note"])
+        self.assertEqual(report["metrics"]["legacy_latest_file_rows"]["value"], 1)
+        self.assertTrue(report["metrics"]["legacy_latest_file_modified"]["verified"])
         self.assertIn("legacy lead rows", "\n".join(report["errors_and_blockers"]))
 
     def test_legacy_sent_without_message_id_is_not_confirmed_sent(self):

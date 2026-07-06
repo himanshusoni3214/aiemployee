@@ -2,6 +2,7 @@
 import argparse
 import csv
 import json
+import os
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -77,50 +78,102 @@ def schema_columns(config):
     return result
 
 
-def build_rows(args, limit: int, columns, source_file: str):
-    industry = args.industry.strip()
-    location = args.location.strip()
-    target = args.target_customer.strip() or f"{industry} operators"
-    exclusions = args.exclude.strip()
-    row_notes = args.notes.strip() or f"Target: {target}; Exclude: {exclusions}"
-    rows = []
-    for index in range(limit):
-        number = index + 1
-        lead = {
-            "lead_id": f"{slug(args.campaign_id)}-{number:04d}",
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "company_id": args.company_id,
-            "campaign_id": args.campaign_id,
-            "employee_id": args.employee_id,
-            "hermes_job_id": args.hermes_job_id,
-            "source_run_id": source_file.rsplit("/", 1)[-1].replace(".csv", ""),
-            "business_name": f"{location} {industry.title()} Prospect {number}",
-            "website": "",
-            "email": "",
-            "phone": "",
-            "city": location,
-            "category": industry,
-            "lead_status": "Generated",
-            "verified_at": "",
-            "source_url": "",
-            "source_file": source_file,
-            "notes": row_notes,
-            "owner_name": "",
-            "instagram": "",
-            "google_rating": "",
-            "number_of_locations": "",
-            "decision_maker_title": target,
-            "priority": "",
-            "call_notes": f"Target: {target}; Exclude: {exclusions}",
-            "sms_status": "",
-            "target_customer": target,
-            "exclusions": exclusions,
-            "email_sending": "false",
-            "source": "voryx_generic_lead_research",
-        }
-        rows.append({column: lead.get(column, "") for column in columns})
-    return rows
+def clean(value):
+    return str(value or "").strip()
 
+
+def column_key(value):
+    return re.sub(r"[^a-z0-9]+", "_", str(value or "").strip().lower()).strip("_")
+
+
+def first_value(row, keys):
+    lowered = {column_key(key): value for key, value in row.items()}
+    for key in keys:
+        value = lowered.get(column_key(key))
+        if clean(value):
+            return clean(value)
+    return ""
+
+
+def source_config(config):
+    source = config.get("lead_source") if isinstance(config.get("lead_source"), dict) else {}
+    return {
+        "type": clean(source.get("type") or config.get("lead_source_type") or ""),
+        "file": clean(source.get("file") or source.get("path") or config.get("lead_source_file") or config.get("source_file") or ""),
+        "url": clean(source.get("url") or config.get("lead_source_url") or ""),
+        "query": clean(source.get("query") or config.get("lead_source_query") or ""),
+    }
+
+
+def safe_source_path(value):
+    raw = str(value or "").strip()
+    if not raw.startswith("/opt/data"):
+        raise SystemExit("ERROR real_source_not_configured: source file must be an absolute /opt/data path")
+    data_root = Path(os.getenv("HERMES_DATA_ROOT") or os.getenv("HERMES_CONTAINER_DATA_ROOT") or "/opt/data")
+    path = data_root if raw == "/opt/data" else data_root / raw.removeprefix("/opt/data/")
+    try:
+        resolved = path.resolve()
+    except FileNotFoundError:
+        resolved = path
+    allowed = data_root.resolve()
+    if allowed != resolved and allowed not in resolved.parents:
+        raise SystemExit("ERROR real_source_not_configured: source file must be under /opt/data")
+    if not path.exists():
+        raise SystemExit(f"ERROR real_source_not_configured: source file not found: {raw}")
+    return path
+
+
+def read_source_rows(config, limit):
+    source = source_config(config)
+    source_type = source["type"]
+    if not source_type:
+        raise SystemExit("ERROR real_source_not_configured: No real lead source configured. Add source before generating leads.")
+    if source_type in {"uploaded_seed_csv", "existing_legacy_file", "manual_import"}:
+        if not source["file"]:
+            raise SystemExit("ERROR real_source_not_configured: lead source file is required for CSV/manual import sources")
+        path = safe_source_path(source["file"])
+        with path.open(newline="", encoding="utf-8", errors="replace") as handle:
+            rows = list(csv.DictReader(handle))
+        real_rows = [row for row in rows if first_value(row, ["business_name", "Business", "business", "Company", "company", "Name", "name"])]
+        return real_rows[:limit], source, str(path)
+    if source_type == "real_directory":
+        raise SystemExit("ERROR real_source_not_configured: real_directory adapter is not configured. Add an uploaded_seed_csv, existing_legacy_file, or manual_import source.")
+    raise SystemExit(f"ERROR real_source_not_configured: unsupported lead source type: {source_type}")
+
+
+def normalize_source_row(row, args, columns, source_file, source_row_number, source_run_id):
+    business_name = first_value(row, ["business_name", "Business", "business", "Company", "company", "Name", "name"])
+    website = first_value(row, ["website", "Website", "url", "URL", "site", "domain"])
+    email = first_value(row, ["email", "Email", "Public Email", "verified_public_email", "public_email"])
+    phone = first_value(row, ["phone", "Phone", "telephone", "Telephone"])
+    city = first_value(row, ["city", "City", "location", "Location"]) or args.location.strip()
+    category = first_value(row, ["category", "Category", "industry", "Industry", "niche"]) or args.industry.strip()
+    source_url = first_value(row, ["source_url", "Source URL", "url", "URL", "website", "Website"])
+    notes = first_value(row, ["notes", "Notes", "note"]) or args.notes.strip()
+    lead = {
+        "lead_id": first_value(row, ["lead_id", "id", "ID"]) or f"{slug(args.campaign_id)}-{source_row_number:04d}",
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "company_id": args.company_id,
+        "campaign_id": args.campaign_id,
+        "employee_id": args.employee_id,
+        "hermes_job_id": args.hermes_job_id,
+        "source_run_id": source_run_id,
+        "business_name": business_name,
+        "website": website,
+        "email": email,
+        "phone": phone,
+        "city": city,
+        "category": category,
+        "lead_status": first_value(row, ["lead_status", "status", "Status"]) or "Generated",
+        "verified_at": first_value(row, ["verified_at", "verified", "Verified At"]),
+        "source_url": source_url,
+        "source_file": source_file,
+        "notes": notes,
+    }
+    for column in columns:
+        if column not in lead:
+            lead[column] = first_value(row, [column, column.replace("_", " "), column.title().replace("_", " ")])
+    return {column: lead.get(column, "") for column in columns}
 
 def main() -> int:
     args = parse_args()
@@ -140,7 +193,11 @@ def main() -> int:
     csv_path = output_dir / f"{base}.csv"
     metadata_path = output_dir / f"{base}.metadata.json"
     fields = schema_columns(config)
-    rows = build_rows(args, limit, fields, str(csv_path))
+    source_rows, source, source_file = read_source_rows(config, limit)
+    if not source_rows:
+        raise SystemExit("ERROR real_source_not_configured: configured source did not contain usable business rows")
+    source_run_id = csv_path.name.replace(".csv", "")
+    rows = [normalize_source_row(row, args, fields, source_file, index + 1, source_run_id) for index, row in enumerate(source_rows)]
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fields)
         writer.writeheader()
@@ -161,6 +218,8 @@ def main() -> int:
         "lead_count": len(rows),
         "columns": fields,
         "config_path": args.config,
+        "lead_source": source,
+        "source_file": source_file,
         "email_sending": False,
         "prospect_outreach": False,
         "generated_at": datetime.now(timezone.utc).isoformat(),
