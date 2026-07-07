@@ -91,6 +91,27 @@ EMPLOYEE_TEMPLATE_REGISTRY = {
         "required_fields": ["offer", "target_customer", "tone", "no_send_action"],
         "disabled": False,
     },
+    "email_sender": {
+        "label": "Email Sender",
+        "employee_types": ["Email Sender"],
+        "required_fields": ["approved_sender", "compliance", "approved_drafts", "limits"],
+        "disabled": True,
+        "reason": "Disabled until company outreach settings and compliance checks pass. Prospect sending remains locked by default.",
+    },
+    "reply_monitor": {
+        "label": "Reply Monitor",
+        "employee_types": ["Reply Monitor"],
+        "required_fields": ["gmail_thread_monitoring"],
+        "disabled": True,
+        "reason": "Disabled until Gmail/thread monitoring is connected.",
+    },
+    "follow_up_manager": {
+        "label": "Follow-up Manager",
+        "employee_types": ["Follow-up Manager", "Followup Manager"],
+        "required_fields": ["reply_monitor", "campaign_approval", "thread_id"],
+        "disabled": True,
+        "reason": "Disabled until Reply Monitor exists and campaign follow-up approval is configured.",
+    },
     "reply_handler": {
         "label": "Reply Handler",
         "employee_types": ["Reply Handler"],
@@ -335,6 +356,12 @@ def _employee_template_key(employee_type: str | None) -> str:
         return "daily_reporter"
     if value in {"email outreach", "draft writer", "outreach draft writer", "outreach_draft_writer"}:
         return "outreach_draft_writer"
+    if value in {"email sender", "email_sender"}:
+        return "email_sender"
+    if value in {"reply monitor", "reply_monitor"}:
+        return "reply_monitor"
+    if value in {"follow-up manager", "followup manager", "follow_up_manager"}:
+        return "follow_up_manager"
     if value in {"reply handler", "reply_handler"}:
         return "reply_handler"
     if value in {"voice agent", "voice_agent"}:
@@ -378,6 +405,10 @@ def allowed_employee_types_for_campaign(campaign: Campaign | None) -> list[str]:
         allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["daily_reporter"]["employee_types"])
     if _campaign_supports_outreach_draft(campaign):
         allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["outreach_draft_writer"]["employee_types"])
+    if campaign_type == "sales_outreach":
+        allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["email_sender"]["employee_types"])
+        allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["reply_monitor"]["employee_types"])
+        allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["follow_up_manager"]["employee_types"])
     allowed.append("Custom")
     return list(dict.fromkeys(allowed))
 
@@ -641,6 +672,20 @@ def _employee_template_spec(campaign: Campaign, employee: AIEmployee, job_id: st
 
 def _validate_employee_template_requirements(campaign: Campaign, employee: AIEmployee) -> None:
     key = _employee_template_key(employee.employee_type)
+    if key == "email_sender":
+        employee.status = EmployeeStatus.paused
+        employee.dry_run_mode = True
+        employee.daily_email_limit = 0
+        employee.paused_reason = "Email Sender disabled until outreach settings, approved drafts and compliance pass."
+        return
+    if key == "reply_monitor":
+        employee.status = EmployeeStatus.paused
+        employee.paused_reason = "Reply Monitor disabled until Gmail/thread monitoring is connected."
+        return
+    if key == "follow_up_manager":
+        employee.status = EmployeeStatus.paused
+        employee.paused_reason = "Follow-up Manager disabled until Reply Monitor exists and follow-up approval is configured."
+        return
     if key == "reply_handler":
         raise ValueError("Reply Handler is disabled until Gmail/thread monitoring is implemented.")
     if key == "voice_agent":
@@ -677,6 +722,9 @@ def provision_employee_template(db: Session, employee: AIEmployee, user_id: str 
     key = _employee_template_key(employee.employee_type)
     if key == "custom":
         return None
+    if key in {"email_sender", "reply_monitor", "follow_up_manager"}:
+        _validate_employee_template_requirements(campaign, employee)
+        return {"provisioned": False, "employee_template": key, "message": employee.paused_reason, "manual_control_only": True}
     _validate_employee_template_requirements(campaign, employee)
     job_id = employee.hermes_job_id or _stable_job_id(campaign, key, employee.id)
     employee.hermes_job_id = job_id

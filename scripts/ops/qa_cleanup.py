@@ -9,7 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Iterable
 
-from sqlalchemy import or_, select
+from sqlalchemy import func, or_, select
 
 ROOT = Path(__file__).resolve().parents[2]
 BACKEND = ROOT / 'backend'
@@ -29,16 +29,60 @@ from app.models.entities import (  # noqa: E402
     Schedule,
     Status,
     User,
+    OutreachEvent,
 )
 
-SAFE_PREFIXES = ('QA-', 'QA-AUDIT-', 'QA Audit', 'QA ')
+SAFE_PREFIXES = ('QA-', 'QA-AUDIT-', 'QA Audit', 'QA ', 'Test')
 PROTECTED_COMPANY_NAMES = {'brew it by sash'}
+SENT_STATUSES = {'sent', 'delivered', 'accepted', 'queued_by_provider'}
 
 
 def validate_prefix(prefix: str):
     if not any(prefix.startswith(safe) for safe in SAFE_PREFIXES):
         raise ValueError(f"Refusing cleanup for unsafe prefix {prefix!r}; use one of {', '.join(SAFE_PREFIXES)}")
 
+
+
+def prospect_send_count(db, company_id: str) -> int:
+    return db.scalar(
+        select(func.count()).select_from(OutreachEvent).where(
+            OutreachEvent.company_id == company_id,
+            OutreachEvent.dry_run == False,
+            OutreachEvent.status.in_(SENT_STATUSES),
+            OutreachEvent.message_id.is_not(None),
+        )
+    ) or 0
+
+
+def disable_hermes_jobs(hermes_job_ids: set[str], dry_run: bool) -> dict:
+    if not hermes_job_ids:
+        return {'requested': 0, 'disabled': 0, 'errors': []}
+    try:
+        from app.services.hermes_control import HermesControlService
+        control = HermesControlService()
+        raw = control._read_jobs()
+        disabled = 0
+        errors = []
+        for hermes_id in sorted(hermes_job_ids):
+            job = control._find_job(raw, hermes_id)
+            if not job:
+                errors.append(f'{hermes_id}: not found')
+                continue
+            if not dry_run:
+                before = (job.get('enabled'), job.get('state'))
+                job['enabled'] = False
+                job['state'] = 'paused'
+                job['next_run_at'] = None
+                job['paused_reason'] = 'Paused by Voryx safe test-company cleanup'
+                if before != (job.get('enabled'), job.get('state')):
+                    disabled += 1
+            else:
+                disabled += 1
+        if not dry_run:
+            control._write_jobs(raw)
+        return {'requested': len(hermes_job_ids), 'disabled': disabled, 'errors': errors, 'backup_path': getattr(control, 'last_backup_path', None)}
+    except Exception as exc:
+        return {'requested': len(hermes_job_ids), 'disabled': 0, 'errors': [str(exc)]}
 
 def ids(items: Iterable[object]) -> list[str]:
     return [item.id for item in items]
@@ -60,10 +104,13 @@ def cleanup_qa_records(db, prefix: str, admin_email: str, dry_run: bool = True) 
     if not admin or admin.role != Role.admin or not admin.is_active:
         raise ValueError(f'{admin_email} is not an active admin user')
 
-    companies = [
-        company for company in db.scalars(select(Company).where(name_matches(Company.name, prefix))).all()
-        if company.name.lower() not in PROTECTED_COMPANY_NAMES
-    ]
+    companies = []
+    for company in db.scalars(select(Company).where(name_matches(Company.name, prefix))).all():
+        if company.name.lower() in PROTECTED_COMPANY_NAMES:
+            continue
+        if prefix == 'Test' and prospect_send_count(db, company.id) > 0:
+            continue
+        companies.append(company)
     company_ids = set(ids(companies))
 
     campaign_filters = [name_matches(Campaign.name, prefix)]
@@ -105,8 +152,11 @@ def cleanup_qa_records(db, prefix: str, admin_email: str, dry_run: bool = True) 
         },
         'protected_company_names': sorted(PROTECTED_COMPANY_NAMES),
     }
+    hermes_job_ids = {str(employee.hermes_job_id) for employee in employees if employee.hermes_job_id}
+    summary['hermes_jobs'] = disable_hermes_jobs(hermes_job_ids, dry_run=True)
     if dry_run:
         return summary
+    summary['hermes_jobs'] = disable_hermes_jobs(hermes_job_ids, dry_run=False)
 
     now = datetime.utcnow()
     for company in companies:
@@ -136,16 +186,21 @@ def cleanup_qa_records(db, prefix: str, admin_email: str, dry_run: bool = True) 
     return summary
 
 
+
+def cleanup_test_companies(db, admin_email: str, dry_run: bool = True) -> dict:
+    return cleanup_qa_records(db, 'Test', admin_email, dry_run=dry_run)
+
 def main() -> int:
     parser = argparse.ArgumentParser(description='Archive QA records by a safe prefix.')
-    parser.add_argument('--prefix', required=True, help='Safe QA prefix, such as QA- or QA Audit')
+    parser.add_argument('--prefix', required=False, default='QA Audit', help='Safe QA prefix, such as QA-, QA Audit, or Test')
+    parser.add_argument('--test-companies', action='store_true', help='Archive safe Test* companies with zero prospect sends')
     parser.add_argument('--admin-email', required=True, help='Admin user recorded in activity logs')
     parser.add_argument('--apply', action='store_true', help='Apply changes. Default is dry run.')
     args = parser.parse_args()
 
     db = SessionLocal()
     try:
-        result = cleanup_qa_records(db, args.prefix, args.admin_email, dry_run=not args.apply)
+        result = cleanup_test_companies(db, args.admin_email, dry_run=not args.apply) if args.test_companies else cleanup_qa_records(db, args.prefix, args.admin_email, dry_run=not args.apply)
         print(json.dumps(result, indent=2, sort_keys=True))
     finally:
         db.close()

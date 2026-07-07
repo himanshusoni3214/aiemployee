@@ -3,6 +3,7 @@ import CrudPage from '../../components/CrudPage';
 import { defaultConnectorCapabilities, type ConnectorCapabilities } from '../../components/ActionButtons';
 import { CompanySelector } from '../../components/CompanySelector';
 import { LeadOutputsPanel } from '../../components/LeadOutputsPanel';
+import { OutreachControlsPanel } from '../../components/OutreachControlsPanel';
 import { LeadSchemaEditor } from '../../components/LeadSchemaEditor';
 import { queryString, selectedCompanyId } from '../../lib/companySelection';
 
@@ -136,6 +137,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                   <div className="text-xs text-zinc-500">{(hermesIdsByCampaign.get(campaign.id) || []).join(' / ') || String(campaign.provisioning_result?.hermes_job_id || 'No Hermes job')}</div>
                 </div>
                 <LeadOutputsPanel outputs={detail.outputs.outputs || []} rows={detail.outputs.rows || []} />
+                <OutreachControlsPanel companyId={campaign.company_id} campaignId={campaign.id} />
                 <LeadSchemaEditor campaignId={campaign.id} initialSchema={detail.schema || {}} />
               </div>
             );

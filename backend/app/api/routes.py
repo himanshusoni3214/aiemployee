@@ -2,7 +2,7 @@ import csv
 from datetime import datetime, date
 from pathlib import Path
 from urllib.parse import quote
-from fastapi import APIRouter, Depends, Form, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, Form, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
@@ -35,6 +35,21 @@ from app.services.template_provisioning import (
     update_campaign_lead_schema,
     validate_campaign_blueprint,
     validate_employee_operational_state,
+)
+from app.services.outreach import (
+    APPROVED_INTERNAL_RECIPIENT as OUTREACH_INTERNAL_RECIPIENT,
+    create_internal_test_event,
+    default_outreach_settings,
+    draft_to_payload,
+    followup_status,
+    generate_draft_for_item,
+    lead_key_for,
+    reply_monitor_status,
+    review_items_from_rows,
+    send_blockers,
+    settings_payload,
+    upsert_approval,
+    validate_outreach_settings,
 )
 
 router = APIRouter()
@@ -580,6 +595,224 @@ def campaign_lead_outputs(
         with path.open(newline='', encoding='utf-8', errors='replace') as handle:
             latest_rows = _filter_lead_rows(list(csv.DictReader(handle)), filter)
     return {'campaign_id': campaign.id, 'outputs': outputs, 'filter': filter, 'rows': latest_rows[:200], 'row_count': len(latest_rows)}
+
+
+def _latest_campaign_csv_rows(campaign: Campaign, db: Session) -> tuple[list[dict], str, str | None]:
+    outputs = _latest_lead_outputs(campaign, db, limit=20)
+    csv_output = next((item for item in outputs if item.get('kind') == 'csv'), None)
+    if not csv_output:
+        return [], 'none', None
+    path = _hermes_physical_path(csv_output['path'])
+    with path.open(newline='', encoding='utf-8', errors='replace') as handle:
+        rows = list(csv.DictReader(handle))
+    return rows, Path(csv_output['path']).stem, csv_output['path']
+
+
+def _campaign_review_items(db: Session, campaign: Campaign) -> tuple[list[dict], str | None]:
+    rows, source_run_id, source_path = _latest_campaign_csv_rows(campaign, db)
+    return review_items_from_rows(db, campaign, rows, source_run_id), source_path
+
+
+def _review_item_by_key(db: Session, campaign: Campaign, lead_key: str) -> dict:
+    items, _source = _campaign_review_items(db, campaign)
+    item = next((entry for entry in items if entry.get('lead_key') == lead_key), None)
+    if not item:
+        raise HTTPException(404, 'Lead review item not found in latest campaign source')
+    return item
+
+
+@router.get('/companies/{company_id}/outreach-settings')
+def get_company_outreach_settings(company_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    company = db.get(Company, company_id)
+    if not company: raise HTTPException(404, 'Company not found')
+    settings = db.scalar(select(CompanyOutreachSettings).where(CompanyOutreachSettings.company_id == company_id))
+    return settings_payload(settings, company_id)
+
+
+@router.put('/companies/{company_id}/outreach-settings')
+def put_company_outreach_settings(company_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    company = db.get(Company, company_id)
+    if not company: raise HTTPException(404, 'Company not found')
+    settings = db.scalar(select(CompanyOutreachSettings).where(CompanyOutreachSettings.company_id == company_id))
+    if not settings:
+        settings = CompanyOutreachSettings(company_id=company_id)
+        db.add(settings)
+    allowed = set(default_outreach_settings(company_id).keys()) - {'company_id'}
+    for key, value in payload.items():
+        if key in allowed and hasattr(settings, key):
+            if key in {'sender_email', 'reply_to_email', 'internal_test_recipient'} and value:
+                value = str(value).strip().lower()
+            setattr(settings, key, value)
+    settings.updated_at = datetime.utcnow()
+    blockers = validate_outreach_settings(settings, prospect=True)
+    log(db, 'Company Outreach Settings Updated', 'Company', company.id, company.id, user.id, {'blocking_reasons': blockers})
+    db.commit(); db.refresh(settings)
+    return settings_payload(settings, company_id)
+
+
+@router.get('/companies/{company_id}/suppression')
+def list_suppression(company_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    company = db.get(Company, company_id)
+    if not company: raise HTTPException(404, 'Company not found')
+    entries = db.scalars(select(SuppressionEntry).where(SuppressionEntry.company_id == company_id).order_by(SuppressionEntry.created_at.desc())).all()
+    return entries
+
+
+@router.post('/companies/{company_id}/suppression')
+def add_suppression(company_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    company = db.get(Company, company_id)
+    if not company: raise HTTPException(404, 'Company not found')
+    kind = str(payload.get('kind') or 'email').strip().lower()
+    if kind not in {'email', 'domain'}: raise HTTPException(400, 'Suppression kind must be email or domain')
+    value = str(payload.get('value') or '').strip().lower()
+    if not value: raise HTTPException(400, 'Suppression value is required')
+    entry = db.scalar(select(SuppressionEntry).where(SuppressionEntry.company_id == company_id, SuppressionEntry.kind == kind, SuppressionEntry.value == value))
+    if not entry:
+        entry = SuppressionEntry(company_id=company_id, kind=kind, value=value)
+        db.add(entry)
+    entry.reason = str(payload.get('reason') or entry.reason or 'Manual suppression')
+    entry.source = str(payload.get('source') or 'dashboard')
+    log(db, 'Suppression Added', 'SuppressionEntry', entry.id, company_id, user.id, {'kind': kind, 'value': value})
+    db.commit(); db.refresh(entry)
+    return entry
+
+
+@router.get('/campaigns/{campaign_id}/lead-review')
+def campaign_lead_review(campaign_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    items, source_path = _campaign_review_items(db, campaign)
+    counts: dict[str, int] = {}
+    for item in items:
+        counts[item['state']] = counts.get(item['state'], 0) + 1
+    return {'campaign_id': campaign.id, 'company_id': campaign.company_id, 'source_path': source_path, 'items': items, 'counts': counts, 'eligible_count': sum(1 for item in items if item.get('can_send'))}
+
+
+@router.post('/campaigns/{campaign_id}/lead-review/{lead_key}/{action}')
+def campaign_lead_review_action(campaign_id: str, lead_key: str, action: str, payload: dict=Body(default={}), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    item = _review_item_by_key(db, campaign, lead_key)
+    action = action.replace('-', '_').lower()
+    state = {'approve': 'approved_for_outreach', 'reject': 'rejected', 'do_not_contact': 'do_not_contact'}.get(action, action)
+    try:
+        approval = upsert_approval(db, campaign, item, state, user.id, str(payload.get('reason') or action))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    if state in {'do_not_contact', 'unsubscribed'} and item.get('email'):
+        existing = db.scalar(select(SuppressionEntry).where(SuppressionEntry.company_id == campaign.company_id, SuppressionEntry.kind == 'email', SuppressionEntry.value == item['email']))
+        if not existing:
+            db.add(SuppressionEntry(company_id=campaign.company_id, kind='email', value=item['email'], reason='Lead review suppression', source='lead_review'))
+    log(db, 'Lead Review Updated', 'LeadApproval', approval.id, campaign.company_id, user.id, {'lead_key': lead_key, 'state': state})
+    db.commit(); db.refresh(approval)
+    return {'ok': True, 'lead_key': lead_key, 'state': approval.state, 'history': approval.history}
+
+
+@router.get('/campaigns/{campaign_id}/outreach-drafts')
+def list_outreach_drafts(campaign_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    drafts = db.scalars(select(OutreachDraft).where(OutreachDraft.campaign_id == campaign.id).order_by(OutreachDraft.created_at.desc())).all()
+    return {'campaign_id': campaign.id, 'drafts': [draft_to_payload(draft) for draft in drafts]}
+
+
+@router.post('/campaigns/{campaign_id}/outreach-drafts/generate')
+def generate_outreach_drafts(campaign_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    company = db.get(Company, campaign.company_id)
+    items, _source = _campaign_review_items(db, campaign)
+    created = []
+    skipped = []
+    for item in items:
+        if not item.get('can_send'):
+            skipped.append({'lead_key': item['lead_key'], 'state': item['state']})
+            continue
+        try:
+            draft = generate_draft_for_item(db, campaign, company, item)
+            created.append(draft)
+        except ValueError as exc:
+            skipped.append({'lead_key': item['lead_key'], 'error': str(exc)})
+    log(db, 'Outreach Drafts Generated', 'Campaign', campaign.id, campaign.company_id, user.id, {'created': len(created), 'skipped': len(skipped), 'draft_only': True})
+    db.commit()
+    return {'ok': True, 'created': len(created), 'skipped': skipped, 'drafts': [draft_to_payload(draft) for draft in created], 'prospect_emails_sent': 0}
+
+
+@router.put('/outreach-drafts/{draft_id}')
+def update_outreach_draft(draft_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    draft = db.get(OutreachDraft, draft_id)
+    if not draft: raise HTTPException(404, 'Draft not found')
+    for key in ('subject', 'body'):
+        if key in payload:
+            setattr(draft, key, str(payload[key]))
+    draft.status = 'draft_needs_review'
+    draft.updated_at = datetime.utcnow()
+    log(db, 'Outreach Draft Edited', 'OutreachDraft', draft.id, draft.company_id, user.id)
+    db.commit(); db.refresh(draft)
+    return draft_to_payload(draft)
+
+
+@router.post('/outreach-drafts/{draft_id}/{action}')
+def outreach_draft_action(draft_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    draft = db.get(OutreachDraft, draft_id)
+    if not draft: raise HTTPException(404, 'Draft not found')
+    action = action.replace('-', '_').lower()
+    if action == 'approve':
+        draft.status = 'draft_approved'; draft.approved_by = user.id; draft.approved_at = datetime.utcnow()
+    elif action == 'reject':
+        draft.status = 'draft_rejected'
+    else:
+        raise HTTPException(400, 'Unsupported draft action')
+    draft.updated_at = datetime.utcnow()
+    log(db, 'Outreach Draft Updated', 'OutreachDraft', draft.id, draft.company_id, user.id, {'status': draft.status})
+    db.commit(); db.refresh(draft)
+    return draft_to_payload(draft)
+
+
+@router.post('/outreach-drafts/{draft_id}/internal-test')
+def outreach_draft_internal_test(draft_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    draft = db.get(OutreachDraft, draft_id)
+    if not draft: raise HTTPException(404, 'Draft not found')
+    campaign = db.get(Campaign, draft.campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    try:
+        event = create_internal_test_event(db, campaign, draft, user.id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    log(db, 'Outreach Internal Test Prepared', 'OutreachEvent', event.event_id, campaign.company_id, user.id, {'recipient': OUTREACH_INTERNAL_RECIPIENT, 'prospect_emails_sent': 0})
+    db.commit(); db.refresh(event)
+    return {'ok': True, 'status': event.status, 'recipient': event.recipient, 'event_id': event.event_id, 'prospect_emails_sent': 0, 'message': 'Internal test prepared for approved recipient only; no prospect email sent.'}
+
+
+@router.get('/campaigns/{campaign_id}/outreach-send/status')
+def outreach_send_status(campaign_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    settings = db.scalar(select(CompanyOutreachSettings).where(CompanyOutreachSettings.company_id == campaign.company_id))
+    drafts = db.scalars(select(OutreachDraft).where(OutreachDraft.campaign_id == campaign.id)).all()
+    return {'campaign_id': campaign.id, 'settings': settings_payload(settings, campaign.company_id), 'approved_drafts': sum(1 for d in drafts if d.status == 'draft_approved'), 'prospect_send_blockers': validate_outreach_settings(settings, prospect=True)}
+
+
+@router.get('/campaigns/{campaign_id}/followups/status')
+def campaign_followup_status(campaign_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    return followup_status(db, campaign)
+
+
+@router.get('/campaigns/{campaign_id}/reply-monitor/status')
+def campaign_reply_monitor_status(campaign_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    return reply_monitor_status(db, campaign)
+
+
+@router.post('/admin/cleanup/test-companies')
+def cleanup_test_companies(dry_run: bool=True, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    if user.role != Role.admin: raise HTTPException(403, 'Admin role required')
+    from scripts.ops.qa_cleanup import cleanup_test_companies as cleanup_test_company_records
+    result = cleanup_test_company_records(db, user.email, dry_run=dry_run)
+    return result
 
 @router.get('/campaigns/{campaign_id}/lead-outputs/download')
 def download_campaign_lead_output(campaign_id: str, path: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
