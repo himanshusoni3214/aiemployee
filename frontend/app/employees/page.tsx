@@ -7,6 +7,7 @@ import CrudPage from '../../components/CrudPage';
 import { CompanySelector } from '../../components/CompanySelector';
 import { QuerySelector } from '../../components/QuerySelector';
 import { firstParam, queryString, selectedCompanyId } from '../../lib/companySelection';
+import { ModelPolicyPanel } from '../../components/ModelPolicyPanel';
 
 type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
@@ -115,6 +116,11 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
         <div className="card"><p className="text-sm text-zinc-400">Errors</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.status === 'Error').length}</p></div>
         <div className="card"><p className="text-sm text-zinc-400">Open Circuits</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.circuit_breaker_open).length}</p></div>
       </div>
+      {employees.length ? (
+        <div className="grid gap-5 xl:grid-cols-2">
+          {employees.slice(0, 6).map((employee) => <ModelPolicyPanel key={employee.id} scope="employee" employeeId={employee.id} title={`${employee.name} Model Policy`} compact />)}
+        </div>
+      ) : null}
       <div className="table-wrap">
         <table className="ops-table">
           <thead><tr><th>Name</th><th>Company</th><th>Campaign</th><th>Type</th><th>Status</th><th>Limits</th><th>Circuit</th><th>Last Heartbeat</th><th>Reason</th><th>Actions</th></tr></thead>

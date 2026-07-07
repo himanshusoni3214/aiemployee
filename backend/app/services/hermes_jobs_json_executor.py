@@ -10,6 +10,8 @@ from typing import Any
 
 from app.core.config import settings
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, validate_report_recipient
+from app.core.db import SessionLocal
+from app.services.model_policy import guard_hermes_execution
 
 LEAD_RESEARCH_JOB_ID = "0d0c20e25f55"
 DAILY_REPORT_JOB_ID = "5881b72113ce"
@@ -38,6 +40,12 @@ def execute_scheduled_jobs_json_task(task_type: str, payload: dict[str, Any] | N
     if _payload_mentions_send_outreach(payload):
         return _failed("Blocked unsafe scheduled execution: send_outreach.py is not allowed")
 
+    guard_result = _model_policy_guard(task_type, payload, _jobs_json_entry(hermes_job_id))
+    if not guard_result.get("allowed"):
+        result = _model_policy_blocked(hermes_job_id, task_type, payload, guard_result)
+        _record_jobs_json_execution(hermes_job_id, result)
+        return result
+
     if hermes_job_id == LEAD_RESEARCH_JOB_ID:
         result = _execute_lead_research(task_type, payload)
         _record_jobs_json_execution(hermes_job_id, result)
@@ -52,6 +60,50 @@ def execute_scheduled_jobs_json_task(task_type: str, payload: dict[str, Any] | N
         return result
     return _unsupported(f"No jobs_json executor is registered for Hermes job {hermes_job_id}")
 
+
+
+def _model_policy_guard(task_type: str, payload: dict[str, Any], job: dict[str, Any] | None) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        policy = job.get("model_policy") if isinstance(job, dict) and isinstance(job.get("model_policy"), dict) else None
+        result = guard_hermes_execution(db, task_type=task_type, payload=payload, jobs_json_policy=policy)
+        db.commit()
+        return result
+    except Exception as exc:
+        db.rollback()
+        return {"allowed": False, "decision": {"status": "model_policy_error", "reason": f"Model policy guard failed closed: {exc}", "normalized_model": "unknown"}, "policy": {}}
+    finally:
+        db.close()
+
+
+def _model_policy_blocked(hermes_job_id: str, task_type: str, payload: dict[str, Any], guard_result: dict[str, Any]) -> dict[str, Any]:
+    decision = guard_result.get("decision") if isinstance(guard_result.get("decision"), dict) else {}
+    policy = guard_result.get("policy") if isinstance(guard_result.get("policy"), dict) else {}
+    reason = str(decision.get("reason") or "Model policy blocked execution")
+    status = str(decision.get("status") or "model_blocked")
+    output_record = _write_cron_output(
+        hermes_job_id,
+        "Hermes execution blocked by Voryx model policy",
+        task_type,
+        payload,
+        [reason],
+        {"hermes_job_id": hermes_job_id, "status": status, "reason": reason, "provider": decision.get("provider"), "model": decision.get("model"), "normalized_model": decision.get("normalized_model")},
+    )
+    return {
+        "status": "blocked",
+        "error": reason,
+        "logs": [f"MODEL_POLICY_BLOCKED status={status} model={decision.get('normalized_model') or policy.get('normalized_model')}: {reason}", f"HERMES_OUTPUT_WRITTEN path={output_record}"],
+        "results": {
+            "hermes_job_id": hermes_job_id,
+            "status": status,
+            "reason": reason,
+            "provider": decision.get("provider") or policy.get("provider"),
+            "model": decision.get("model") or policy.get("model"),
+            "normalized_model": decision.get("normalized_model") or policy.get("normalized_model"),
+            "hermes_output_path": str(output_record),
+            "prospect_emails_sent": 0,
+        },
+    }
 
 def _hermes_job_id(payload: dict[str, Any]) -> str:
     for key in ("hermes_job_id", "job_id", "id"):
@@ -532,7 +584,7 @@ def _record_jobs_json_execution(hermes_job_id: str, result: dict[str, Any]) -> N
             status = str(result.get("status") or "").lower()
             results = result.get("results") if isinstance(result.get("results"), dict) else {}
             job["last_run_at"] = now
-            job["last_status"] = "ok" if status == "ok" else "failed"
+            job["last_status"] = "ok" if status == "ok" else ("blocked" if status == "blocked" else "failed")
             job["last_error"] = None if status == "ok" else str(result.get("error") or "scheduled execution failed")
             if status == "ok":
                 job["last_output_path"] = results.get("hermes_output_path") or results.get("output_path") or results.get("report_path")

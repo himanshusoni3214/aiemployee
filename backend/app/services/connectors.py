@@ -71,6 +71,10 @@ class HermesConnector(WorkerConnector):
             "supports_manual_run": supports_run,
             "supports_dry_run": supports_run,
             "manual_run_message": None if supports_run else "Manual run unavailable in jobs_json mode",
+            "model_policy_supported": True,
+            "default_provider": "openrouter",
+            "default_model": "nvidia/nemotron-3-super-120b-a12b",
+            "silent_fallback_enabled": False,
         }
 
     async def execute(self, task_type: str, payload: dict) -> dict:

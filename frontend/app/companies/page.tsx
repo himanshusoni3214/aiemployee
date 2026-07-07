@@ -1,5 +1,6 @@
 import { serverApi } from '../../lib/serverApi';
 import CrudPage from '../../components/CrudPage';
+import { ModelPolicyPanel } from '../../components/ModelPolicyPanel';
 
 type Company = {
   id: string;
@@ -53,6 +54,9 @@ export default async function CompaniesPage() {
             {!companies.length ? <tr><td colSpan={7} className="text-zinc-400">No companies imported from Hermes yet</td></tr> : null}
           </tbody>
         </table>
+      </div>
+      <div className="grid gap-5 xl:grid-cols-2">
+        {companies.filter((company) => company.status !== 'Archived').slice(0, 6).map((company) => <ModelPolicyPanel key={company.id} scope="company" companyId={company.id} title={`${company.name} Model Policy`} compact />)}
       </div>
       <CrudPage
         title="Company Management"

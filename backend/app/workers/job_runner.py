@@ -158,6 +158,9 @@ async def run_once() -> bool:
         job.result = result.get('results', result)
         if result.get('status') == 'unsupported':
             skip_unsupported_connector_job(db, job, employee, result)
+        elif result.get('status') == 'blocked':
+            message = result.get('error') or '; '.join(job.logs[-3:]) or 'Model policy blocked execution'
+            block_job(db, job, employee, message)
         elif result.get('status') == 'failed':
             message = '; '.join(job.logs[-3:]) or result.get('error') or result.get('error_message') or "Worker failed without logs"
             if job.attempts < job.max_attempts:

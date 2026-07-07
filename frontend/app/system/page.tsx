@@ -3,6 +3,7 @@ import { LocalTime } from '../../components/LocalTime';
 import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
 import { CompanySelector } from '../../components/CompanySelector';
 import { queryString, selectedCompanyId } from '../../lib/companySelection';
+import { ModelPolicyPanel } from '../../components/ModelPolicyPanel';
 
 type Company = { id: string; name: string; status: string };
 
@@ -32,6 +33,7 @@ export default async function SystemPage({ searchParams }: { searchParams?: Prom
         <div className="flex items-center gap-4"><div className={`text-sm ${color(health?.status)}`}>{health?.status || 'unknown'}</div><SyncStatus sync={sync} /></div>
       </div>
       <CompanySelector companies={companies} selectedCompanyId={companyId} allowAll label="System scope" />
+      <ModelPolicyPanel scope="global" title="Global Model Policy" />
       <p className="text-sm text-zinc-400">{companyId ? 'Worker and job health are scoped to the selected company. Infrastructure and Hermes live mounts are global.' : 'All-company worker and job health is shown. Infrastructure and Hermes live mounts are global.'}</p>
       <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         {checks.map(([name, check]: [string, any]) => <div className="card" key={name}><p className="text-sm capitalize text-zinc-400">{name === 'jobs' ? 'Company-scoped jobs' : `Global ${name}`}</p><p className={`mt-2 text-xl font-semibold ${color(check?.status)}`}>{check?.status || 'unknown'}</p><pre className="mt-3 max-h-36 overflow-auto text-xs text-zinc-500">{JSON.stringify(check, null, 2)}</pre></div>)}

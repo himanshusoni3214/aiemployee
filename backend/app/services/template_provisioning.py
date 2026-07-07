@@ -17,6 +17,7 @@ from app.services.audit import log
 from app.services.hermes_control import HermesControlError, HermesControlService
 from app.services.hermes_jobs_json_executor import execute_scheduled_jobs_json_task
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT
+from app.services.model_policy import default_policy_payload
 
 
 APPROVED_INTERNAL_RECIPIENT = INTERNAL_REPORT_RECIPIENT
@@ -515,6 +516,7 @@ def _desired_job(campaign: Campaign, employee: AIEmployee, schedule: Schedule, s
         "schedule_id": schedule.id,
         "task_type": spec.task_type,
         "safety": spec.safety,
+        "model_policy": default_policy_payload(),
     }
 
 

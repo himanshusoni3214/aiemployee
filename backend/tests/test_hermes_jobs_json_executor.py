@@ -10,6 +10,13 @@ from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT
 
 
 class HermesJobsJsonExecutorTests(unittest.TestCase):
+    def setUp(self):
+        self.model_guard = patch.object(executor, "_model_policy_guard", return_value={"allowed": True, "decision": {"status": "allowed"}, "policy": {}})
+        self.model_guard.start()
+
+    def tearDown(self):
+        self.model_guard.stop()
+
     def test_requires_known_hermes_job_id(self):
         result = executor.execute_scheduled_jobs_json_task("Generate Leads", {})
 

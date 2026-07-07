@@ -22,6 +22,17 @@ from app.services.hermes_live import HermesLiveMonitor
 from app.services.hermes_safety import SAFETY_LOCK_MESSAGE, is_safety_blocked_action, safety_block_result
 from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as _sync_hermes_snapshot
 from app.services.internal_mail_queue import enqueue_daily_report_delivery, ingest_internal_mail_receipts
+from app.services.model_policy import (
+    default_policy_payload,
+    effective_policy,
+    ensure_global_policy,
+    guard_hermes_execution,
+    policy_payload,
+    sync_all_model_policies_to_jobs_json,
+    sync_model_policy_to_jobs_json,
+    validate_policy,
+    write_company_workspace_policy,
+)
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, validate_report_recipient
 from app.services.template_provisioning import (
     PROVISIONED_STATES,
@@ -1157,6 +1168,129 @@ def hermes_live(db: Session=Depends(get_db), user: User=Depends(current_user)):
     summary = HermesLiveMonitor().summary()
     summary['platform_import'] = _sync_hermes_snapshot(db, user.id)
     return summary
+
+
+
+MODEL_POLICY_FIELDS = {'provider', 'model', 'approved_models', 'blocked_models', 'fallback_enabled', 'fail_closed', 'daily_budget_usd', 'monthly_budget_usd', 'max_cost_per_run_usd', 'notes'}
+
+
+def _policy_input(payload: dict) -> dict:
+    data = {key: payload[key] for key in MODEL_POLICY_FIELDS if key in payload}
+    for key in ('approved_models', 'blocked_models'):
+        if key in data and isinstance(data[key], str):
+            data[key] = [line.strip() for line in data[key].replace(',', '\n').splitlines() if line.strip()]
+    data['fallback_enabled'] = False
+    return data
+
+
+def _set_policy_fields(target, payload: dict) -> None:
+    for key, value in _policy_input(payload).items():
+        if hasattr(target, key):
+            setattr(target, key, value)
+    target.updated_at = datetime.utcnow()
+
+
+@router.get('/model-policy/global')
+def get_global_model_policy(db: Session=Depends(get_db), user: User=Depends(current_user)):
+    policy = ensure_global_policy(db)
+    db.commit(); db.refresh(policy)
+    return policy_payload(policy, effective_policy(db))
+
+
+@router.put('/model-policy/global')
+def put_global_model_policy(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    policy = ensure_global_policy(db)
+    _set_policy_fields(policy, payload)
+    db.flush()
+    sync = sync_all_model_policies_to_jobs_json(db)
+    log(db, 'Global Model Policy Updated', 'GlobalModelPolicy', policy.id, user_id=user.id, metadata={'sync': sync})
+    db.commit(); db.refresh(policy)
+    return {**policy_payload(policy, effective_policy(db)), 'hermes_sync': sync}
+
+
+@router.get('/companies/{company_id}/model-policy')
+def get_company_model_policy(company_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    company = db.get(Company, company_id)
+    if not company: raise HTTPException(404, 'Company not found')
+    ensure_global_policy(db)
+    policy = db.scalar(select(CompanyModelPolicy).where(CompanyModelPolicy.company_id == company_id))
+    return policy_payload(policy, effective_policy(db, company_id=company_id))
+
+
+@router.put('/companies/{company_id}/model-policy')
+def put_company_model_policy(company_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    company = db.get(Company, company_id)
+    if not company: raise HTTPException(404, 'Company not found')
+    ensure_global_policy(db)
+    policy = db.scalar(select(CompanyModelPolicy).where(CompanyModelPolicy.company_id == company_id))
+    if not policy:
+        policy = CompanyModelPolicy(company_id=company_id)
+        db.add(policy)
+    _set_policy_fields(policy, payload)
+    db.flush()
+    sync_results = []
+    for employee in db.scalars(select(AIEmployee).where(AIEmployee.company_id == company_id, AIEmployee.hermes_job_id.is_not(None))).all():
+        sync_results.append(sync_model_policy_to_jobs_json(db, hermes_job_id=employee.hermes_job_id, employee_id=employee.id, company_id=company_id, campaign_id=employee.campaign_id))
+    workspace_path = write_company_workspace_policy(company_id, effective_policy(db, company_id=company_id))
+    log(db, 'Company Model Policy Updated', 'Company', company_id, company_id, user.id, {'sync_count': len(sync_results), 'workspace_path': workspace_path})
+    db.commit(); db.refresh(policy)
+    return {**policy_payload(policy, effective_policy(db, company_id=company_id)), 'hermes_sync': sync_results, 'workspace_path': workspace_path}
+
+
+@router.get('/employees/{employee_id}/model-policy')
+def get_employee_model_policy(employee_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    employee = db.get(AIEmployee, employee_id)
+    if not employee: raise HTTPException(404, 'Employee not found')
+    ensure_global_policy(db)
+    policy = db.scalar(select(EmployeeModelPolicy).where(EmployeeModelPolicy.employee_id == employee_id))
+    return policy_payload(policy, effective_policy(db, employee_id=employee_id))
+
+
+@router.put('/employees/{employee_id}/model-policy')
+def put_employee_model_policy(employee_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    employee = db.get(AIEmployee, employee_id)
+    if not employee: raise HTTPException(404, 'Employee not found')
+    ensure_global_policy(db)
+    policy = db.scalar(select(EmployeeModelPolicy).where(EmployeeModelPolicy.employee_id == employee_id))
+    if not policy:
+        policy = EmployeeModelPolicy(employee_id=employee_id, company_id=employee.company_id, campaign_id=employee.campaign_id, hermes_job_id=employee.hermes_job_id)
+        db.add(policy)
+    policy.company_id = employee.company_id
+    policy.campaign_id = employee.campaign_id
+    policy.hermes_job_id = employee.hermes_job_id
+    _set_policy_fields(policy, payload)
+    db.flush()
+    sync = sync_model_policy_to_jobs_json(db, hermes_job_id=employee.hermes_job_id, employee_id=employee.id, company_id=employee.company_id, campaign_id=employee.campaign_id) if employee.hermes_job_id else {'ok': False, 'error': 'employee has no Hermes job ID'}
+    log(db, 'Employee Model Policy Updated', 'AIEmployee', employee.id, employee.company_id, user.id, {'sync': sync})
+    db.commit(); db.refresh(policy)
+    return {**policy_payload(policy, effective_policy(db, employee_id=employee_id)), 'hermes_sync': sync}
+
+
+@router.post('/model-policy/sync')
+def post_model_policy_sync(db: Session=Depends(get_db), user: User=Depends(require_write)):
+    ensure_global_policy(db)
+    sync = sync_all_model_policies_to_jobs_json(db)
+    log(db, 'Model Policy Synced To Hermes', 'ModelPolicy', None, user_id=user.id, metadata=sync)
+    db.commit()
+    return sync
+
+
+@router.post('/model-policy/simulate')
+def simulate_model_policy(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(current_user)):
+    policy = effective_policy(db, company_id=payload.get('company_id'), campaign_id=payload.get('campaign_id'), employee_id=payload.get('employee_id'), hermes_job_id=payload.get('hermes_job_id'), jobs_json_policy=payload.get('jobs_json_policy') if isinstance(payload.get('jobs_json_policy'), dict) else None)
+    if 'policy_override' in payload and isinstance(payload['policy_override'], dict):
+        policy.update(payload['policy_override'])
+    decision = validate_policy(policy, requested_provider=payload.get('provider'), requested_model=payload.get('model'), estimated_cost_usd=payload.get('estimated_cost_usd'))
+    return {'ok': decision.get('allowed'), 'decision': decision, 'policy': policy}
+
+
+@router.get('/model-policy/audit')
+def list_model_policy_audit(company_id: str|None=None, employee_id: str|None=None, status: str|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    stmt = select(ModelUsageAudit).order_by(ModelUsageAudit.created_at.desc()).limit(200)
+    if company_id: stmt = stmt.where(ModelUsageAudit.company_id == company_id)
+    if employee_id: stmt = stmt.where(ModelUsageAudit.employee_id == employee_id)
+    if status: stmt = stmt.where(ModelUsageAudit.status == status)
+    return db.scalars(stmt).all()
 
 @router.get('/sync/status')
 def sync_status(user: User=Depends(current_user)):

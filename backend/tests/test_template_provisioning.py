@@ -2,6 +2,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi import HTTPException
 from sqlalchemy import create_engine, select
@@ -17,6 +18,8 @@ from app.services.template_provisioning import APPROVED_INTERNAL_RECIPIENT, prov
 
 class TemplateProvisioningTests(unittest.TestCase):
     def setUp(self):
+        self.model_guard = patch('app.services.hermes_jobs_json_executor._model_policy_guard', return_value={"allowed": True, "decision": {"status": "allowed"}, "policy": {}})
+        self.model_guard.start()
         self.engine = create_engine("sqlite://", connect_args={"check_same_thread": False}, poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine)
@@ -28,6 +31,7 @@ class TemplateProvisioningTests(unittest.TestCase):
         (cron / "jobs.json").write_text(json.dumps({"jobs": []}), encoding="utf-8")
 
     def tearDown(self):
+        self.model_guard.stop()
         settings.hermes_data_path = self.original_data_path
         Base.metadata.drop_all(self.engine)
         self.engine.dispose()

@@ -197,6 +197,78 @@ class ReportRun(Base):
     delivery_result: Mapped[dict]=mapped_column(JSON, default=dict)
     status: Mapped[str]=mapped_column(String, default='generated', index=True)
 
+
+class GlobalModelPolicy(Base):
+    __tablename__='global_model_policies'
+    id: Mapped[str]=mapped_column(String, primary_key=True, default=uid)
+    name: Mapped[str]=mapped_column(String, unique=True, default='default', index=True)
+    provider: Mapped[str]=mapped_column(String, default='openrouter')
+    model: Mapped[str]=mapped_column(String, default='nvidia/nemotron-3-super-120b-a12b')
+    approved_models: Mapped[list]=mapped_column(JSON, default=list)
+    blocked_models: Mapped[list]=mapped_column(JSON, default=list)
+    fallback_enabled: Mapped[bool]=mapped_column(Boolean, default=False)
+    fail_closed: Mapped[bool]=mapped_column(Boolean, default=True)
+    daily_budget_usd: Mapped[int]=mapped_column(Integer, default=0)
+    monthly_budget_usd: Mapped[int]=mapped_column(Integer, default=0)
+    max_cost_per_run_usd: Mapped[int]=mapped_column(Integer, default=0)
+    notes: Mapped[str|None]=mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+
+class CompanyModelPolicy(Base):
+    __tablename__='company_model_policies'
+    id: Mapped[str]=mapped_column(String, primary_key=True, default=uid)
+    company_id: Mapped[str]=mapped_column(ForeignKey('companies.id'), unique=True, index=True)
+    provider: Mapped[str|None]=mapped_column(String, nullable=True)
+    model: Mapped[str|None]=mapped_column(String, nullable=True)
+    approved_models: Mapped[list]=mapped_column(JSON, default=list)
+    blocked_models: Mapped[list]=mapped_column(JSON, default=list)
+    fallback_enabled: Mapped[bool|None]=mapped_column(Boolean, nullable=True)
+    fail_closed: Mapped[bool|None]=mapped_column(Boolean, nullable=True)
+    daily_budget_usd: Mapped[int|None]=mapped_column(Integer, nullable=True)
+    monthly_budget_usd: Mapped[int|None]=mapped_column(Integer, nullable=True)
+    max_cost_per_run_usd: Mapped[int|None]=mapped_column(Integer, nullable=True)
+    notes: Mapped[str|None]=mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+
+class EmployeeModelPolicy(Base):
+    __tablename__='employee_model_policies'
+    id: Mapped[str]=mapped_column(String, primary_key=True, default=uid)
+    employee_id: Mapped[str]=mapped_column(ForeignKey('ai_employees.id'), unique=True, index=True)
+    company_id: Mapped[str|None]=mapped_column(ForeignKey('companies.id'), nullable=True, index=True)
+    campaign_id: Mapped[str|None]=mapped_column(ForeignKey('campaigns.id'), nullable=True, index=True)
+    hermes_job_id: Mapped[str|None]=mapped_column(String, nullable=True, index=True)
+    provider: Mapped[str|None]=mapped_column(String, nullable=True)
+    model: Mapped[str|None]=mapped_column(String, nullable=True)
+    approved_models: Mapped[list]=mapped_column(JSON, default=list)
+    blocked_models: Mapped[list]=mapped_column(JSON, default=list)
+    fallback_enabled: Mapped[bool|None]=mapped_column(Boolean, nullable=True)
+    fail_closed: Mapped[bool|None]=mapped_column(Boolean, nullable=True)
+    daily_budget_usd: Mapped[int|None]=mapped_column(Integer, nullable=True)
+    monthly_budget_usd: Mapped[int|None]=mapped_column(Integer, nullable=True)
+    max_cost_per_run_usd: Mapped[int|None]=mapped_column(Integer, nullable=True)
+    notes: Mapped[str|None]=mapped_column(Text, nullable=True)
+    updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+
+class ModelUsageAudit(Base):
+    __tablename__='model_usage_audits'
+    id: Mapped[str]=mapped_column(String, primary_key=True, default=uid)
+    company_id: Mapped[str|None]=mapped_column(ForeignKey('companies.id'), nullable=True, index=True)
+    campaign_id: Mapped[str|None]=mapped_column(ForeignKey('campaigns.id'), nullable=True, index=True)
+    employee_id: Mapped[str|None]=mapped_column(ForeignKey('ai_employees.id'), nullable=True, index=True)
+    hermes_job_id: Mapped[str|None]=mapped_column(String, nullable=True, index=True)
+    provider: Mapped[str]=mapped_column(String, default='openrouter', index=True)
+    model: Mapped[str]=mapped_column(String, default='nvidia/nemotron-3-super-120b-a12b', index=True)
+    normalized_model: Mapped[str]=mapped_column(String, default='openrouter/nvidia/nemotron-3-super-120b-a12b', index=True)
+    task_type: Mapped[str|None]=mapped_column(String, nullable=True)
+    status: Mapped[str]=mapped_column(String, default='allowed', index=True)
+    reason: Mapped[str|None]=mapped_column(Text, nullable=True)
+    estimated_cost_usd: Mapped[int|None]=mapped_column(Integer, nullable=True)
+    metadata_json: Mapped[dict]=mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow, index=True)
+
 class CompanyOutreachSettings(Base):
     __tablename__='company_outreach_settings'
     id: Mapped[str]=mapped_column(String, primary_key=True, default=uid)
