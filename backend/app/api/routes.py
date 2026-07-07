@@ -1230,7 +1230,13 @@ def put_company_model_policy(company_id: str, payload: dict=Body(...), db: Sessi
     db.flush()
     sync_results = []
     for employee in db.scalars(select(AIEmployee).where(AIEmployee.company_id == company_id, AIEmployee.hermes_job_id.is_not(None))).all():
-        sync_results.append(sync_model_policy_to_jobs_json(db, hermes_job_id=employee.hermes_job_id, employee_id=employee.id, company_id=company_id, campaign_id=employee.campaign_id))
+        try:
+            sync_results.append(sync_model_policy_to_jobs_json(db, hermes_job_id=employee.hermes_job_id, employee_id=employee.id, company_id=company_id, campaign_id=employee.campaign_id))
+        except Exception as exc:
+            message = str(exc)
+            if 'Hermes job not found' not in message:
+                raise
+            sync_results.append({'ok': True, 'skipped': True, 'hermes_job_id': employee.hermes_job_id, 'error': message})
     workspace_path = write_company_workspace_policy(company_id, effective_policy(db, company_id=company_id))
     log(db, 'Company Model Policy Updated', 'Company', company_id, company_id, user.id, {'sync_count': len(sync_results), 'workspace_path': workspace_path})
     db.commit(); db.refresh(policy)
