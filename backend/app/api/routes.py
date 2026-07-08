@@ -54,11 +54,14 @@ from app.services.outreach import (
     draft_to_payload,
     followup_status,
     generate_draft_for_item,
+    outreach_readiness,
     lead_key_for,
     reply_monitor_status,
     review_items_from_rows,
     send_blockers,
     settings_payload,
+    sync_outreach_settings_to_hermes,
+    write_outreach_workspace_config,
     upsert_approval,
     validate_outreach_settings,
 )
@@ -763,11 +766,28 @@ def update_outreach_draft(draft_id: str, payload: dict=Body(...), db: Session=De
     return draft_to_payload(draft)
 
 
-@router.post('/outreach-drafts/{draft_id}/{action}')
-def outreach_draft_action(draft_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+
+
+def _prepare_internal_test(db: Session, draft_id: str, user: User) -> dict:
     draft = db.get(OutreachDraft, draft_id)
     if not draft: raise HTTPException(404, 'Draft not found')
+    campaign = db.get(Campaign, draft.campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    try:
+        event = create_internal_test_event(db, campaign, draft, user.id)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    log(db, 'Outreach Internal Test Prepared', 'OutreachEvent', event.event_id, campaign.company_id, user.id, {'recipient': OUTREACH_INTERNAL_RECIPIENT, 'prospect_emails_sent': 0})
+    db.commit(); db.refresh(event)
+    return {'ok': True, 'status': event.status, 'recipient': event.recipient, 'event_id': event.event_id, 'prospect_emails_sent': 0, 'message': 'Internal test prepared for approved recipient only; no prospect email sent.'}
+
+@router.post('/outreach-drafts/{draft_id}/{action}')
+def outreach_draft_action(draft_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
     action = action.replace('-', '_').lower()
+    if action == 'internal_test':
+        return _prepare_internal_test(db, draft_id, user)
+    draft = db.get(OutreachDraft, draft_id)
+    if not draft: raise HTTPException(404, 'Draft not found')
     if action == 'approve':
         draft.status = 'draft_approved'; draft.approved_by = user.id; draft.approved_at = datetime.utcnow()
     elif action == 'reject':
@@ -782,17 +802,7 @@ def outreach_draft_action(draft_id: str, action: str, db: Session=Depends(get_db
 
 @router.post('/outreach-drafts/{draft_id}/internal-test')
 def outreach_draft_internal_test(draft_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
-    draft = db.get(OutreachDraft, draft_id)
-    if not draft: raise HTTPException(404, 'Draft not found')
-    campaign = db.get(Campaign, draft.campaign_id)
-    if not campaign: raise HTTPException(404, 'Campaign not found')
-    try:
-        event = create_internal_test_event(db, campaign, draft, user.id)
-    except ValueError as exc:
-        raise HTTPException(400, str(exc)) from exc
-    log(db, 'Outreach Internal Test Prepared', 'OutreachEvent', event.event_id, campaign.company_id, user.id, {'recipient': OUTREACH_INTERNAL_RECIPIENT, 'prospect_emails_sent': 0})
-    db.commit(); db.refresh(event)
-    return {'ok': True, 'status': event.status, 'recipient': event.recipient, 'event_id': event.event_id, 'prospect_emails_sent': 0, 'message': 'Internal test prepared for approved recipient only; no prospect email sent.'}
+    return _prepare_internal_test(db, draft_id, user)
 
 
 @router.get('/campaigns/{campaign_id}/outreach-send/status')
@@ -801,8 +811,40 @@ def outreach_send_status(campaign_id: str, db: Session=Depends(get_db), user: Us
     if not campaign: raise HTTPException(404, 'Campaign not found')
     settings = db.scalar(select(CompanyOutreachSettings).where(CompanyOutreachSettings.company_id == campaign.company_id))
     drafts = db.scalars(select(OutreachDraft).where(OutreachDraft.campaign_id == campaign.id)).all()
-    return {'campaign_id': campaign.id, 'settings': settings_payload(settings, campaign.company_id), 'approved_drafts': sum(1 for d in drafts if d.status == 'draft_approved'), 'prospect_send_blockers': validate_outreach_settings(settings, prospect=True)}
+    readiness = outreach_readiness(db, campaign, settings, drafts)
+    blockers = validate_outreach_settings(settings, prospect=True)
+    return {'campaign_id': campaign.id, 'settings': settings_payload(settings, campaign.company_id), 'approved_drafts': sum(1 for d in drafts if d.status == 'draft_approved'), 'prospect_send_blockers': blockers, 'human_blockers': readiness['human_blockers'], 'readiness': readiness}
 
+
+
+
+@router.post('/campaigns/{campaign_id}/outreach-send/prospect-sending')
+def set_campaign_prospect_sending(campaign_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    settings = db.scalar(select(CompanyOutreachSettings).where(CompanyOutreachSettings.company_id == campaign.company_id))
+    if not settings:
+        settings = CompanyOutreachSettings(company_id=campaign.company_id)
+        db.add(settings); db.flush()
+    enable = bool(payload.get('enabled'))
+    drafts = db.scalars(select(OutreachDraft).where(OutreachDraft.campaign_id == campaign.id)).all()
+    readiness = outreach_readiness(db, campaign, settings, drafts)
+    if enable and not readiness['can_enable_prospect_sending']:
+        raise HTTPException(400, {'message': 'Prospect sending cannot be enabled until readiness checks pass.', 'human_blockers': readiness['human_blockers'], 'steps': readiness['steps']})
+    settings.prospect_sending_enabled = enable
+    settings.updated_at = datetime.utcnow()
+    current = settings_payload(settings, campaign.company_id)
+    current['enabled_by'] = user.email
+    current['enabled_at'] = datetime.utcnow().isoformat() + 'Z' if enable else None
+    current['readiness'] = outreach_readiness(db, campaign, settings, drafts)
+    workspace_path = write_outreach_workspace_config(campaign.company_id, current)
+    current['workspace_path'] = workspace_path
+    hermes_sync = sync_outreach_settings_to_hermes(campaign.company_id, current)
+    if not hermes_sync.get('ok'):
+        raise HTTPException(502, f"Hermes outreach settings sync failed: {hermes_sync.get('error')}")
+    log(db, 'Prospect Sending Enabled' if enable else 'Prospect Sending Disabled', 'Campaign', campaign.id, campaign.company_id, user.id, {'enabled': enable, 'workspace_path': workspace_path, 'hermes_sync': hermes_sync})
+    db.commit(); db.refresh(settings)
+    return {'ok': True, 'enabled': enable, 'settings': settings_payload(settings, campaign.company_id), 'readiness': outreach_readiness(db, campaign, settings, drafts), 'workspace_path': workspace_path, 'hermes_sync': hermes_sync, 'prospect_emails_sent': 0}
 
 @router.get('/campaigns/{campaign_id}/followups/status')
 def campaign_followup_status(campaign_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):

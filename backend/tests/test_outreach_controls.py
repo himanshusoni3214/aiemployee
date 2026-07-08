@@ -24,6 +24,8 @@ from app.services.outreach import (
     send_blockers,
     upsert_approval,
     validate_outreach_settings,
+    outreach_readiness,
+    sender_verification,
 )
 
 
@@ -103,6 +105,25 @@ class OutreachControlsTests(unittest.TestCase):
             other_draft = OutreachDraft(company_id=other.id, campaign_id=other_campaign.id, lead_key=draft.lead_key, lead_email=draft.lead_email, business='Other', subject='x', body='x', status='draft_approved')
             db.add(other_draft); db.flush()
             self.assertIn('draft_company_campaign_mismatch', send_blockers(db, campaign, other_draft, internal_test=True))
+        finally:
+            db.close()
+
+
+    def test_sender_verification_and_readiness_use_human_blockers(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            settings = CompanyOutreachSettings(company_id=company.id, **{k: v for k, v in default_outreach_settings(company.id).items() if k != 'company_id'})
+            settings.sender_name = 'Voryx'
+            settings.sender_email = 'voryxio@gmail.com'
+            settings.reply_to_email = 'voryxio@gmail.com'
+            settings.physical_mailing_address = '123 QA St'
+            settings.compliance_acknowledged = True
+            db.add(settings); db.flush()
+            readiness = outreach_readiness(db, campaign, settings, [])
+            self.assertTrue(sender_verification('voryxio@gmail.com')['verified'])
+            self.assertFalse(readiness['can_enable_prospect_sending'])
+            self.assertIn('Prospect sending is OFF', ' '.join(readiness['human_blockers']))
         finally:
             db.close()
 

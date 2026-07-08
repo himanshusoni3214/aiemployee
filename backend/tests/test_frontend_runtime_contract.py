@@ -182,6 +182,31 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("time[datetime]", runtime)
         self.assertIn("[data-voryx-sync-last]", runtime)
 
+
+    def test_employees_page_keeps_model_policy_out_of_worker_cards(self):
+        source = read_frontend("app/employees/page.tsx")
+
+        self.assertIn("data-voryx-employee-schedule-cards", source)
+        self.assertIn("data-voryx-disabled-worker-types", source)
+        self.assertIn("isOperationalWorker", source)
+        self.assertNotIn("<ModelPolicyPanel key={employee.id}", source)
+
+    def test_outreach_controls_show_readiness_and_prospect_toggle(self):
+        source = read_frontend("components/OutreachControlsPanel.tsx")
+
+        self.assertIn("data-voryx-outreach-readiness", source)
+        self.assertIn("data-voryx-sender-verification", source)
+        self.assertIn("Enable Prospect Sending", source)
+        self.assertIn("Disable Prospect Sending", source)
+        self.assertIn("Prospect sending is OFF", source)
+
+    def test_campaign_detail_has_operational_sections(self):
+        source = read_frontend("app/campaigns/page.tsx")
+
+        self.assertIn("data-voryx-campaign-detail-sections", source)
+        for label in ["Overview", "Lead Sheet / Leads", "Generated Files", "Outreach Control", "Drafts", "Employees", "Schedule", "Reports", "Model Policy"]:
+            self.assertIn(label, source)
+
     def test_jobs_page_displays_delivery_evidence_fields(self):
         source = read_frontend("app/jobs/page.tsx")
 

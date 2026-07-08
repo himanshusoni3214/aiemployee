@@ -1,5 +1,5 @@
 import { serverApi } from '../../lib/serverApi';
-import { EmployeeActions, defaultConnectorCapabilities, type ConnectorCapabilities } from '../../components/ActionButtons';
+import { EmployeeActions, ScheduleActions, defaultConnectorCapabilities, type ConnectorCapabilities } from '../../components/ActionButtons';
 import { isSafetyLockedHermesJob } from '../../lib/hermesSafety';
 import { LocalTime } from '../../components/LocalTime';
 import { SyncStatus, type SyncInfo } from '../../components/SyncStatus';
@@ -7,11 +7,12 @@ import CrudPage from '../../components/CrudPage';
 import { CompanySelector } from '../../components/CompanySelector';
 import { QuerySelector } from '../../components/QuerySelector';
 import { firstParam, queryString, selectedCompanyId } from '../../lib/companySelection';
-import { ModelPolicyPanel } from '../../components/ModelPolicyPanel';
 
 type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
 type Campaign = { id: string; company_id: string; name: string; status: string; campaign_type?: string; industry?: string; geographic_area?: string; target_audience?: string; description?: string; daily_lead_goal?: number; daily_email_goal?: number; daily_email_limit?: number; dry_run_mode?: boolean; report_recipient?: string; internal_test_recipient?: string; timezone?: string };
+type Schedule = { id: string; employee_id: string; name: string; cron: string; timezone: string; task_type: string; payload?: Record<string, unknown>; is_paused: boolean; last_run_at?: string | null; next_run_at?: string | null };
+
 type Employee = {
   id: string;
   company_id: string;
@@ -28,6 +29,29 @@ type Employee = {
   last_error?: string | null;
   last_heartbeat_at?: string | null;
 };
+
+
+const OPERATIONAL_TYPES = new Set(['Lead Researcher', 'CRM Manager', 'Report Manager', 'Daily Reporter', 'Email Outreach', 'Draft Writer', 'Outreach Draft Writer', 'Email Sender', 'Reply Monitor', 'Follow-up Manager', 'Followup Manager', 'Voice Agent', 'Custom']);
+const BIBS_REAL_JOB_IDS = new Set(['0d0c20e25f55', '5881b72113ce', '47caae0a6a59', 'b03a2d0f1149']);
+
+function isQaArtifact(employee: Employee) {
+  const text = `${employee.id} ${employee.name} ${employee.hermes_job_id || ''}`.toLowerCase();
+  return text.includes('model-policy-qa') || text.includes('template-sample') || text.includes('no-source') || text.includes('template-qa') || text.includes('generic-lead-research-qa') || text.includes('real-lead-qa');
+}
+
+function isOperationalWorker(employee: Employee) {
+  if (employee.status === 'Archived') return false;
+  if (!OPERATIONAL_TYPES.has(employee.employee_type)) return false;
+  if (employee.hermes_job_id && BIBS_REAL_JOB_IDS.has(employee.hermes_job_id)) return true;
+  if (isQaArtifact(employee)) return false;
+  if (employee.employee_type === 'Custom') return Boolean(employee.hermes_job_id);
+  return Boolean(employee.hermes_job_id);
+}
+
+function hermesId(schedule?: Schedule) {
+  const value = schedule?.payload?.hermes_job_id;
+  return typeof value === 'string' ? value : null;
+}
 
 function reason(employee: Employee) {
   return employee.last_error || employee.paused_reason || '-';
@@ -72,7 +96,9 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
   const requestedCampaignId = firstParam(params.campaign_id);
   const campaignId = requestedCampaignId && campaigns.some((campaign) => campaign.id === requestedCampaignId) ? requestedCampaignId : '';
   const employeeQuery = queryString({ company_id: companyId || undefined, campaign_id: campaignId || undefined });
-  const employees = companyId ? await serverApi<Employee[]>(`/employees${employeeQuery}`, []) : [];
+  const allEmployees = companyId ? await serverApi<Employee[]>(`/employees${employeeQuery}`, []) : [];
+  const schedules = companyId ? await serverApi<Schedule[]>(`/schedules${employeeQuery}`, []) : [];
+  const employees = allEmployees.filter(isOperationalWorker);
   const [sync, capabilitiesResponse] = await Promise.all([
     serverApi<SyncInfo>('/sync/status', {}),
     serverApi<CapabilitiesResponse>('/connectors/capabilities', {}),
@@ -80,6 +106,7 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
   const capabilities = capabilitiesResponse.hermes || defaultConnectorCapabilities;
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
   const campaignName = new Map(campaigns.map((campaign) => [campaign.id, campaign.name]));
+  const scheduleByEmployee = new Map(schedules.map((schedule) => [schedule.employee_id, schedule]));
   const selectedCampaign = campaigns.find((campaign) => campaign.id === campaignId) || undefined;
   const employeeTypes = allowedEmployeeTypes(selectedCampaign);
   const employeeTypeOptions = employeeTypes.map((value) => ({ value, label: value }));
@@ -117,10 +144,37 @@ export default async function EmployeesPage({ searchParams }: { searchParams?: P
         <div className="card"><p className="text-sm text-zinc-400">Open Circuits</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.circuit_breaker_open).length}</p></div>
       </div>
       {employees.length ? (
-        <div className="grid gap-5 xl:grid-cols-2">
-          {employees.slice(0, 6).map((employee) => <ModelPolicyPanel key={employee.id} scope="employee" employeeId={employee.id} title={`${employee.name} Model Policy`} compact />)}
+        <div className="grid gap-3 xl:grid-cols-2" data-voryx-employee-schedule-cards>
+          {employees.map((employee) => {
+            const schedule = scheduleByEmployee.get(employee.id);
+            return (
+              <section className="card" key={employee.id}>
+                <div className="flex flex-wrap items-start justify-between gap-3">
+                  <div>
+                    <h2 className="text-base font-semibold">{employee.name}</h2>
+                    <p className="text-xs text-zinc-500">{employee.employee_type} / {statusLabel(employee)} / Hermes {employee.hermes_job_id || 'not provisioned'}</p>
+                    <p className="mt-1 text-xs text-zinc-500">Model Policy: effective policy is managed in System and Company Model Policy; employee override is available from employee detail API.</p>
+                  </div>
+                  <EmployeeActions id={employee.id} status={employee.status} hermesJobId={employee.hermes_job_id} capabilities={capabilities} showUnavailableMessage={false} />
+                </div>
+                <div className="mt-3 grid gap-2 text-xs text-zinc-400 md:grid-cols-2">
+                  <div>Schedule: <span className="text-zinc-200">{schedule ? (schedule.is_paused ? 'Paused' : 'Active') : 'No schedule'}</span></div>
+                  <div>Cron: <span className="text-zinc-200">{schedule?.cron || '-'}</span></div>
+                  <div>Timezone: <span className="text-zinc-200">{schedule?.timezone || 'America/Toronto'}</span></div>
+                  <div>Last run: <LocalTime value={schedule?.last_run_at} /></div>
+                  <div>Next run: <LocalTime value={schedule?.next_run_at} /></div>
+                  <div>Hermes synced: <span className="text-zinc-200">{schedule?.payload?.hermes_state ? 'Yes' : 'Not verified'}</span></div>
+                </div>
+                {schedule ? <div className="mt-3"><ScheduleActions id={schedule.id} isPaused={schedule.is_paused} hermesJobId={hermesId(schedule)} capabilities={capabilities} showUnavailableMessage={false} /></div> : null}
+              </section>
+            );
+          })}
         </div>
       ) : null}
+      <section className="card" data-voryx-disabled-worker-types>
+        <h2 className="text-sm font-semibold">Not Connected Worker Types</h2>
+        <p className="mt-2 text-xs text-zinc-400">Email Sender is blocked until prospect sending is enabled. Reply Monitor is disabled until Gmail thread monitoring is connected. Follow-up Manager stays disabled until Reply Monitor is connected and tested. Voice Agent is not connected.</p>
+      </section>
       <div className="table-wrap">
         <table className="ops-table">
           <thead><tr><th>Name</th><th>Company</th><th>Campaign</th><th>Type</th><th>Status</th><th>Limits</th><th>Circuit</th><th>Last Heartbeat</th><th>Reason</th><th>Actions</th></tr></thead>

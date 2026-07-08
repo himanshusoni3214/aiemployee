@@ -70,6 +70,16 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
     finally { setBusy(''); }
   }
 
+  async function setProspectSending(enabled: boolean) {
+    setBusy(enabled ? 'enable-prospect' : 'disable-prospect');
+    try {
+      const result = await api(`/campaigns/${campaignId}/outreach-send/prospect-sending`, { method: 'POST', body: JSON.stringify({ enabled }) });
+      setMessage(result.message || (enabled ? 'Prospect sending enabled after readiness checks' : 'Prospect sending disabled'));
+      await load();
+    } catch (err: any) { setError(err.message || 'Prospect sending control failed'); }
+    finally { setBusy(''); }
+  }
+
   async function draftAction(draft: Draft, action: string) {
     setBusy(`${draft.id}:${action}`);
     try {
@@ -92,7 +102,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
           <h3 className="text-sm font-semibold text-zinc-100">Outreach Control</h3>
           <p className="text-xs text-zinc-500">Approval-based. Drafts only until compliance, sender, reply monitoring and limits pass.</p>
         </div>
-        <div className={senderReady ? 'text-xs text-emerald-400' : 'text-xs text-amber-300'}>{senderReady ? 'Ready' : `Blocked: ${blockers.join(', ') || 'settings incomplete'}`}</div>
+        <div className={senderReady ? 'text-xs text-emerald-400' : 'text-xs text-amber-300'}>{senderReady ? 'Ready' : (sendStatus?.human_blockers?.[0] || 'Prospect sending is OFF. Turn on only after internal test and sender verification.')}</div>
       </div>
       {error ? <div className="rounded border border-red-900 bg-red-950/40 p-2 text-xs text-red-200">{error}</div> : null}
       {message ? <div className="rounded border border-emerald-900 bg-emerald-950/30 p-2 text-xs text-emerald-200">{message}</div> : null}
@@ -105,10 +115,25 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
         <input className="input" placeholder="Unsubscribe text" value={settingsForm.unsubscribe_text || ''} onChange={(e) => setSettings({ ...settingsForm, unsubscribe_text: e.target.value })} />
         <input className="input" type="number" min="1" max="5" placeholder="Daily limit" value={settingsForm.daily_send_limit || 5} onChange={(e) => setSettings({ ...settingsForm, daily_send_limit: Number(e.target.value || 5) })} />
       </div>
+      <div className="grid gap-1 rounded border border-zinc-800 p-2 text-xs text-zinc-400" data-voryx-sender-verification>
+        <div>Sender verification: <span className={settingsForm.sender_verification?.verified ? 'text-emerald-300' : 'text-amber-300'}>{settingsForm.sender_verification?.verified ? 'Verified' : 'Not verified'}</span></div>
+        <div>Method: <span className="text-zinc-200">{settingsForm.sender_verification?.method || 'none'}</span></div>
+        <div>Reason: <span className="text-zinc-200">{settingsForm.sender_verification?.reason || 'Approved sender matched.'}</span></div>
+        <div>Last verified: <span className="text-zinc-200">{settingsForm.sender_verification?.last_verified_at || '-'}</span></div>
+      </div>
       <div className="flex flex-wrap gap-3 text-xs text-zinc-300">
-        <label><input type="checkbox" checked={Boolean(settingsForm.approved_sender_connected)} onChange={(e) => setSettings({ ...settingsForm, approved_sender_connected: e.target.checked })} /> Approved sender connected</label>
         <label><input type="checkbox" checked={Boolean(settingsForm.compliance_acknowledged)} onChange={(e) => setSettings({ ...settingsForm, compliance_acknowledged: e.target.checked })} /> Compliance acknowledged</label>
         <button className="btn-secondary text-xs" type="button" disabled={busy === 'settings'} onClick={() => updateSettings(settingsForm)}>Save settings</button>
+      </div>
+
+      <div className="grid gap-2 rounded border border-zinc-800 p-2 text-xs" data-voryx-outreach-readiness>
+        <div className="font-semibold text-zinc-200">Send Readiness Checklist</div>
+        {(sendStatus?.readiness?.steps || []).map((step: any) => <div className="flex flex-wrap justify-between gap-2" key={step.key}><span className={step.complete ? 'text-emerald-300' : 'text-amber-300'}>{step.complete ? 'Pass' : 'Pending'}: {step.label}</span><span className="text-zinc-500">{step.detail}</span></div>)}
+      </div>
+      <div className="flex flex-wrap gap-2 text-xs">
+        <button className="btn-secondary text-xs" type="button" disabled={busy === 'enable-prospect' || !sendStatus?.readiness?.can_enable_prospect_sending || settingsForm.prospect_sending_enabled} onClick={() => setProspectSending(true)}>Enable Prospect Sending</button>
+        <button className="btn-secondary text-xs" type="button" disabled={busy === 'disable-prospect' || !settingsForm.prospect_sending_enabled} onClick={() => setProspectSending(false)}>Disable Prospect Sending</button>
+        <span className="text-zinc-400">Prospect sending is OFF unless explicitly enabled after sender verification and internal test.</span>
       </div>
 
       <div className="grid gap-2 text-xs text-zinc-400">
@@ -147,7 +172,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
         </div>)}
       </div>
       <div className="grid gap-1 text-xs text-zinc-500">
-        <div>Prospect send blockers: {(sendStatus?.prospect_send_blockers || []).join(', ') || 'none'}</div>
+        <div>Prospect send status: {(sendStatus?.human_blockers || []).join(' / ') || 'Ready for controlled sending'}</div>
         <div>Follow-up: {followups?.state || 'unknown'}{followups?.reason ? ` / ${followups.reason}` : ''}</div>
         <div>Reply Monitor: {replyMonitor?.state || 'unknown'}{replyMonitor?.reason ? ` / ${replyMonitor.reason}` : ''}</div>
       </div>

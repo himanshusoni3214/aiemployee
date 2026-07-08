@@ -1,6 +1,9 @@
 import hashlib
+import json
+import os
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 
 from sqlalchemy import func, select
@@ -16,6 +19,8 @@ from app.models.entities import (
     ReplyMonitorEvent,
     SuppressionEntry,
 )
+from app.core.config import settings
+from app.services.hermes_control import HermesControlService
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, normalize_email
 
 LEAD_STATES = {
@@ -82,6 +87,104 @@ def default_outreach_settings(company_id: str) -> dict[str, Any]:
     }
 
 
+
+def sender_verification(sender_email: str | None) -> dict[str, Any]:
+    sender = normalize_email(sender_email)
+    configured = {normalize_email(item) for item in os.getenv("VORYX_APPROVED_SENDERS", "").split(",") if item.strip()}
+    allowed = set(APPROVED_SENDER_EMAILS) | configured
+    if not sender:
+        return {"verified": False, "sender_email": "", "method": "none", "last_verified_at": None, "reason": "Sender email is required."}
+    if sender not in allowed:
+        return {"verified": False, "sender_email": sender, "method": "allowlist", "last_verified_at": utc_now().isoformat() + "Z", "reason": "Sender is not in the approved Voryx sender allowlist."}
+    home = Path(settings.hermes_data_path or "/hermes-data") / "home"
+    himalaya_config = home / ".config" / "himalaya"
+    method = "approved_sender_allowlist"
+    if himalaya_config.exists():
+        method = "himalaya_profile_and_allowlist"
+    return {"verified": True, "sender_email": sender, "method": method, "last_verified_at": utc_now().isoformat() + "Z", "reason": None}
+
+
+def human_blocker_text(blocker: str) -> str:
+    return {
+        "prospect_sending_enabled": "Prospect sending is OFF. Turn on only after internal test and sender verification.",
+        "approved_sender_connected": "Sender verification is missing. Connect or verify the approved sender account first.",
+        "compliance_acknowledged": "Compliance settings must be acknowledged before prospect sending.",
+        "sender_email_not_approved": "Sender email is not approved for this workspace.",
+        "reply_to_email_not_approved": "Reply-to email is not approved for this workspace.",
+        "daily_send_limit_max_5_initial": "Daily send limit must stay at 5 or lower for the initial controlled rollout.",
+    }.get(blocker, blocker.replace("_", " ").capitalize())
+
+
+def outreach_readiness(db: Session, campaign: Campaign, settings: CompanyOutreachSettings | None, drafts: list[OutreachDraft] | None = None) -> dict[str, Any]:
+    drafts = drafts or []
+    payload = settings_payload(settings, campaign.company_id)
+    sender = sender_verification(payload.get("sender_email"))
+    blockers_without_switch = [item for item in validate_outreach_settings(settings, prospect=False) if item != "prospect_sending_enabled"]
+    approved_drafts = sum(1 for draft in drafts if draft.status == "draft_approved")
+    approved_leads = db.scalar(select(func.count()).select_from(LeadApproval).where(LeadApproval.campaign_id == campaign.id, LeadApproval.state == "approved_for_outreach")) or 0
+    internal_tests = db.scalar(select(func.count()).select_from(OutreachEvent).where(OutreachEvent.campaign_id == campaign.id, OutreachEvent.status.in_(["internal_test_prepared", "internal_test_sent"]))) or 0
+    steps = [
+        {"key": "sender_settings", "label": "Sender settings", "complete": all(payload.get(key) for key in ["sender_name", "sender_email", "reply_to_email"]), "detail": payload.get("sender_email") or "Sender email missing"},
+        {"key": "sender_verification", "label": "Sender verification", "complete": sender["verified"], "detail": sender.get("method") if sender["verified"] else sender.get("reason")},
+        {"key": "compliance_settings", "label": "Compliance settings", "complete": bool(payload.get("physical_mailing_address") and payload.get("unsubscribe_text") and payload.get("compliance_acknowledged")), "detail": "Physical address, unsubscribe text and compliance acknowledgement required."},
+        {"key": "lead_approval", "label": "Lead approval", "complete": approved_leads > 0, "detail": f"{approved_leads} approved leads"},
+        {"key": "draft_generation", "label": "Draft generation", "complete": len(drafts) > 0, "detail": f"{len(drafts)} drafts"},
+        {"key": "draft_approval", "label": "Draft approval", "complete": approved_drafts > 0, "detail": f"{approved_drafts} approved drafts"},
+        {"key": "internal_test", "label": "Internal test", "complete": internal_tests > 0, "detail": f"{internal_tests} internal tests prepared/sent"},
+        {"key": "enable_prospect_sending", "label": "Enable prospect sending", "complete": bool(payload.get("prospect_sending_enabled")), "detail": "Prospect sending is OFF. Turn on only after internal test and sender verification." if not payload.get("prospect_sending_enabled") else "Controlled prospect sending enabled."},
+        {"key": "send_controlled_batch", "label": "Send controlled batch", "complete": False, "detail": "Prospect sending remains blocked during QA; max 5/day when approved."},
+        {"key": "reply_monitor_followup", "label": "Reply monitor / follow-up", "complete": False, "detail": FOLLOWUP_DISABLED_REASON},
+    ]
+    return {
+        "sender_verification": sender,
+        "steps": steps,
+        "blockers_without_prospect_switch": blockers_without_switch,
+        "human_blockers": [human_blocker_text(item) for item in validate_outreach_settings(settings, prospect=True)],
+        "can_enable_prospect_sending": sender["verified"] and not blockers_without_switch and approved_leads > 0 and approved_drafts > 0 and internal_tests > 0,
+        "approved_leads": approved_leads,
+        "approved_drafts": approved_drafts,
+        "internal_tests": internal_tests,
+    }
+
+
+def write_outreach_workspace_config(company_id: str, payload: dict[str, Any]) -> str | None:
+    if not settings.hermes_data_path:
+        return None
+    root = Path(settings.hermes_data_path) / "home" / "voryx_workspaces" / company_id
+    root.mkdir(parents=True, exist_ok=True)
+    path = root / "outreach_settings.json"
+    path.write_text(json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    return f"/opt/data/home/voryx_workspaces/{company_id}/outreach_settings.json"
+
+
+def sync_outreach_settings_to_hermes(company_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+    service = HermesControlService()
+    try:
+        raw = service._read_jobs()
+    except Exception as exc:
+        return {"ok": False, "error": str(exc), "updated": 0}
+    jobs = raw if isinstance(raw, list) else raw.get("jobs", []) if isinstance(raw, dict) else []
+    updated = 0
+    for job in jobs:
+        if not isinstance(job, dict) or str(job.get("company_id") or "") != company_id:
+            continue
+        safety = job.get("safety") if isinstance(job.get("safety"), dict) else {}
+        safety["prospect_sending_enabled"] = bool(payload.get("prospect_sending_enabled"))
+        safety["sender_verified"] = bool(payload.get("sender_verification", {}).get("verified"))
+        safety["outreach_settings_path"] = payload.get("workspace_path")
+        job["safety"] = safety
+        updated += 1
+    if updated:
+        service._write_jobs(raw)
+        verified_raw = service._read_jobs()
+        verified_jobs = verified_raw if isinstance(verified_raw, list) else verified_raw.get("jobs", []) if isinstance(verified_raw, dict) else []
+        for job in verified_jobs:
+            if isinstance(job, dict) and str(job.get("company_id") or "") == company_id:
+                safety = job.get("safety") if isinstance(job.get("safety"), dict) else {}
+                if safety.get("prospect_sending_enabled") != bool(payload.get("prospect_sending_enabled")):
+                    return {"ok": False, "error": "Hermes outreach settings verification failed", "updated": updated}
+    return {"ok": True, "updated": updated}
+
 def settings_payload(settings: CompanyOutreachSettings | None, company_id: str) -> dict[str, Any]:
     data = default_outreach_settings(company_id)
     if settings:
@@ -89,9 +192,12 @@ def settings_payload(settings: CompanyOutreachSettings | None, company_id: str) 
             if hasattr(settings, key):
                 data[key] = getattr(settings, key)
         data["id"] = settings.id
+    sender = sender_verification(data.get("sender_email"))
     missing = validate_outreach_settings(data, prospect=True)
+    data["sender_verification"] = sender
     data["ready_for_prospect_sending"] = not missing
     data["blocking_reasons"] = missing
+    data["human_blocking_reasons"] = [human_blocker_text(item) for item in missing]
     return data
 
 
@@ -121,7 +227,7 @@ def validate_outreach_settings(settings: CompanyOutreachSettings | dict[str, Any
         missing.append("sender_email_not_approved")
     if reply_to and reply_to not in APPROVED_SENDER_EMAILS:
         missing.append("reply_to_email_not_approved")
-    if not data.get("approved_sender_connected"):
+    if not sender_verification(sender).get("verified"):
         missing.append("approved_sender_connected")
     if not data.get("compliance_acknowledged"):
         missing.append("compliance_acknowledged")

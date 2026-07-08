@@ -6,6 +6,8 @@ import { LeadOutputsPanel } from '../../components/LeadOutputsPanel';
 import { OutreachControlsPanel } from '../../components/OutreachControlsPanel';
 import { LeadSchemaEditor } from '../../components/LeadSchemaEditor';
 import { queryString, selectedCompanyId } from '../../lib/companySelection';
+import { ModelPolicyPanel } from '../../components/ModelPolicyPanel';
+import { LocalTime } from '../../components/LocalTime';
 
 type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
@@ -30,6 +32,7 @@ type Campaign = {
 };
 type Job = { campaign_id?: string | null; status: string; task_type: string };
 type Employee = { id: string; campaign_id?: string | null; name: string; employee_type: string; hermes_job_id?: string | null; status: string };
+type Schedule = { id: string; employee_id: string; name: string; cron: string; timezone: string; is_paused: boolean; last_run_at?: string | null; next_run_at?: string | null; payload?: Record<string, unknown> };
 type LeadSchema = { locked_fields?: string[]; custom_fields?: Array<{ name: string; label?: string; hidden?: boolean; order?: number }>; columns?: string[] };
 type LeadOutputs = { outputs: Array<{ path: string; file_name?: string; download_url: string; row_count: number; generated_at: string; modified_at?: string; columns?: string[]; kind?: string }>; rows: Record<string, unknown>[] };
 
@@ -42,14 +45,15 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
   const companies = await serverApi<Company[]>('/companies', []);
   const companyId = selectedCompanyId(companies, params.company_id);
   const companyQuery = queryString({ company_id: companyId || undefined });
-  const [campaigns, jobs, employees, capabilitiesResponse] = companyId
+  const [campaigns, jobs, employees, schedules, capabilitiesResponse] = companyId
     ? await Promise.all([
         serverApi<Campaign[]>(`/campaigns${companyQuery}`, []),
         serverApi<Job[]>(`/jobs${companyQuery}`, []),
         serverApi<Employee[]>(`/employees${companyQuery}`, []),
+        serverApi<Schedule[]>(`/schedules${companyQuery}`, []),
         serverApi<CapabilitiesResponse>('/connectors/capabilities', {}),
       ])
-    : [[], [], [], {}] as [Campaign[], Job[], Employee[], CapabilitiesResponse];
+    : [[], [], [], [], {}] as [Campaign[], Job[], Employee[], Schedule[], CapabilitiesResponse];
   const capabilities = capabilitiesResponse.hermes || defaultConnectorCapabilities;
   const leadDetails = companyId
     ? Object.fromEntries(await Promise.all(campaigns.map(async (campaign) => {
@@ -136,9 +140,41 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                   </div>
                   <div className="text-xs text-zinc-500">{(hermesIdsByCampaign.get(campaign.id) || []).join(' / ') || String(campaign.provisioning_result?.hermes_job_id || 'No Hermes job')}</div>
                 </div>
-                <LeadOutputsPanel outputs={detail.outputs.outputs || []} rows={detail.outputs.rows || []} />
-                <OutreachControlsPanel companyId={campaign.company_id} campaignId={campaign.id} />
-                <LeadSchemaEditor campaignId={campaign.id} initialSchema={detail.schema || {}} />
+                <div className="mt-4 grid gap-3" data-voryx-campaign-detail-sections>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">Overview</h3>
+                    <p className="mt-1 text-xs text-zinc-400">{campaign.industry || 'Industry missing'} / {campaign.geographic_area || 'Location missing'} / {campaign.target_audience || 'Target customer missing'}</p>
+                  </section>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">Lead Sheet / Leads</h3>
+                    <LeadSchemaEditor campaignId={campaign.id} initialSchema={detail.schema || {}} />
+                  </section>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">Generated Files</h3>
+                    <LeadOutputsPanel outputs={detail.outputs.outputs || []} rows={detail.outputs.rows || []} />
+                  </section>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">Outreach Control</h3>
+                    <OutreachControlsPanel companyId={campaign.company_id} campaignId={campaign.id} />
+                  </section>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">Drafts</h3>
+                    <p className="mt-1 text-xs text-zinc-400">Draft generation, approval, and internal testing are controlled in Outreach Control above. Prospect sends stay blocked unless readiness passes.</p>
+                  </section>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">Employees</h3>
+                    <div className="mt-2 grid gap-1 text-xs text-zinc-400">{employees.filter((employee) => employee.campaign_id === campaign.id && employee.status !== 'Archived').map((employee) => <div key={employee.id}>{employee.name} / {employee.employee_type} / {employee.status} / {employee.hermes_job_id || 'no Hermes job'}</div>)}</div>
+                  </section>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">Schedule</h3>
+                    <div className="mt-2 grid gap-1 text-xs text-zinc-400">{schedules.filter((schedule) => employees.some((employee) => employee.id === schedule.employee_id && employee.campaign_id === campaign.id)).map((schedule) => <div key={schedule.id}>{schedule.name} / {schedule.is_paused ? 'Paused' : 'Active'} / {schedule.cron} / next <LocalTime value={schedule.next_run_at} /></div>)}</div>
+                  </section>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">Reports</h3>
+                    <p className="mt-1 text-xs text-zinc-400">Daily reports use the approved internal report recipient and durable receipt evidence before they count as sent.</p>
+                  </section>
+                  <ModelPolicyPanel scope="company" companyId={campaign.company_id} title="Model Policy" compact />
+                </div>
               </div>
             );
           })}
