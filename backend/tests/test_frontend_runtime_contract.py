@@ -196,9 +196,10 @@ class FrontendRuntimeContractTests(unittest.TestCase):
 
         self.assertIn("data-voryx-outreach-readiness", source)
         self.assertIn("data-voryx-sender-verification", source)
-        self.assertIn("Enable Prospect Sending", source)
-        self.assertIn("Disable Prospect Sending", source)
-        self.assertIn("Prospect sending is OFF", source)
+        self.assertIn("Send Readiness Workflow", source)
+        self.assertIn("Preview batch", source)
+        self.assertIn("Send controlled batch (dry-run)", source)
+        self.assertIn("Batch Preview", source)
 
     def test_campaign_detail_has_operational_sections(self):
         source = read_frontend("app/campaigns/page.tsx")

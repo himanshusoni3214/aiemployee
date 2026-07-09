@@ -295,6 +295,16 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
     else:
         next_action = "Continue campaign within configured limits."
 
+    lead_highlights: list[dict[str, Any]] = []
+    if latest_lead_file and Path(latest_lead_file).exists():
+        latest_rows, _latest_headers = _read_csv(Path(latest_lead_file))
+        for row in latest_rows[:5]:
+            lead_highlights.append({
+                "business": row.get("business_name") or row.get("Business Name") or row.get("business") or row.get("name") or "",
+                "email": _email(row),
+                "website": row.get("website") or row.get("Website") or row.get("url") or "",
+                "why_fit": row.get("why_fit") or row.get("Why Fit") or row.get("notes") or "Matches the Brew It By Sash lead source.",
+            })
     return {
         "report_date": window.report_date.isoformat(),
         "timezone": window.timezone_name,
@@ -302,30 +312,75 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
         "metrics": metrics,
         "errors_and_blockers": blockers,
         "source_summary": {"lead_files": len(lead_files), "lead_rows_examined": all_lead_rows, "timestamped_lead_rows": timestamped_lead_rows, "legacy_lead_rows_without_timestamps": legacy_lead_rows_without_timestamps, "latest_lead_file": latest_lead_file, "latest_lead_file_rows": latest_lead_file_rows, "latest_lead_file_modified": latest_lead_file_modified, "legacy_latest_file": legacy_latest_file, "legacy_latest_file_rows": legacy_latest_file_rows, "legacy_latest_file_modified": legacy_latest_file_modified},
+        "lead_highlights": lead_highlights,
         "evidence": evidence,
         "next_recommended_action": next_action,
     }
 
 
+def _metric_value(report: dict[str, Any], key: str, default: Any = 0) -> Any:
+    value = (report.get("metrics") or {}).get(key) or {}
+    return value.get("value", default)
+
+
 def render_report(report: dict[str, Any]) -> str:
+    source = report.get("source_summary") or {}
+    evidence = report.get("evidence") or []
+    warnings = report.get("errors_and_blockers") or []
+    latest_file = _metric_value(report, "latest_lead_file", source.get("latest_lead_file") or "none")
+    latest_rows = _metric_value(report, "latest_lead_file_rows", source.get("latest_lead_file_rows") or 0)
+    legacy_rows = _metric_value(report, "legacy_latest_file_rows", source.get("legacy_latest_file_rows") or 0)
+    lead_note = "legacy file lacks row timestamps" if source.get("legacy_latest_file_rows") else "created_at available when present"
     lines = [
-        f"Brew It by Sash Outreach Report - {report['report_date']}",
+        f"Brew It By Sash Daily Outreach Report - {report['report_date']}",
         f"Generated UTC: {report['generated_at']}",
         f"Timezone: {report['timezone']}",
         "",
-        "Metrics",
+        "Executive summary",
+        f"- Leads generated today: {_metric_value(report, 'leads_generated_today', _metric_value(report, 'leads_created_today', 0))}",
+        f"- Latest lead file: {Path(str(latest_file)).name if latest_file else 'none'}",
+        f"- Lead rows in latest file: {latest_rows}",
+        f"- Legacy latest file rows: {legacy_rows} ({lead_note})",
+        f"- Verified leads available: {_metric_value(report, 'verified_leads_available', 0)}",
+        "- Leads approved for outreach: see dashboard Outreach Control",
+        "- Drafts generated: see dashboard Outreach Control",
+        "- Drafts approved: see dashboard Outreach Control",
+        "- Internal tests: see dashboard Outreach Control",
+        f"- Prospect emails sent: {_metric_value(report, 'emails_confirmed_sent_today', 0)}",
+        "- Replies received: not connected",
+        "- Follow-up status: disabled until reply monitor connected",
+        "",
+        "Today's lead highlights",
     ]
-    for key, value in report["metrics"].items():
-        verified = "verified" if value.get("verified") else "unverified"
-        note = f" - {value.get('note')}" if value.get("note") else ""
-        lines.append(f"- {key}: {value.get('value')} ({verified}; source: {value.get('source')}){note}")
-    lines.extend(["", "Errors and blockers"])
-    blockers = report.get("errors_and_blockers") or []
-    lines.extend([f"- {item}" for item in blockers] or ["- none"])
-    lines.extend(["", "Evidence"])
-    for item in report.get("evidence") or []:
-        lines.append(f"- {item['source_file']}: modified={item.get('file_modified_at_utc')} rows_examined={item['rows_examined']} rows_included={item['rows_included']} filter={item['filter_used']} missing_columns={','.join(item.get('missing_columns') or []) or 'none'}")
-    lines.extend(["", f"Next recommended action: {report.get('next_recommended_action')}"])
+    highlights = report.get("lead_highlights") or []
+    if highlights:
+        for item in highlights[:5]:
+            lines.append(f"- {item.get('business') or 'Unknown business'} | {item.get('email') or 'no email'} | {item.get('website') or 'no website'} | {item.get('why_fit') or 'matches campaign source'}")
+    else:
+        lines.append("- No lead highlight rows available in the latest file.")
+    lines.extend([
+        "",
+        "Outreach readiness",
+        "- Sender verified: see dashboard Outreach Control",
+        "- Compliance settings: see dashboard Outreach Control",
+        "- Prospect sending enabled: see dashboard Outreach Control",
+        "- Batch ready: see dashboard Outreach Control",
+        f"- Main blockers: {'; '.join(warnings[:3]) if warnings else 'none'}",
+        "",
+        "Files",
+        f"- Latest lead CSV path: {latest_file}",
+        f"- Latest report path: {source.get('latest_report_path') or 'written artifact path shown in delivery evidence'}",
+        "- Dashboard: https://ops.themealz.com/campaigns?company_id=company-brew-it-by-sash",
+        "",
+        "Technical evidence summary",
+        f"- Evidence records: {len(evidence)}",
+        f"- Rows examined: {source.get('lead_rows_examined', 0)}",
+        f"- Timestamped rows: {source.get('timestamped_lead_rows', 0)}",
+        f"- Warnings count: {len(warnings)}",
+        f"- Evidence file path: {latest_file}.json",
+        "",
+        f"Next recommended action: {report.get('next_recommended_action')}",
+    ])
     return "\n".join(lines) + "\n"
 
 

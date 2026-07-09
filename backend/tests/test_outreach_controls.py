@@ -8,8 +8,10 @@ from app.models.entities import (
     Campaign,
     Company,
     CompanyOutreachSettings,
+    Job,
     LeadApproval,
     OutreachDraft,
+    OutreachEvent,
     Role,
     Status,
     SuppressionEntry,
@@ -17,6 +19,7 @@ from app.models.entities import (
 )
 from app.services.outreach import (
     APPROVED_INTERNAL_RECIPIENT,
+    controlled_batch_preview,
     create_internal_test_event,
     default_outreach_settings,
     generate_draft_for_item,
@@ -25,6 +28,7 @@ from app.services.outreach import (
     upsert_approval,
     validate_outreach_settings,
     outreach_readiness,
+    prepare_controlled_batch,
     sender_verification,
 )
 
@@ -124,6 +128,41 @@ class OutreachControlsTests(unittest.TestCase):
             self.assertTrue(sender_verification('voryxio@gmail.com')['verified'])
             self.assertFalse(readiness['can_enable_prospect_sending'])
             self.assertIn('Prospect sending is OFF', ' '.join(readiness['human_blockers']))
+        finally:
+            db.close()
+
+
+    def test_controlled_batch_preview_and_prepare_are_dry_run_only(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            settings = CompanyOutreachSettings(company_id=company.id, **{k: v for k, v in default_outreach_settings(company.id).items() if k != 'company_id'})
+            settings.sender_name = 'Voryx'
+            settings.sender_email = 'voryxio@gmail.com'
+            settings.reply_to_email = 'voryxio@gmail.com'
+            settings.physical_mailing_address = '123 QA St'
+            settings.compliance_acknowledged = True
+            settings.prospect_sending_enabled = True
+            settings.allowed_sending_days = []
+            settings.allowed_sending_hours = {'start': '00:00', 'end': '23:59'}
+            db.add(settings)
+            approval = LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach')
+            draft = OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP.', status='draft_approved')
+            db.add_all([approval, draft]); db.flush()
+
+            preview = controlled_batch_preview(db, campaign)
+            self.assertEqual(preview['coverage']['approved_leads'], 1)
+            self.assertEqual(preview['coverage']['approved_drafts'], 1)
+            self.assertEqual(preview['coverage']['ready_to_send'], 1)
+            self.assertEqual(preview['prospect_emails_sent'], 0)
+            self.assertTrue(preview['can_send_controlled_batch'])
+
+            prepared = prepare_controlled_batch(db, campaign, user.id, dry_run=True)
+            self.assertEqual(prepared['prospect_emails_sent'], 0)
+            self.assertEqual(db.query(OutreachEvent).filter(OutreachEvent.status == 'prepared_dry_run').count(), 1)
+            self.assertEqual(db.query(Job).filter(Job.task_type == 'Controlled Outreach Batch').count(), 1)
+            with self.assertRaises(ValueError):
+                prepare_controlled_batch(db, campaign, user.id, dry_run=False)
         finally:
             db.close()
 

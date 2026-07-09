@@ -311,7 +311,7 @@ def _execute_daily_report(task_type: str, payload: dict[str, Any]) -> dict[str, 
     if not report_path.exists():
         return _failed("Daily Report generation did not create the expected report file", logs=_logs_from_completed_process(result))
 
-    subject = payload.get("subject") or f"Brew It By Sash Daily Report - {report_date}"
+    subject = payload.get("subject") or f"Brew It By Sash Daily Outreach Report - {report_date}"
     request_id = f"voryx-scheduled-report-{report_date}-{uuid.uuid4().hex[:10]}"
     request_path = _write_mail_request(request_id, recipient, str(subject), report_path, report_date)
     mail_result = _process_one_internal_mail()

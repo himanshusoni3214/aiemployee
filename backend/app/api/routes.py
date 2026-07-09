@@ -49,6 +49,7 @@ from app.services.template_provisioning import (
 )
 from app.services.outreach import (
     APPROVED_INTERNAL_RECIPIENT as OUTREACH_INTERNAL_RECIPIENT,
+    controlled_batch_preview,
     create_internal_test_event,
     default_outreach_settings,
     draft_to_payload,
@@ -57,6 +58,7 @@ from app.services.outreach import (
     outreach_readiness,
     lead_key_for,
     reply_monitor_status,
+    prepare_controlled_batch,
     review_items_from_rows,
     send_blockers,
     settings_payload,
@@ -661,7 +663,13 @@ def put_company_outreach_settings(company_id: str, payload: dict=Body(...), db: 
     blockers = validate_outreach_settings(settings, prospect=True)
     log(db, 'Company Outreach Settings Updated', 'Company', company.id, company.id, user.id, {'blocking_reasons': blockers})
     db.commit(); db.refresh(settings)
-    return settings_payload(settings, company_id)
+    rendered = settings_payload(settings, company_id)
+    workspace_path = write_outreach_workspace_config(company_id, rendered)
+    rendered['workspace_path'] = workspace_path
+    if workspace_path:
+        write_outreach_workspace_config(company_id, rendered)
+    rendered['hermes_sync'] = sync_outreach_settings_to_hermes(company_id, rendered)
+    return rendered
 
 
 @router.get('/companies/{company_id}/suppression')
@@ -813,9 +821,30 @@ def outreach_send_status(campaign_id: str, db: Session=Depends(get_db), user: Us
     drafts = db.scalars(select(OutreachDraft).where(OutreachDraft.campaign_id == campaign.id)).all()
     readiness = outreach_readiness(db, campaign, settings, drafts)
     blockers = validate_outreach_settings(settings, prospect=True)
-    return {'campaign_id': campaign.id, 'settings': settings_payload(settings, campaign.company_id), 'approved_drafts': sum(1 for d in drafts if d.status == 'draft_approved'), 'prospect_send_blockers': blockers, 'human_blockers': readiness['human_blockers'], 'readiness': readiness}
+    preview = controlled_batch_preview(db, campaign)
+    return {'campaign_id': campaign.id, 'settings': settings_payload(settings, campaign.company_id), 'approved_drafts': sum(1 for d in drafts if d.status == 'draft_approved'), 'prospect_send_blockers': blockers, 'human_blockers': readiness['human_blockers'], 'readiness': readiness, 'batch_preview': preview}
 
 
+@router.get('/campaigns/{campaign_id}/outreach/preview-batch')
+def preview_controlled_outreach_batch(campaign_id: str, limit: int|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    return controlled_batch_preview(db, campaign, limit=limit)
+
+
+@router.post('/campaigns/{campaign_id}/outreach/send-controlled-batch')
+def send_controlled_outreach_batch(campaign_id: str, payload: dict=Body(default={}), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    dry_run = payload.get('dry_run', True) is not False
+    limit = payload.get('limit')
+    try:
+        result = prepare_controlled_batch(db, campaign, user.id, limit=int(limit) if limit is not None else None, dry_run=dry_run)
+    except ValueError as exc:
+        raise HTTPException(400, {'message': str(exc), 'preview': controlled_batch_preview(db, campaign, limit=int(limit) if limit is not None else None), 'prospect_emails_sent': 0}) from exc
+    log(db, 'Controlled Batch Prepared', 'Campaign', campaign.id, campaign.company_id, user.id, {'batch_id': result.get('batch_id'), 'job_id': result.get('job_id'), 'prospect_emails_sent': 0, 'dry_run': True})
+    db.commit()
+    return {'ok': True, 'status': 'prepared_dry_run', 'message': 'Controlled batch prepared in dry-run mode. No prospect email was sent.', 'prospect_emails_sent': 0, 'result': result}
 
 
 @router.post('/campaigns/{campaign_id}/outreach-send/prospect-sending')
@@ -1427,7 +1456,7 @@ def create_daily_report(data: DailyReportRequest, db: Session=Depends(get_db), u
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from exc
         try:
-            subject = f"Brew It by Sash Outreach Report - {report['report_date']}"
+            subject = f"Brew It By Sash Daily Outreach Report - {report['report_date']}"
             delivery_job, queued = enqueue_daily_report_delivery(
                 db,
                 recipient=recipient,
