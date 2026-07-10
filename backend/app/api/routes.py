@@ -49,6 +49,9 @@ from app.services.template_provisioning import (
 )
 from app.services.outreach import (
     APPROVED_INTERNAL_RECIPIENT as OUTREACH_INTERNAL_RECIPIENT,
+    SEND_MODE_DRY_RUN,
+    SEND_MODE_REAL_PROSPECT,
+    bulk_update_drafts,
     controlled_batch_preview,
     create_internal_test_event,
     default_outreach_settings,
@@ -59,6 +62,7 @@ from app.services.outreach import (
     lead_key_for,
     reply_monitor_status,
     prepare_controlled_batch,
+    send_real_controlled_batch,
     review_items_from_rows,
     send_blockers,
     settings_payload,
@@ -760,6 +764,25 @@ def generate_outreach_drafts(campaign_id: str, db: Session=Depends(get_db), user
     return {'ok': True, 'created': len(created), 'skipped': skipped, 'drafts': [draft_to_payload(draft) for draft in created], 'prospect_emails_sent': 0}
 
 
+@router.post('/campaigns/{campaign_id}/outreach-drafts/bulk-action')
+def bulk_outreach_draft_action(campaign_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    try:
+        result = bulk_update_drafts(
+            db,
+            campaign,
+            user.id,
+            action=str(payload.get('action') or ''),
+            draft_ids=[str(item) for item in (payload.get('draft_ids') or [])],
+        )
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    log(db, 'Outreach Drafts Bulk Updated', 'Campaign', campaign.id, campaign.company_id, user.id, result)
+    db.commit()
+    return result
+
+
 @router.put('/outreach-drafts/{draft_id}')
 def update_outreach_draft(draft_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
     draft = db.get(OutreachDraft, draft_id)
@@ -836,15 +859,28 @@ def preview_controlled_outreach_batch(campaign_id: str, limit: int|None=None, db
 def send_controlled_outreach_batch(campaign_id: str, payload: dict=Body(default={}), db: Session=Depends(get_db), user: User=Depends(require_write)):
     campaign = db.get(Campaign, campaign_id)
     if not campaign: raise HTTPException(404, 'Campaign not found')
-    dry_run = payload.get('dry_run', True) is not False
+    mode = str(payload.get('mode') or (SEND_MODE_DRY_RUN if payload.get('dry_run', True) is not False else SEND_MODE_REAL_PROSPECT))
     limit = payload.get('limit')
     try:
-        result = prepare_controlled_batch(db, campaign, user.id, limit=int(limit) if limit is not None else None, dry_run=dry_run)
+        if mode == SEND_MODE_REAL_PROSPECT:
+            result = send_real_controlled_batch(
+                db,
+                campaign,
+                user.id,
+                limit=int(limit) if limit is not None else None,
+                confirmation=str(payload.get('confirmation') or ''),
+                send_one=bool(payload.get('send_one')),
+            )
+            log(db, 'Controlled Real Prospect Send', 'Campaign', campaign.id, campaign.company_id, user.id, {'batch_id': result.get('batch_id'), 'sent_count': result.get('sent_count'), 'failed_count': result.get('failed_count'), 'send_one': bool(payload.get('send_one'))})
+            db.commit()
+            return {'ok': True, 'status': 'sent' if result.get('sent_count') else 'provider_pending', 'message': 'Controlled prospect send completed with provider receipt evidence.', 'prospect_emails_sent': result.get('sent_count', 0), 'result': result}
+        result = prepare_controlled_batch(db, campaign, user.id, limit=int(limit) if limit is not None else None, dry_run=True)
     except ValueError as exc:
+        db.rollback()
         raise HTTPException(400, {'message': str(exc), 'preview': controlled_batch_preview(db, campaign, limit=int(limit) if limit is not None else None), 'prospect_emails_sent': 0}) from exc
     log(db, 'Controlled Batch Prepared', 'Campaign', campaign.id, campaign.company_id, user.id, {'batch_id': result.get('batch_id'), 'job_id': result.get('job_id'), 'prospect_emails_sent': 0, 'dry_run': True})
     db.commit()
-    return {'ok': True, 'status': 'prepared_dry_run', 'message': 'Controlled batch prepared in dry-run mode. No prospect email was sent.', 'prospect_emails_sent': 0, 'result': result}
+    return {'ok': True, 'status': 'prepared_dry_run', 'message': 'Dry-run prepared. No prospect email was sent. Next: Send 1 real email or Send controlled batch.', 'prospect_emails_sent': 0, 'result': result}
 
 
 @router.post('/campaigns/{campaign_id}/outreach-send/prospect-sending')

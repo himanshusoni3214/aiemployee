@@ -16,6 +16,7 @@ DATA_ROOT = Path(os.environ.get("HERMES_DATA_ROOT", "/opt/data"))
 CONTAINER_DATA_ROOT = Path(os.environ.get("HERMES_CONTAINER_DATA_ROOT", "/opt/data"))
 QUEUE_ROOT = DATA_ROOT / "home" / "voryx_mail_queue"
 ALLOWED_RECIPIENT = "himanshusoni3214@gmail.com"
+APPROVED_OUTREACH_SENDERS = {"voryxio@gmail.com"}
 DEFAULT_MESSAGE_DOMAIN = "voryx.ca"
 
 
@@ -68,8 +69,12 @@ def request_artifact_path(request: dict[str, Any]) -> Path:
 
 
 def validate_request(request: dict[str, Any]) -> None:
-    if request.get("kind") != "daily_report":
-        raise ValueError("only daily_report requests are allowed")
+    kind = request.get("kind")
+    if kind == "controlled_outreach":
+        validate_controlled_outreach_request(request)
+        return
+    if kind != "daily_report":
+        raise ValueError("only daily_report and controlled_outreach requests are allowed")
     for disallowed in ("cc", "bcc", "recipients"):
         if request.get(disallowed):
             raise ValueError(f"{disallowed} is not allowed")
@@ -81,14 +86,40 @@ def validate_request(request: dict[str, Any]) -> None:
         raise ValueError(f"artifact_path does not exist: {artifact}")
 
 
+def validate_controlled_outreach_request(request: dict[str, Any]) -> None:
+    for disallowed in ("cc", "bcc", "recipients"):
+        if request.get(disallowed):
+            raise ValueError(f"{disallowed} is not allowed")
+    recipient = normalize_recipient(request.get("recipient"))
+    if not recipient or "@" not in recipient:
+        raise ValueError("controlled outreach requires exactly one recipient")
+    sender = str(request.get("sender_email") or "").strip().lower()
+    if sender not in APPROVED_OUTREACH_SENDERS:
+        raise ValueError(f"sender_profile_missing: {sender or 'none'} is not approved")
+    reply_to = str(request.get("reply_to_email") or sender).strip().lower()
+    if reply_to not in APPROVED_OUTREACH_SENDERS and reply_to != ALLOWED_RECIPIENT:
+        raise ValueError(f"reply_to_email_not_approved: {reply_to or 'none'}")
+    if not str(request.get("subject") or "").strip():
+        raise ValueError("controlled outreach subject is required")
+    body = str(request.get("body") or "")
+    unsubscribe = str(request.get("unsubscribe_text") or "").strip()
+    if not body.strip():
+        raise ValueError("controlled outreach body is required")
+    if not unsubscribe or unsubscribe not in body:
+        raise ValueError("controlled outreach body must include unsubscribe text")
+    if not request.get("event_id"):
+        raise ValueError("controlled outreach requires event_id")
+
+
 def compose_message(request: dict[str, Any], message_id: str, message_path: Path) -> None:
-    artifact = request_artifact_path(request)
-    body = artifact.read_text(encoding="utf-8", errors="replace")
+    kind = request.get("kind")
+    if kind == "controlled_outreach":
+        body = str(request.get("body") or "")
+    else:
+        artifact = request_artifact_path(request)
+        body = artifact.read_text(encoding="utf-8", errors="replace")
     message = EmailMessage()
-    sender = os.environ.get(
-        "VORYX_INTERNAL_REPORT_FROM",
-        "voryxio@gmail.com",
-    ).strip()
+    sender = str(request.get("sender_email") or os.environ.get("VORYX_INTERNAL_REPORT_FROM", "voryxio@gmail.com")).strip()
     if (
         not sender
         or "@" not in sender
@@ -99,7 +130,10 @@ def compose_message(request: dict[str, Any], message_id: str, message_path: Path
             "VORYX_INTERNAL_REPORT_FROM must contain exactly one email address"
         )
     message["From"] = sender
-    message["To"] = ALLOWED_RECIPIENT
+    message["To"] = normalize_recipient(request.get("recipient"))
+    reply_to = str(request.get("reply_to_email") or sender).strip()
+    if reply_to:
+        message["Reply-To"] = reply_to
     message["Subject"] = str(request.get("subject") or f"Voryx Daily Report - {request.get('report_date') or ''}").strip()
     message["Date"] = format_datetime(utc_now())
     message["Message-ID"] = message_id
@@ -204,11 +238,20 @@ def write_success(request: dict[str, Any], message_id: str, sent_at: str, sent_f
         "job_id": request.get("job_id"),
         "status": "sent",
         "delivery_status": "sent",
-        "recipient": ALLOWED_RECIPIENT,
+        "recipient": normalize_recipient(request.get("recipient")),
         "subject": request.get("subject"),
         "provider_message_id": message_id,
         "sent_at": sent_at,
         "sender": "himalaya",
+        "sender_email": str(request.get("sender_email") or "voryxio@gmail.com").strip().lower(),
+        "reply_to_email": str(request.get("reply_to_email") or "").strip().lower(),
+        "kind": request.get("kind"),
+        "campaign_id": request.get("campaign_id"),
+        "company_id": request.get("company_id"),
+        "event_id": request.get("event_id"),
+        "lead_key": request.get("lead_key"),
+        "draft_id": request.get("draft_id"),
+        "batch_id": request.get("batch_id"),
         "exit_code": 0,
         "sent_folder_verified": sent_folder_verified,
         "evidence_type": "rfc_message_id",

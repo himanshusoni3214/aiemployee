@@ -8,11 +8,14 @@ from typing import Any
 from zoneinfo import ZoneInfo
 
 from app.core.config import settings
+from app.core.db import SessionLocal
+from app.models.entities import LeadApproval, OutreachDraft, OutreachEvent
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, provider_message_id_from_output, validate_report_recipient
 
 TORONTO = "America/Toronto"
 SUCCESS_STATUSES = {"sent", "delivered", "accepted", "queued_by_provider"}
 MESSAGE_ID_KEYS = {"message_id", "smtp_id", "smtp_response", "provider_message_id", "receipt_id"}
+BIBS_COMPANY_ID = "company-brew-it-by-sash"
 
 
 @dataclass(frozen=True)
@@ -119,6 +122,34 @@ def _file_evidence(path: Path, rows_examined: int, rows_included: int, filter_us
 
 def _metric(value: Any, verified: bool, source: str, note: str = "") -> dict[str, Any]:
     return {"value": value, "verified": verified, "source": source, "note": note}
+
+
+def _db_outreach_metrics(window: DayWindow) -> dict[str, Any]:
+    db = SessionLocal()
+    try:
+        start = window.utc_start.replace(tzinfo=None)
+        end = window.utc_end.replace(tzinfo=None)
+        events = db.query(OutreachEvent).filter(OutreachEvent.company_id == BIBS_COMPANY_ID).all()
+        real_sent = [e for e in events if e.status in {"sent", "delivered", "accepted"} and e.message_id and e.sent_at and start <= e.sent_at <= end and not e.dry_run]
+        dry_runs = [e for e in events if e.status == "prepared_dry_run" and e.created_at and start <= e.created_at <= end]
+        internal = [e for e in events if e.status in {"internal_test_prepared", "internal_test_sent"} and e.created_at and start <= e.created_at <= end]
+        approved_leads = db.query(LeadApproval).filter(LeadApproval.company_id == BIBS_COMPANY_ID, LeadApproval.state == "approved_for_outreach").count()
+        approved_drafts = db.query(OutreachDraft).filter(OutreachDraft.company_id == BIBS_COMPANY_ID, OutreachDraft.status == "draft_approved").count()
+        generated_drafts = db.query(OutreachDraft).filter(OutreachDraft.company_id == BIBS_COMPANY_ID).count()
+        return {
+            "real_emails_sent_today": len(real_sent),
+            "real_message_ids": [e.message_id for e in real_sent],
+            "dry_runs_prepared_today": len(dry_runs),
+            "internal_tests_today": len(internal),
+            "approved_leads": approved_leads,
+            "drafts_generated": generated_drafts,
+            "drafts_approved": approved_drafts,
+            "ready_to_send": min(approved_leads, approved_drafts),
+        }
+    except Exception as exc:
+        return {"error": str(exc)}
+    finally:
+        db.close()
 
 
 def _email(row: dict[str, Any]) -> str:
@@ -269,6 +300,7 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
     if unverified_sent_rows:
         blockers.append(f"{unverified_sent_rows} legacy sent rows were excluded because they lack durable message_id/receipt evidence.")
 
+    db_metrics = _db_outreach_metrics(window)
     metrics = {
         "leads_generated_today": _metric(leads_created_today, True, "new lead CSV created_at", "legacy files without row timestamps excluded" if legacy_lead_rows_without_timestamps else ""),
         "leads_created_today": _metric(leads_created_today, True, "new lead CSV created_at", "legacy files without row timestamps excluded" if legacy_lead_rows_without_timestamps else ""),
@@ -282,12 +314,21 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
         "verified_leads_available": _metric(len(verified_available_emails), True, "current verified lead CSVs"),
         "outreach_attempts_today": _metric(attempts_today, True, "structured outreach events and legacy outreach_log.csv timestamps"),
         "emails_confirmed_sent_today": _metric(sent_today, True, "success status plus durable message_id/receipt"),
+        "real_emails_sent_today": _metric(db_metrics.get("real_emails_sent_today", sent_today), True, "PostgreSQL OutreachEvent receipts with message_id"),
+        "dry_runs_prepared_today": _metric(db_metrics.get("dry_runs_prepared_today", 0), True, "PostgreSQL prepared_dry_run OutreachEvent rows"),
+        "internal_tests_today": _metric(db_metrics.get("internal_tests_today", 0), True, "PostgreSQL internal test OutreachEvent rows"),
+        "approved_leads": _metric(db_metrics.get("approved_leads", "see dashboard"), "error" not in db_metrics, "PostgreSQL lead approvals"),
+        "drafts_generated": _metric(db_metrics.get("drafts_generated", "see dashboard"), "error" not in db_metrics, "PostgreSQL outreach drafts"),
+        "drafts_approved": _metric(db_metrics.get("drafts_approved", "see dashboard"), "error" not in db_metrics, "PostgreSQL approved outreach drafts"),
+        "ready_to_send": _metric(db_metrics.get("ready_to_send", "see dashboard"), "error" not in db_metrics, "approved leads with approved drafts"),
         "emails_skipped_today": _metric(skipped_today, True, "outreach status rows"),
         "emails_failed_today": _metric(failed_today, True, "outreach status rows"),
         "replies_received_today": _metric("Unverified", False, "no structured reply source"),
         "positive_replies": _metric("Unverified", False, "no structured reply classification source"),
         "meetings_booked": _metric("Unverified", False, "no structured meeting source"),
     }
+    if db_metrics.get("error"):
+        blockers.append(f"Dashboard outreach metrics unavailable: {db_metrics['error']}")
     if sent_today == 0:
         next_action = "Do not report sent-email volume until outreach logging includes durable message IDs; use dry-run/internal test first."
     elif blockers:
@@ -312,6 +353,7 @@ def generate_daily_report(report_date: str | None = None, data_path: str | None 
         "metrics": metrics,
         "errors_and_blockers": blockers,
         "source_summary": {"lead_files": len(lead_files), "lead_rows_examined": all_lead_rows, "timestamped_lead_rows": timestamped_lead_rows, "legacy_lead_rows_without_timestamps": legacy_lead_rows_without_timestamps, "latest_lead_file": latest_lead_file, "latest_lead_file_rows": latest_lead_file_rows, "latest_lead_file_modified": latest_lead_file_modified, "legacy_latest_file": legacy_latest_file, "legacy_latest_file_rows": legacy_latest_file_rows, "legacy_latest_file_modified": legacy_latest_file_modified},
+        "outreach_status": db_metrics,
         "lead_highlights": lead_highlights,
         "evidence": evidence,
         "next_recommended_action": next_action,
@@ -331,6 +373,7 @@ def render_report(report: dict[str, Any]) -> str:
     latest_rows = _metric_value(report, "latest_lead_file_rows", source.get("latest_lead_file_rows") or 0)
     legacy_rows = _metric_value(report, "legacy_latest_file_rows", source.get("legacy_latest_file_rows") or 0)
     lead_note = "legacy file lacks row timestamps" if source.get("legacy_latest_file_rows") else "created_at available when present"
+    outreach_status = report.get("outreach_status") or {}
     lines = [
         f"Brew It By Sash Daily Outreach Report - {report['report_date']}",
         f"Generated UTC: {report['generated_at']}",
@@ -342,11 +385,14 @@ def render_report(report: dict[str, Any]) -> str:
         f"- Lead rows in latest file: {latest_rows}",
         f"- Legacy latest file rows: {legacy_rows} ({lead_note})",
         f"- Verified leads available: {_metric_value(report, 'verified_leads_available', 0)}",
-        "- Leads approved for outreach: see dashboard Outreach Control",
-        "- Drafts generated: see dashboard Outreach Control",
-        "- Drafts approved: see dashboard Outreach Control",
-        "- Internal tests: see dashboard Outreach Control",
-        f"- Prospect emails sent: {_metric_value(report, 'emails_confirmed_sent_today', 0)}",
+        f"- Leads approved for outreach: {_metric_value(report, 'approved_leads', 'see dashboard')}",
+        f"- Drafts generated: {_metric_value(report, 'drafts_generated', 'see dashboard')}",
+        f"- Drafts approved: {_metric_value(report, 'drafts_approved', 'see dashboard')}",
+        f"- Ready to send: {_metric_value(report, 'ready_to_send', 'see dashboard')}",
+        f"- Dry-runs prepared today: {_metric_value(report, 'dry_runs_prepared_today', 0)}",
+        f"- Internal tests prepared/sent today: {_metric_value(report, 'internal_tests_today', 0)}",
+        f"- Prospect emails sent: {_metric_value(report, 'real_emails_sent_today', _metric_value(report, 'emails_confirmed_sent_today', 0))}",
+        f"- Message IDs: {', '.join(outreach_status.get('real_message_ids') or []) or 'none'}",
         "- Replies received: not connected",
         "- Follow-up status: disabled until reply monitor connected",
         "",

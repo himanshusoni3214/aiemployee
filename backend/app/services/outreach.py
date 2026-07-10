@@ -27,6 +27,11 @@ from app.core.config import settings
 from app.services.hermes_control import HermesControlService
 from app.services.model_policy import guard_hermes_execution
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, normalize_email
+from app.services.internal_mail_queue import (
+    enqueue_controlled_outreach_delivery,
+    ingest_internal_mail_receipts,
+    process_one_mail_request,
+)
 
 LEAD_STATES = {
     "new",
@@ -44,6 +49,11 @@ DRAFT_STATES = {"draft_created", "draft_needs_review", "draft_approved", "draft_
 FOLLOWUP_DISABLED_REASON = "Follow-up Manager is disabled until Reply Monitor/Gmail threading is connected for this company."
 APPROVED_INTERNAL_RECIPIENT = INTERNAL_REPORT_RECIPIENT
 APPROVED_SENDER_EMAILS = {APPROVED_INTERNAL_RECIPIENT, "voryxio@gmail.com"}
+SEND_MODE_DRY_RUN = "dry_run_prepare"
+SEND_MODE_INTERNAL_TEST = "internal_test"
+SEND_MODE_REAL_PROSPECT = "real_prospect_send"
+CONFIRM_SEND_ONE = "SEND 1 REAL EMAIL"
+CONFIRM_SEND_BATCH = "SEND CONTROLLED BATCH"
 
 
 def utc_now() -> datetime:
@@ -232,7 +242,6 @@ def validate_outreach_settings(settings: CompanyOutreachSettings | dict[str, Any
         "unsubscribe_text",
         "daily_send_limit",
         "hourly_send_limit",
-        "allowed_sending_days",
         "allowed_sending_hours",
         "timezone",
     ]
@@ -382,6 +391,63 @@ def draft_to_payload(draft: OutreachDraft) -> dict[str, Any]:
     }
 
 
+def bulk_update_drafts(
+    db: Session,
+    campaign: Campaign,
+    user_id: str,
+    *,
+    action: str,
+    draft_ids: list[str] | None = None,
+) -> dict[str, Any]:
+    action = action.strip().lower()
+    drafts = db.scalars(select(OutreachDraft).where(OutreachDraft.campaign_id == campaign.id)).all()
+    selected = [draft for draft in drafts if not draft_ids or draft.id in set(draft_ids)]
+    if action == "approve_all_generated":
+        approvals = {
+            item.lead_key
+            for item in db.scalars(select(LeadApproval).where(LeadApproval.campaign_id == campaign.id, LeadApproval.state == "approved_for_outreach")).all()
+        }
+        selected = [draft for draft in drafts if draft.lead_key in approvals and draft.status not in {"draft_approved", "draft_rejected"}]
+        action = "approve_selected"
+    now = utc_now()
+    updated: list[str] = []
+    created: list[str] = []
+    for draft in selected:
+        if action == "approve_selected":
+            draft.status = "draft_approved"
+            draft.approved_by = user_id
+            draft.approved_at = now
+            draft.updated_at = now
+            updated.append(draft.id)
+        elif action == "reject_selected":
+            draft.status = "draft_rejected"
+            draft.updated_at = now
+            updated.append(draft.id)
+        elif action == "regenerate_selected":
+            latest_version = max([item.version or 1 for item in drafts if item.lead_key == draft.lead_key] or [1])
+            regenerated = OutreachDraft(
+                company_id=draft.company_id,
+                campaign_id=draft.campaign_id,
+                employee_id=draft.employee_id,
+                hermes_job_id=draft.hermes_job_id,
+                source_run_id=draft.source_run_id,
+                lead_key=draft.lead_key,
+                lead_email=draft.lead_email,
+                business=draft.business,
+                subject=draft.subject,
+                body=draft.body,
+                status="draft_needs_review",
+                version=latest_version + 1,
+                raw={**(draft.raw or {}), "regenerated_from": draft.id, "regenerated_by": user_id},
+            )
+            db.add(regenerated)
+            db.flush()
+            created.append(regenerated.id)
+        else:
+            raise ValueError(f"Unsupported draft bulk action: {action}")
+    return {"ok": True, "action": action, "updated": len(updated), "created": len(created), "draft_ids": updated, "created_draft_ids": created, "prospect_emails_sent": 0}
+
+
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -503,13 +569,14 @@ def _batch_snapshot(db: Session, campaign: Campaign, *, limit: int | None = None
         if reasons:
             blocked.append({"lead_key": approval.lead_key, "business": approval.business, "email": email, "reasons": reasons})
             continue
-        recipients.append({"lead_key": approval.lead_key, "draft_id": draft.id, "business": draft.business or approval.business, "email": email, "subject": draft.subject, "body_preview": draft.body[:500], "sender_email": settings_data.get("sender_email"), "reply_to_email": settings_data.get("reply_to_email"), "unsubscribe_text": settings_data.get("unsubscribe_text")})
+        recipients.append({"lead_key": approval.lead_key, "draft_id": draft.id, "business": draft.business or approval.business, "email": email, "subject": draft.subject, "body": draft.body, "body_preview": draft.body[:500], "sender_email": settings_data.get("sender_email"), "reply_to_email": settings_data.get("reply_to_email"), "unsubscribe_text": settings_data.get("unsubscribe_text")})
     approved_drafts = sum(1 for draft in drafts if draft.status == "draft_approved")
     draft_lead_keys = {draft.lead_key for draft in drafts}
     approved_without_drafts = [approval for approval in approvals if approval.state == "approved_for_outreach" and approval.lead_key not in draft_lead_keys]
     max_batch = min(counts["daily_remaining"], counts["hourly_remaining"], _safe_int(limit, counts["daily_remaining"]) if limit is not None else counts["daily_remaining"])
     selected = recipients[:max(0, max_batch)]
-    return {"campaign_id": campaign.id, "company_id": campaign.company_id, "mode": "dry_run_prepared", "prospect_emails_sent": 0, "sender": sender, "settings": {"sender_email": settings_data.get("sender_email"), "reply_to_email": settings_data.get("reply_to_email"), "unsubscribe_text": settings_data.get("unsubscribe_text"), "prospect_sending_enabled": settings_data.get("prospect_sending_enabled")}, "window": window, "limits": counts, "model_guard": model_guard, "hermes_guard": {"mode": "jobs_json", "employee_id": getattr(employee, "id", None), "hermes_job_id": getattr(employee, "hermes_job_id", None), "allowed": model_guard.get("allowed")}, "coverage": {"total_leads": len(approvals), "approved_leads": approved_leads, "drafts_generated": len(drafts), "approved_drafts": approved_drafts, "approved_leads_without_drafts": len(approved_without_drafts), "ready_to_send": len(recipients), "selected_for_batch": len(selected), "blocked_recipients": len(blocked)}, "recipients": selected, "eligible_recipients": recipients, "blocked_recipients": blocked, "blockers": list(dict.fromkeys(blockers)), "can_send_controlled_batch": bool(settings_data.get("prospect_sending_enabled") and sender.get("verified") and window.get("allowed") and counts["daily_remaining"] > 0 and counts["hourly_remaining"] > 0 and model_guard.get("allowed") and selected)}
+    can_send = bool(settings_data.get("prospect_sending_enabled") and sender.get("verified") and window.get("allowed") and counts["daily_remaining"] > 0 and counts["hourly_remaining"] > 0 and model_guard.get("allowed") and selected)
+    return {"campaign_id": campaign.id, "company_id": campaign.company_id, "mode": SEND_MODE_DRY_RUN, "available_modes": [SEND_MODE_DRY_RUN, SEND_MODE_INTERNAL_TEST, SEND_MODE_REAL_PROSPECT], "confirmation_required": {"send_one": CONFIRM_SEND_ONE, "batch": CONFIRM_SEND_BATCH}, "prospect_emails_sent": 0, "sender": sender, "settings": {"sender_email": settings_data.get("sender_email"), "reply_to_email": settings_data.get("reply_to_email"), "unsubscribe_text": settings_data.get("unsubscribe_text"), "prospect_sending_enabled": settings_data.get("prospect_sending_enabled")}, "window": window, "limits": counts, "model_guard": model_guard, "hermes_guard": {"mode": "jobs_json", "employee_id": getattr(employee, "id", None), "hermes_job_id": getattr(employee, "hermes_job_id", None), "allowed": model_guard.get("allowed")}, "coverage": {"total_leads": len(approvals), "approved_leads": approved_leads, "drafts_generated": len(drafts), "approved_drafts": approved_drafts, "approved_leads_without_drafts": len(approved_without_drafts), "pending_draft_approval": max(0, len(drafts) - approved_drafts - sum(1 for draft in drafts if draft.status == "draft_rejected")), "ready_to_send": len(recipients), "selected_for_batch": len(selected), "blocked_recipients": len(blocked)}, "recipients": selected, "eligible_recipients": recipients, "blocked_recipients": blocked, "blockers": list(dict.fromkeys(blockers)), "can_send_one_real_email": bool(can_send and selected), "can_send_controlled_batch": can_send}
 
 
 def controlled_batch_preview(db: Session, campaign: Campaign, *, limit: int | None = None) -> dict[str, Any]:
@@ -541,6 +608,114 @@ def prepare_controlled_batch(db: Session, campaign: Campaign, user_id: str, *, l
     snapshot["evidence_path"] = evidence_path
     snapshot["prepared_event_ids"] = prepared
     return snapshot
+
+
+def _write_send_evidence(company_id: str, campaign_id: str, batch_id: str, evidence: dict[str, Any]) -> str | None:
+    path = _workspace_evidence_path(company_id, campaign_id, batch_id)
+    if path:
+        Path(path).write_text(json.dumps(evidence, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    return path
+
+
+def send_real_controlled_batch(
+    db: Session,
+    campaign: Campaign,
+    user_id: str,
+    *,
+    limit: int | None = None,
+    confirmation: str,
+    send_one: bool = False,
+    process_now: bool = True,
+) -> dict[str, Any]:
+    expected = CONFIRM_SEND_ONE if send_one else CONFIRM_SEND_BATCH
+    if confirmation != expected:
+        raise ValueError(f"real_send_confirmed required: type {expected}")
+    snapshot = _batch_snapshot(db, campaign, limit=1 if send_one else limit)
+    if not snapshot["can_send_controlled_batch"]:
+        raise ValueError("Controlled real send blocked: " + "; ".join(snapshot["blockers"] or ["no eligible recipients"]))
+    recipients = snapshot["recipients"][:1] if send_one else snapshot["recipients"]
+    if send_one and len(recipients) != 1:
+        raise ValueError("Send 1 real email requires exactly one eligible recipient")
+    now = utc_now()
+    batch_id = f"real-batch-{campaign.id}-{int(now.timestamp())}"
+    prepared_events: list[str] = []
+    queued_jobs: list[str] = []
+    queued: list[dict[str, Any]] = []
+    for item in recipients:
+        event_id = f"{batch_id}-{item['lead_key']}"
+        event = OutreachEvent(
+            event_id=event_id,
+            campaign_id=campaign.id,
+            company_id=campaign.company_id,
+            employee_id=snapshot.get("hermes_guard", {}).get("employee_id"),
+            lead_id=None,
+            recipient=item["email"],
+            business=item.get("business"),
+            subject=item.get("subject"),
+            attempted_at=now,
+            sent_at=None,
+            status="queued_by_provider",
+            message_id=None,
+            provider="himalaya",
+            dry_run=False,
+            raw={"batch_id": batch_id, "draft_id": item.get("draft_id"), "requested_by": user_id, "send_mode": SEND_MODE_REAL_PROSPECT, "confirmation": expected},
+        )
+        db.add(event)
+        db.flush()
+        job, queued_info = enqueue_controlled_outreach_delivery(
+            db,
+            campaign_id=campaign.id,
+            company_id=campaign.company_id,
+            employee_id=snapshot.get("hermes_guard", {}).get("employee_id"),
+            lead_key=item["lead_key"],
+            draft_id=item["draft_id"],
+            recipient=item["email"],
+            business=item.get("business"),
+            subject=item.get("subject") or "",
+            body=item.get("body") or item.get("body_preview") or "",
+            sender_email=item.get("sender_email") or "",
+            reply_to_email=item.get("reply_to_email") or "",
+            unsubscribe_text=item.get("unsubscribe_text") or "",
+            requested_by=user_id,
+            batch_id=batch_id,
+            event_id=event_id,
+        )
+        prepared_events.append(event_id)
+        queued_jobs.append(job.id)
+        queued.append({"event_id": event_id, "job_id": job.id, "recipient": item["email"], "request_path": queued_info["request_path"]})
+    db.flush()
+    process_result = None
+    if process_now:
+        process_result = process_one_mail_request()
+        ingest_internal_mail_receipts(db)
+    sent_events = db.scalars(select(OutreachEvent).where(OutreachEvent.event_id.in_(prepared_events))).all()
+    sent = [event for event in sent_events if event.status == "sent" and event.message_id]
+    failed = [event for event in sent_events if event.status != "sent" or not event.message_id]
+    for event in failed:
+        if event.status == "queued_by_provider":
+            event.status = "provider_pending"
+    evidence = {
+        "batch_id": batch_id,
+        "send_mode": SEND_MODE_REAL_PROSPECT,
+        "send_one": send_one,
+        "created_at": now.isoformat() + "Z",
+        "queued": queued,
+        "sent_count": len(sent),
+        "failed_count": len(failed),
+        "skipped_count": len(snapshot["blocked_recipients"]),
+        "message_ids": [event.message_id for event in sent],
+        "provider_errors": [event.error_message for event in failed if event.error_message],
+        "process_result": {"returncode": process_result.returncode, "stdout": process_result.stdout[-1000:], "stderr": process_result.stderr[-1000:]} if process_result else None,
+        "snapshot": snapshot,
+    }
+    evidence_path = _write_send_evidence(campaign.company_id, campaign.id, batch_id, evidence)
+    for event in sent_events:
+        event.source_file = evidence_path
+    if failed and process_now:
+        # Receipt is mandatory. Leave queued/provider_pending evidence but do not claim success.
+        raise ValueError("receipt_missing: provider receipt/message_id was not recorded for every queued email")
+    evidence["evidence_path"] = evidence_path
+    return evidence
 
 
 def company_has_reply_monitor(db: Session, company_id: str) -> bool:

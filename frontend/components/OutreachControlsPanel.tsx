@@ -13,7 +13,9 @@ type BatchPreview = {
   window?: any;
   settings?: any;
   can_send_controlled_batch?: boolean;
+  can_send_one_real_email?: boolean;
   prospect_emails_sent?: number;
+  confirmation_required?: { send_one?: string; batch?: string };
 };
 
 function countDrafts(drafts: Draft[]) {
@@ -39,6 +41,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
+  const [selectedDraftIds, setSelectedDraftIds] = useState<string[]>([]);
 
   async function load() {
     try {
@@ -54,6 +57,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
       setSettings(settingsData);
       setReview(reviewData);
       setDrafts(draftData.drafts || []);
+      setSelectedDraftIds([]);
       setSendStatus(sendData);
       setBatchPreview(previewData);
       setFollowups(followData);
@@ -120,10 +124,40 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
     setBusy('send-controlled-batch');
     try {
       const result = await api(`/campaigns/${campaignId}/outreach/send-controlled-batch`, { method: 'POST', body: JSON.stringify({ dry_run: true }) });
-      setMessage(result.message || 'Controlled batch prepared in dry-run mode; no prospect email sent');
+      setMessage(result.message || 'Dry-run prepared. No prospect email was sent. Next: Send 1 real email or Send controlled batch.');
       setBatchPreview(result.result || null);
       await load();
     } catch (err: any) { setError(err.message || 'Controlled batch blocked'); }
+    finally { setBusy(''); }
+  }
+
+  async function sendReal(sendOne: boolean) {
+    const expected = sendOne ? 'SEND 1 REAL EMAIL' : 'SEND CONTROLLED BATCH';
+    const confirmation = window.prompt(`Type ${expected} to confirm real prospect sending.`);
+    if (confirmation !== expected) {
+      setError(`Real send blocked. Confirmation text must be exactly: ${expected}`);
+      return;
+    }
+    setBusy(sendOne ? 'send-one-real' : 'send-real-batch');
+    try {
+      const result = await api(`/campaigns/${campaignId}/outreach/send-controlled-batch`, {
+        method: 'POST',
+        body: JSON.stringify({ mode: 'real_prospect_send', send_one: sendOne, confirmation, limit: sendOne ? 1 : undefined }),
+      });
+      setMessage(result.message || `Real prospect send completed: ${result.prospect_emails_sent || 0} sent`);
+      setBatchPreview(result.result?.snapshot || null);
+      await load();
+    } catch (err: any) { setError(err.message || 'Real prospect send blocked'); }
+    finally { setBusy(''); }
+  }
+
+  async function bulkDraftAction(action: string, draftIds: string[] = []) {
+    setBusy(action);
+    try {
+      const result = await api(`/campaigns/${campaignId}/outreach-drafts/bulk-action`, { method: 'POST', body: JSON.stringify({ action, draft_ids: draftIds }) });
+      setMessage(`Draft bulk action complete: ${result.updated || 0} updated, ${result.created || 0} created, ${result.prospect_emails_sent || 0} prospect emails sent`);
+      await load();
+    } catch (err: any) { setError(err.message || 'Draft bulk action failed'); }
     finally { setBusy(''); }
   }
 
@@ -151,7 +185,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
   const canSend = Boolean(batchPreview?.can_send_controlled_batch || sendStatus?.batch_preview?.can_send_controlled_batch);
   const senderVerified = Boolean(settingsForm.sender_verification?.verified);
   const complianceReady = Boolean(settingsForm.physical_mailing_address && settingsForm.unsubscribe_text && settingsForm.compliance_acknowledged);
-  const currentState = !senderVerified || !complianceReady ? 'Sending blocked' : !settingsForm.prospect_sending_enabled ? 'Draft-only' : readyToSend > 0 ? 'Ready for controlled send' : 'Ready for preview';
+  const currentState = !senderVerified || !complianceReady ? `Sending blocked: ${sendStatus?.human_blockers?.[0] || batchPreview?.blockers?.[0] || 'sender/compliance checks incomplete'}` : !settingsForm.prospect_sending_enabled ? 'Internal test ready' : readyToSend > 0 ? 'Ready to send 1 real email' : 'Dry-run ready';
 
   const workflow = [
     { key: 'sender', label: 'Sender settings', ok: Boolean(settingsForm.sender_name && settingsForm.sender_email && settingsForm.reply_to_email), detail: settingsForm.sender_email || 'Sender email missing', action: <button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[placeholder="Sender name"]')?.scrollIntoView({ behavior: 'smooth' })}>Edit sender settings</button> },
@@ -159,10 +193,10 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
     { key: 'compliance', label: 'Compliance settings', ok: complianceReady, detail: complianceReady ? 'Compliance acknowledged' : 'Physical address, unsubscribe text and acknowledgement required', action: <button className="btn-secondary text-xs" type="button" disabled={busy === 'settings'} onClick={() => updateSettings(settingsForm)}>Save compliance settings</button> },
     { key: 'leads', label: 'Lead approval', ok: Number(approvedLeads) > 0, detail: `total=${coverage.total_leads ?? review?.items?.length ?? 0} approved=${approvedLeads} rejected=${reviewCounts.rejected || 0} DNC=${reviewCounts.do_not_contact || 0} missing=${reviewCounts.missing_email || 0} duplicates=${reviewCounts.duplicate || 0}`, action: <button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[data-voryx-lead-review]')?.scrollIntoView({ behavior: 'smooth' })}>Review leads</button> },
     { key: 'draft-generation', label: 'Draft generation', ok: draftCounts.generated > 0, detail: `approved leads without drafts=${missingDrafts} drafts generated=${draftCounts.generated}`, action: <button className="btn-secondary text-xs" type="button" disabled={busy === 'generate-drafts'} onClick={generateDrafts}>Generate drafts for {missingDrafts || 'approved'} leads</button> },
-    { key: 'draft-approval', label: 'Draft approval', ok: Number(approvedDrafts) > 0, detail: `pending=${draftCounts.pending} approved=${approvedDrafts} ready to send=${readyToSend}`, action: <button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[data-voryx-draft-review]')?.scrollIntoView({ behavior: 'smooth' })}>Review drafts</button> },
+    { key: 'draft-approval', label: 'Draft approval', ok: Number(approvedDrafts) > 0, detail: `pending=${draftCounts.pending} approved=${approvedDrafts} ready to send=${readyToSend}`, action: <div className="flex flex-wrap gap-2"><button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[data-voryx-draft-review]')?.scrollIntoView({ behavior: 'smooth' })}>Review drafts</button><button className="btn-secondary text-xs" type="button" disabled={busy === 'approve_all_generated'} onClick={() => bulkDraftAction('approve_all_generated')}>Approve all generated drafts</button></div> },
     { key: 'internal-test', label: 'Internal test', ok: Number(sendStatus?.readiness?.internal_tests || 0) > 0, detail: `${sendStatus?.readiness?.internal_tests || 0} prepared/sent. Recipient hard-limited to himanshusoni3214@gmail.com`, action: <button className="btn-secondary text-xs" type="button" disabled={!drafts.some((draft) => draft.status === 'draft_approved')} onClick={() => { const draft = drafts.find((item) => item.status === 'draft_approved'); if (draft) void draftAction(draft, 'internal-test'); }}>Prep internal test</button> },
     { key: 'enable', label: 'Enable prospect sending', ok: Boolean(settingsForm.prospect_sending_enabled), detail: settingsForm.prospect_sending_enabled ? 'Synced to DB and Hermes workspace/jobs safety policy' : 'Off until readiness passes', action: <div className="flex flex-wrap gap-2"><button className="btn-secondary text-xs" type="button" disabled={busy === 'enable-prospect' || !sendStatus?.readiness?.can_enable_prospect_sending || settingsForm.prospect_sending_enabled} onClick={() => setProspectSending(true)}>Enable</button><button className="btn-secondary text-xs" type="button" disabled={busy === 'disable-prospect' || !settingsForm.prospect_sending_enabled} onClick={() => setProspectSending(false)}>Disable</button></div> },
-    { key: 'batch', label: 'Send controlled batch', ok: canSend, detail: `approved leads=${approvedLeads} approved drafts=${approvedDrafts} ready=${readyToSend} daily remaining=${batchPreview?.limits?.daily_remaining ?? sendStatus?.batch_preview?.limits?.daily_remaining ?? 0}`, action: <div className="flex flex-wrap gap-2"><button className="btn-secondary text-xs" type="button" disabled={busy === 'preview-batch'} onClick={previewBatch}>Preview batch</button><button className="btn-secondary text-xs" type="button" disabled={!canSend || busy === 'send-controlled-batch'} onClick={sendControlledBatch}>Send controlled batch (dry-run)</button></div> },
+    { key: 'batch', label: 'Send controlled batch', ok: canSend, detail: `approved leads=${approvedLeads} approved drafts=${approvedDrafts} ready=${readyToSend} daily remaining=${batchPreview?.limits?.daily_remaining ?? sendStatus?.batch_preview?.limits?.daily_remaining ?? 0}`, action: <div className="flex flex-wrap gap-2"><button className="btn-secondary text-xs" type="button" disabled={busy === 'preview-batch'} onClick={previewBatch}>Preview batch</button><button className="btn-secondary text-xs" type="button" disabled={!canSend || busy === 'send-controlled-batch'} onClick={sendControlledBatch}>Dry-run prepare</button><button className="btn-secondary text-xs" type="button" disabled={!canSend || busy === 'send-one-real'} onClick={() => sendReal(true)}>Send 1 real email</button><button className="btn-secondary text-xs" type="button" disabled={!canSend || busy === 'send-real-batch'} onClick={() => sendReal(false)}>Send controlled batch</button></div> },
     { key: 'followup', label: 'Reply monitor / follow-up', ok: false, detail: followups?.reason || 'Disabled until Gmail/thread monitoring is connected', action: <span className="text-xs text-zinc-500">No follow-up send action</span> },
   ];
 
@@ -173,7 +207,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
           <h3 className="text-sm font-semibold text-zinc-100">Outreach Control</h3>
           <p className="text-xs text-zinc-500">Current state: {currentState}. Approval-based, receipt-gated, and QA-safe by default.</p>
         </div>
-        <div className={canSend ? 'text-xs text-emerald-400' : 'text-xs text-amber-300'}>{canSend ? 'Ready for controlled dry-run' : (sendStatus?.human_blockers?.[0] || batchPreview?.blockers?.[0] || 'Sending blocked')}</div>
+        <div className={canSend ? 'text-xs text-emerald-400' : 'text-xs text-amber-300'}>{canSend ? 'Ready for controlled batch' : (sendStatus?.human_blockers?.[0] || batchPreview?.blockers?.[0] || 'Sending blocked')}</div>
       </div>
       {error ? <div className="rounded border border-red-900 bg-red-950/40 p-2 text-xs text-red-200">{error}</div> : null}
       {message ? <div className="rounded border border-emerald-900 bg-emerald-950/30 p-2 text-xs text-emerald-200">{message}</div> : null}
@@ -204,8 +238,9 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
 
       <div className="grid gap-2 rounded border border-zinc-800 p-2 text-xs" data-voryx-batch-preview>
         <div className="font-semibold text-zinc-200">Batch Preview</div>
-        <div className="text-zinc-400">Approved leads: {approvedLeads} / Approved drafts: {approvedDrafts} / Ready to send: {readyToSend} / Missing drafts: {missingDrafts}</div>
+        <div className="text-zinc-400">Approved leads: {approvedLeads} / Drafts generated: {draftCounts.generated} / Approved drafts: {approvedDrafts} / Ready to send: {readyToSend} / Missing drafts: {missingDrafts} / Pending draft approval: {draftCounts.pending}</div>
         <div className="text-zinc-400">Allowed window: {batchPreview?.window?.timezone || sendStatus?.batch_preview?.window?.timezone || 'America/Toronto'} / Daily remaining: {batchPreview?.limits?.daily_remaining ?? sendStatus?.batch_preview?.limits?.daily_remaining ?? 0} / Hourly remaining: {batchPreview?.limits?.hourly_remaining ?? sendStatus?.batch_preview?.limits?.hourly_remaining ?? 0}</div>
+        <div className="text-zinc-500">Real send confirmations: SEND 1 REAL EMAIL / SEND CONTROLLED BATCH</div>
         <div className="grid gap-1">
           {recipients.slice(0, 5).map((item) => <div className="rounded bg-zinc-950 p-2" key={item.lead_key}><div className="text-zinc-200">{item.business || item.lead_key} / {item.email}</div><div className="text-zinc-500">{item.subject}</div><div className="text-zinc-500">From {item.sender_email} / Reply-to {item.reply_to_email} / {item.unsubscribe_text}</div></div>)}
           {!recipients.length ? <div className="text-zinc-500">No recipients selected. Use Preview batch after leads and drafts are approved.</div> : null}
@@ -235,8 +270,15 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
       </div>
 
       <div className="grid gap-2" data-voryx-draft-review>
+        <div className="flex flex-wrap gap-2 text-xs">
+          <button className="btn-secondary text-xs" type="button" onClick={() => bulkDraftAction('approve_all_generated')}>Approve all generated drafts for approved leads</button>
+          <button className="btn-secondary text-xs" type="button" disabled={!selectedDraftIds.length} onClick={() => bulkDraftAction('approve_selected', selectedDraftIds)}>Approve selected drafts</button>
+          <button className="btn-secondary text-xs" type="button" disabled={!selectedDraftIds.length} onClick={() => bulkDraftAction('reject_selected', selectedDraftIds)}>Reject selected drafts</button>
+          <button className="btn-secondary text-xs" type="button" disabled={!selectedDraftIds.length} onClick={() => bulkDraftAction('regenerate_selected', selectedDraftIds)}>Regenerate selected drafts</button>
+          <span className="text-zinc-500">Auto-approve after preview: off by default. Final send still requires typed confirmation.</span>
+        </div>
         {drafts.slice(0, 10).map((draft) => <div className="rounded border border-zinc-800 p-2" key={draft.id}>
-          <div className="flex flex-wrap justify-between gap-2 text-xs"><strong>{draft.subject}</strong><span>{draft.status}</span></div>
+          <div className="flex flex-wrap justify-between gap-2 text-xs"><label className="flex items-center gap-2"><input type="checkbox" checked={selectedDraftIds.includes(draft.id)} onChange={(event) => setSelectedDraftIds(event.target.checked ? [...selectedDraftIds, draft.id] : selectedDraftIds.filter((id) => id !== draft.id))} /><strong>{draft.subject}</strong></label><span>{draft.status}</span></div>
           <pre className="mt-2 whitespace-pre-wrap text-xs text-zinc-400">{draft.body}</pre>
           <div className="mt-2 flex flex-wrap gap-2">
             <button className="btn-secondary text-xs" type="button" onClick={() => draftAction(draft, 'approve')}>Approve draft</button>

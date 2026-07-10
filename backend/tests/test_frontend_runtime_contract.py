@@ -198,7 +198,12 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("data-voryx-sender-verification", source)
         self.assertIn("Send Readiness Workflow", source)
         self.assertIn("Preview batch", source)
-        self.assertIn("Send controlled batch (dry-run)", source)
+        self.assertIn("Dry-run prepare", source)
+        self.assertIn("Send 1 real email", source)
+        self.assertIn("SEND 1 REAL EMAIL", source)
+        self.assertIn("SEND CONTROLLED BATCH", source)
+        self.assertIn("Approve all generated drafts", source)
+        self.assertIn("Approve selected drafts", source)
         self.assertIn("Batch Preview", source)
 
     def test_campaign_detail_has_operational_sections(self):

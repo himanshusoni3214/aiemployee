@@ -1,4 +1,7 @@
 import unittest
+import json
+import tempfile
+from datetime import datetime, timezone
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
@@ -20,6 +23,7 @@ from app.models.entities import (
 from app.services.outreach import (
     APPROVED_INTERNAL_RECIPIENT,
     controlled_batch_preview,
+    bulk_update_drafts,
     create_internal_test_event,
     default_outreach_settings,
     generate_draft_for_item,
@@ -29,8 +33,10 @@ from app.services.outreach import (
     validate_outreach_settings,
     outreach_readiness,
     prepare_controlled_batch,
+    send_real_controlled_batch,
     sender_verification,
 )
+from app.services.internal_mail_queue import enqueue_controlled_outreach_delivery, ingest_internal_mail_receipts, queue_root
 
 
 class OutreachControlsTests(unittest.TestCase):
@@ -163,8 +169,80 @@ class OutreachControlsTests(unittest.TestCase):
             self.assertEqual(db.query(Job).filter(Job.task_type == 'Controlled Outreach Batch').count(), 1)
             with self.assertRaises(ValueError):
                 prepare_controlled_batch(db, campaign, user.id, dry_run=False)
+            with self.assertRaises(ValueError) as missing_confirmation:
+                send_real_controlled_batch(db, campaign, user.id, confirmation='', send_one=True, process_now=False)
+            self.assertIn('real_send_confirmed', str(missing_confirmation.exception))
         finally:
             db.close()
+
+    def test_bulk_approve_generated_drafts_for_approved_leads(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            approval = LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach')
+            draft = OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP.', status='draft_created')
+            db.add_all([approval, draft]); db.flush()
+
+            result = bulk_update_drafts(db, campaign, user.id, action='approve_all_generated')
+
+            self.assertEqual(result['updated'], 1)
+            self.assertEqual(draft.status, 'draft_approved')
+            self.assertEqual(draft.approved_by, user.id)
+            self.assertEqual(result['prospect_emails_sent'], 0)
+        finally:
+            db.close()
+
+    def test_controlled_outreach_receipt_required_before_sent_state(self):
+        db = self.Session()
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                user, company, campaign, _other, _other_campaign = self.seed(db)
+                approval = LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach')
+                event = OutreachEvent(event_id='event-1', company_id=company.id, campaign_id=campaign.id, recipient='owner@example.com', business='Cafe One', subject='Hello', status='queued_by_provider', provider='himalaya', dry_run=False)
+                db.add_all([approval, event]); db.flush()
+                job, queued = enqueue_controlled_outreach_delivery(
+                    db,
+                    campaign_id=campaign.id,
+                    company_id=company.id,
+                    employee_id=None,
+                    lead_key='lead-1',
+                    draft_id='draft-1',
+                    recipient='owner@example.com',
+                    business='Cafe One',
+                    subject='Hello',
+                    body='Body. Reply STOP to opt out.',
+                    sender_email='voryxio@gmail.com',
+                    reply_to_email='voryxio@gmail.com',
+                    unsubscribe_text='Reply STOP to opt out.',
+                    requested_by=user.id,
+                    batch_id='batch-1',
+                    event_id=event.event_id,
+                    data_path=tmp,
+                )
+                self.assertIsNone(event.message_id)
+                self.assertNotEqual(event.status, 'sent')
+                receipt = {
+                    'request_id': queued['request']['request_id'],
+                    'job_id': job.id,
+                    'event_id': event.event_id,
+                    'status': 'sent',
+                    'delivery_status': 'sent',
+                    'recipient': 'owner@example.com',
+                    'provider_message_id': '<receipt-1@voryx.ca>',
+                    'sent_at': datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z'),
+                    'evidence_type': 'rfc_message_id',
+                }
+                (queue_root(tmp) / 'receipts').mkdir(parents=True, exist_ok=True)
+                (queue_root(tmp) / 'receipts' / f"{queued['request']['request_id']}.json").write_text(json.dumps(receipt), encoding='utf-8')
+
+                ingest_internal_mail_receipts(db, data_path=tmp)
+
+                self.assertEqual(job.provider_message_id, '<receipt-1@voryx.ca>')
+                self.assertEqual(event.status, 'sent')
+                self.assertEqual(event.message_id, '<receipt-1@voryx.ca>')
+                self.assertEqual(approval.state, 'sent')
+            finally:
+                db.close()
 
     def test_outreach_settings_validate_sender_and_compliance(self):
         missing = validate_outreach_settings(None, prospect=True)
