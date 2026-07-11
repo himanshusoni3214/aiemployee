@@ -53,7 +53,7 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
   const employees = companyId ? await serverApi<Employee[]>(`/employees${queryString({ company_id: companyId, campaign_id: campaignId || undefined })}`, []) : [];
   const requestedEmployeeId = firstParam(params.employee_id);
   const employeeId = requestedEmployeeId && employees.some((employee) => employee.id === requestedEmployeeId) ? requestedEmployeeId : '';
-  const schedules = companyId ? await serverApi<Schedule[]>(`/schedules${queryString({ company_id: companyId, campaign_id: campaignId || undefined, employee_id: employeeId || undefined })}`, []) : [];
+  const allSchedules = companyId ? await serverApi<Schedule[]>(`/schedules${queryString({ company_id: companyId, campaign_id: campaignId || undefined, employee_id: employeeId || undefined })}`, []) : [];
   const [sync, capabilitiesResponse] = await Promise.all([
     serverApi<SyncInfo>('/sync/status', {}),
     serverApi<CapabilitiesResponse>('/connectors/capabilities', {}),
@@ -63,6 +63,8 @@ export default async function SchedulerPage({ searchParams }: { searchParams?: P
   const employeeName = new Map(employees.map((employee) => [employee.id, employee.name]));
   const employeeType = new Map(employees.map((employee) => [employee.id, employee.employee_type || '-']));
   const employeeCampaign = new Map(employees.map((employee) => [employee.id, employee.campaign_id || '']));
+  const visibleEmployeeIds = new Set(employees.map((employee) => employee.id));
+  const schedules = allSchedules.filter((schedule) => visibleEmployeeIds.has(schedule.employee_id));
   const campaignName = new Map(campaigns.map((campaign) => [campaign.id, campaign.name]));
   const runningEmployees = new Set(employees.filter((employee) => employee.status === 'Running').map((employee) => employee.id));
   const campaignOptions = campaigns.filter((campaign) => campaign.status !== 'Archived').map((campaign) => ({ value: campaign.id, label: campaign.name }));

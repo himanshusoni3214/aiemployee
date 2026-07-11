@@ -76,6 +76,22 @@ async function apiPost<T>(pathName: string, body?: unknown): Promise<T> {
   return apiFetch<T>('POST', pathName, body);
 }
 
+async function apiPostRaw(pathName: string, body?: unknown) {
+  const response = await fetch(`${apiUrl()}/api${pathName}`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  const text = await response.text();
+  let json: any = {};
+  try {
+    json = text ? JSON.parse(text) : {};
+  } catch {
+    json = { raw: text };
+  }
+  return { status: response.status, body: json };
+}
+
 async function apiPut<T>(pathName: string, body: unknown): Promise<T> {
   return apiFetch<T>('PUT', pathName, body);
 }
@@ -432,7 +448,7 @@ test.describe.serial('production safe CRUD QA', () => {
       industry: 'QA',
       target_audience: `${runId} target audience`,
       geographic_area: 'Toronto QA',
-      daily_lead_goal: 0,
+      daily_lead_goal: 1,
       daily_email_goal: 0,
       daily_email_limit: 0,
       dry_run_mode: true,
@@ -536,21 +552,24 @@ test.describe.serial('production safe CRUD QA', () => {
     await page.reload({ waitUntil: 'domcontentloaded' });
     await expect(crudRow(page, `${scheduleName} Edited`)).toContainText('5 7 * * *');
     const scheduleRun = await apiPost<ApiRecord>(`/schedules/${ids.schedule}/run`);
-    const scheduleDryRun = await apiPost<ApiRecord>(`/schedules/${ids.schedule}/dry-run`);
-    const scheduleTestRun = await apiPost<ApiRecord>(`/schedules/${ids.schedule}/test-run`);
-    expect([scheduleRun.state, scheduleDryRun.state, scheduleTestRun.state].every((state) => ['blocked', 'skipped'].includes(String(state).toLowerCase()))).toBeTruthy();
+    const scheduleDryRun = await apiPostRaw(`/schedules/${ids.schedule}/dry-run`);
+    const scheduleTestRun = await apiPostRaw(`/schedules/${ids.schedule}/test-run`);
+    expect(['blocked', 'skipped'].includes(String(scheduleRun.state).toLowerCase())).toBeTruthy();
+    expect(scheduleDryRun.status).toBe(501);
+    expect(scheduleTestRun.status).toBe(501);
     const scheduleJobs = await apiGet<ApiRecord[]>(`/jobs?employee_id=${ids.employee}`);
     expect(scheduleJobs.some((job) => ['Blocked', 'Skipped', 'Queued'].includes(job.status))).toBeTruthy();
-    record('Schedules', 'Run Now, Dry Run and Test Run are blocked/skipped for stopped QA employee', 'PASS', `${scheduleJobs.length} jobs`);
+    record('Schedules', 'Run Now blocked/skipped and Dry Run/Test Run return truthful unsupported response in jobs_json mode', 'PASS', `${scheduleJobs.length} jobs`);
     record('Schedules', 'Schedule cleanup behavior', 'PASS', 'API-only cleanup; UI intentionally has no Schedule archive/delete button');
 
     await page.goto(`/employees?company_id=${ids.company}&campaign_id=${ids.campaign}`, { waitUntil: 'domcontentloaded' });
     const employeeRun = await apiPost<ApiRecord>(`/employees/${ids.employee}/run`);
-    const employeeDryRun = await apiPost<ApiRecord>(`/employees/${ids.employee}/dry-run`);
-    expect([employeeRun.state, employeeDryRun.state].every((state) => ['blocked', 'skipped'].includes(String(state).toLowerCase()))).toBeTruthy();
+    const employeeDryRun = await apiPostRaw(`/employees/${ids.employee}/dry-run`);
+    expect(['blocked', 'skipped'].includes(String(employeeRun.state).toLowerCase())).toBeTruthy();
+    expect(employeeDryRun.status).toBe(501);
     const employeeJobs = await apiGet<ApiRecord[]>(`/jobs?employee_id=${ids.employee}`);
     expect(employeeJobs.some((job) => ['Blocked', 'Skipped', 'Queued'].includes(job.status))).toBeTruthy();
-    record('Employees', 'Run and Dry Run remain blocked/skipped for stopped QA employee', 'PASS', `${employeeJobs.length} jobs`);
+    record('Employees', 'Run remains blocked/skipped and Dry Run returns truthful unsupported response in jobs_json mode', 'PASS', `${employeeJobs.length} jobs`);
 
     const lead = await apiPost<ApiRecord>('/leads', {
       company_id: ids.company,

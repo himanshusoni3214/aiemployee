@@ -238,6 +238,14 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("'Imported'", source)
         self.assertIn("'Synced'", source)
 
+    def test_api_errors_show_concise_detail_message(self):
+        source = read_frontend("lib/api.ts")
+
+        self.assertIn("function errorMessage", source)
+        self.assertIn("detail?.detail?.message", source)
+        self.assertIn("console.error('API request failed'", source)
+        self.assertIn("throw new Error(errorMessage", source)
+
 
 if __name__ == "__main__":
     unittest.main()

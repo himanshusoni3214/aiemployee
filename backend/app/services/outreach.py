@@ -607,17 +607,22 @@ def prepare_controlled_batch(db: Session, campaign: Campaign, user_id: str, *, l
     snapshot = _batch_snapshot(db, campaign, limit=limit)
     if not dry_run:
         raise ValueError("Real prospect sending is not enabled from Voryx QA mode; use dry_run=true until explicitly approved.")
-    if not snapshot["can_send_controlled_batch"]:
-        raise ValueError("Controlled batch blocked: " + "; ".join(snapshot["blockers"] or ["no eligible recipients"]))
+    dry_run_recipients = list(snapshot.get("recipients") or [])
+    if not dry_run_recipients and snapshot.get("eligible_recipients"):
+        dry_run_recipients = list(snapshot["eligible_recipients"])[: max(1, min(_safe_int(limit, 5) if limit is not None else 5, 5))]
+        snapshot["recipients"] = dry_run_recipients
+        snapshot["coverage"] = {**snapshot.get("coverage", {}), "selected_for_batch": len(dry_run_recipients)}
+    if not dry_run_recipients:
+        raise ValueError("Controlled dry-run blocked: no approved leads with approved drafts are ready to preview")
     now = utc_now()
     batch_id = f"batch-{campaign.id}-{int(now.timestamp())}"
     evidence_path = _workspace_evidence_path(campaign.company_id, campaign.id, batch_id)
     prepared = []
-    for item in snapshot["recipients"]:
+    for item in dry_run_recipients:
         event = OutreachEvent(event_id=f"{batch_id}-{item['lead_key']}", campaign_id=campaign.id, company_id=campaign.company_id, recipient=item["email"], business=item.get("business"), subject=item.get("subject"), attempted_at=now, sent_at=None, status="prepared_dry_run", provider="voryx_controlled_batch_guard", dry_run=True, source_file=evidence_path, raw={"batch_id": batch_id, "draft_id": item.get("draft_id"), "requested_by": user_id, "prospect_emails_sent": 0, "body_preview": item.get("body_preview")})
         db.add(event)
         prepared.append(event.event_id)
-    job = Job(campaign_id=campaign.id, connector="hermes", task_type="Controlled Outreach Batch", status=JobStatus.completed, payload={"batch_id": batch_id, "dry_run": True, "limit": limit, "source": "dashboard_controlled_batch"}, result={"batch_id": batch_id, "prepared_events": prepared, "prospect_emails_sent": 0, "preview": snapshot}, logs=["Controlled batch prepared in dry-run mode; no prospect email sent.", f"Eligible recipients: {len(snapshot['eligible_recipients'])}", f"Prepared recipients: {len(snapshot['recipients'])}"], evidence_type="controlled_batch_preview", source_output_path=evidence_path, verification_reason="dry_run_prepared_only_no_provider_receipt", attempts=1, max_attempts=1, started_at=now, ended_at=now, created_at=now)
+    job = Job(campaign_id=campaign.id, connector="hermes", task_type="Controlled Outreach Batch", status=JobStatus.completed, payload={"batch_id": batch_id, "dry_run": True, "limit": limit, "source": "dashboard_controlled_batch"}, result={"batch_id": batch_id, "prepared_events": prepared, "prospect_emails_sent": 0, "preview": snapshot}, logs=["Controlled batch prepared in dry-run mode; no prospect email sent.", f"Eligible recipients: {len(snapshot['eligible_recipients'])}", f"Prepared recipients: {len(dry_run_recipients)}"], evidence_type="controlled_batch_preview", source_output_path=evidence_path, verification_reason="dry_run_prepared_only_no_provider_receipt", attempts=1, max_attempts=1, started_at=now, ended_at=now, created_at=now)
     db.add(job)
     db.flush()
     evidence = {"batch_id": batch_id, "job_id": job.id, "created_at": now.isoformat() + "Z", "dry_run": True, "prospect_emails_sent": 0, "snapshot": snapshot, "prepared_event_ids": prepared}

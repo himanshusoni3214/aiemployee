@@ -10,7 +10,7 @@ export const EXPECTED_COUNTS = {
 };
 
 export const ROUTES = [
-  { path: '/campaigns', heading: 'Campaigns', rowKind: 'campaigns', expectedRows: EXPECTED_COUNTS.campaigns },
+  { path: '/campaigns', heading: 'AI Sales Employee Control Center', rowKind: 'campaigns', expectedRows: EXPECTED_COUNTS.campaigns },
   { path: '/employees', heading: 'AI Employees', rowKind: 'employees', expectedRows: EXPECTED_COUNTS.employees },
   { path: '/scheduler', heading: 'Scheduler', rowKind: 'schedules', expectedRows: EXPECTED_COUNTS.schedules },
   { path: '/jobs', heading: 'Jobs' },

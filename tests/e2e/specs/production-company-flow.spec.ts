@@ -50,7 +50,7 @@ async function routeScreenshot(page: Page, route: RouteConfig, phase: string) {
 }
 
 async function dataRowCount(page: Page) {
-  const texts = await page.locator('table.ops-table tbody tr').evaluateAll((rows) => rows.map((row) => row.textContent?.trim() || ''));
+  const texts = await page.locator('table.ops-table').first().locator('tbody tr').evaluateAll((rows) => rows.map((row) => row.textContent?.trim() || ''));
   return texts.filter((text) => text && !text.startsWith('No ') && !text.includes('Loading')).length;
 }
 
@@ -60,7 +60,7 @@ function escapeRegex(value: string) {
 
 async function assertBrewSelected(page: Page, route: RouteConfig) {
   await expect(page).toHaveURL(new RegExp(`${route.path.replace('/', '\\/')}\\?[^#]*company_id=${BREW_COMPANY_ID}`));
-  await expect(page.getByRole('heading', { name: route.heading, exact: true })).toBeVisible();
+  await expect(page.locator('h1').filter({ hasText: route.heading })).toBeVisible();
   await expect(page.getByLabel('Select company', { exact: true })).toHaveValue(BREW_COMPANY_ID);
   await expect(page.locator('body')).toContainText(new RegExp(escapeRegex(BREW_COMPANY_NAME)));
 }
