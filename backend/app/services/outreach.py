@@ -2,7 +2,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import datetime, time, timezone, timedelta
+from datetime import date, datetime, time, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -94,6 +94,8 @@ def default_outreach_settings(company_id: str) -> dict[str, Any]:
         "hourly_send_limit": 1,
         "allowed_sending_days": ["Monday", "Tuesday", "Wednesday", "Thursday", "Friday"],
         "allowed_sending_hours": {"start": "09:00", "end": "17:00"},
+        "allowed_sending_start_date": None,
+        "allowed_sending_end_date": None,
         "timezone": "America/Toronto",
         "approved_sender_connected": False,
         "compliance_acknowledged": False,
@@ -463,6 +465,8 @@ def _window_status(settings_payload_data: dict[str, Any], now: datetime | None =
     local_now = (now or datetime.now(timezone.utc)).astimezone(tz)
     allowed_days = settings_payload_data.get("allowed_sending_days") or []
     allowed_hours = settings_payload_data.get("allowed_sending_hours") or {}
+    start_date_text = str(settings_payload_data.get("allowed_sending_start_date") or "").strip()
+    end_date_text = str(settings_payload_data.get("allowed_sending_end_date") or "").strip()
     day_allowed = not allowed_days or local_now.strftime("%A") in allowed_days
     start_text = str(allowed_hours.get("start") or "00:00")
     end_text = str(allowed_hours.get("end") or "23:59")
@@ -471,22 +475,46 @@ def _window_status(settings_payload_data: dict[str, Any], now: datetime | None =
         end = time.fromisoformat(end_text)
     except ValueError:
         return {"allowed": False, "reason": "Allowed sending hours are invalid.", "timezone": timezone_name, "local_now": local_now.isoformat(), "window": allowed_hours}
+    try:
+        start_date = date.fromisoformat(start_date_text) if start_date_text else None
+        end_date = date.fromisoformat(end_date_text) if end_date_text else None
+    except ValueError:
+        return {
+            "allowed": False,
+            "reason": "Allowed sending dates are invalid.",
+            "timezone": timezone_name,
+            "local_now": local_now.isoformat(),
+            "next_allowed_send_at": None,
+            "window": {"days": allowed_days, "hours": {"start": start_text, "end": end_text}, "dates": {"start": start_date_text or None, "end": end_date_text or None}},
+        }
+    local_date = local_now.date()
+    date_allowed = (start_date is None or local_date >= start_date) and (end_date is None or local_date <= end_date)
     now_time = local_now.time().replace(second=0, microsecond=0)
     hour_allowed = start <= now_time <= end if start <= end else now_time >= start or now_time <= end
-    allowed = bool(day_allowed and hour_allowed)
+    allowed = bool(day_allowed and date_allowed and hour_allowed)
+    if not date_allowed:
+        reason = "Outside the approved sending date range."
+    elif not day_allowed or not hour_allowed:
+        reason = "Outside the approved sending day/hour window."
+    else:
+        reason = None
     return {
         "allowed": allowed,
-        "reason": None if allowed else "Outside the approved sending day/hour window.",
+        "reason": reason,
         "timezone": timezone_name,
         "local_now": local_now.isoformat(),
-        "next_allowed_send_at": None if allowed else _next_allowed_send_at(local_now, allowed_days, start),
-        "window": {"days": allowed_days, "hours": {"start": start_text, "end": end_text}},
+        "next_allowed_send_at": None if allowed else _next_allowed_send_at(local_now, allowed_days, start, start_date, end_date),
+        "window": {"days": allowed_days, "hours": {"start": start_text, "end": end_text}, "dates": {"start": start_date_text or None, "end": end_date_text or None}},
     }
 
 
-def _next_allowed_send_at(local_now: datetime, allowed_days: list[str], start: time) -> str:
+def _next_allowed_send_at(local_now: datetime, allowed_days: list[str], start: time, start_date: date | None = None, end_date: date | None = None) -> str | None:
     for offset in range(0, 15):
         candidate_date = local_now.date() + timedelta(days=offset)
+        if start_date and candidate_date < start_date:
+            candidate_date = start_date
+        if end_date and candidate_date > end_date:
+            return None
         candidate = datetime.combine(candidate_date, start, tzinfo=local_now.tzinfo)
         if candidate <= local_now:
             continue

@@ -18,6 +18,8 @@ type BatchPreview = {
   confirmation_required?: { send_one?: string; batch?: string };
 };
 
+const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
+
 function countDrafts(drafts: Draft[]) {
   return {
     generated: drafts.length,
@@ -29,7 +31,9 @@ function countDrafts(drafts: Draft[]) {
 function formatWindow(windowInfo: any) {
   const hours = windowInfo?.window?.hours || {};
   const days = windowInfo?.window?.days || [];
-  return `${days.length ? days.join(', ') : 'Every day'} / ${hours.start || '00:00'}-${hours.end || '23:59'} ${windowInfo?.timezone || 'America/Toronto'}`;
+  const dates = windowInfo?.window?.dates || {};
+  const dateText = dates.start || dates.end ? ` / ${dates.start || 'any'} to ${dates.end || 'open'}` : '';
+  return `${days.length ? days.join(', ') : 'Every day'} / ${hours.start || '00:00'}-${hours.end || '23:59'}${dateText} ${windowInfo?.timezone || 'America/Toronto'}`;
 }
 
 function firstBlocker(sendStatus: any, batchPreview: BatchPreview | null) {
@@ -78,6 +82,16 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
       await load();
     } catch (err: any) { setError(err.message || 'Settings failed'); }
     finally { setBusy(''); }
+  }
+
+  function updateAllowedDay(day: string, checked: boolean) {
+    const current = Array.isArray(settingsForm.allowed_sending_days) ? settingsForm.allowed_sending_days : [];
+    const allowed_sending_days = checked ? Array.from(new Set([...current, day])) : current.filter((item: string) => item !== day);
+    setSettings({ ...settingsForm, allowed_sending_days });
+  }
+
+  function updateAllowedHour(key: 'start' | 'end', value: string) {
+    setSettings({ ...settingsForm, allowed_sending_hours: { ...(settingsForm.allowed_sending_hours || {}), [key]: value } });
   }
 
   async function findLeads() {
@@ -206,6 +220,8 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
   }
 
   const settingsForm = settings || {};
+  const allowedDays = Array.isArray(settingsForm.allowed_sending_days) ? settingsForm.allowed_sending_days : [];
+  const allowedHours = settingsForm.allowed_sending_hours || {};
   const reviewCounts = review?.counts || {};
   const draftCounts = countDrafts(drafts);
   const coverage = batchPreview?.coverage || sendStatus?.batch_preview?.coverage || {};
@@ -319,6 +335,42 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
             <input className="input" placeholder="Physical mailing address" value={settingsForm.physical_mailing_address || ''} onChange={(e) => setSettings({ ...settingsForm, physical_mailing_address: e.target.value })} />
             <input className="input" placeholder="Unsubscribe text" value={settingsForm.unsubscribe_text || ''} onChange={(e) => setSettings({ ...settingsForm, unsubscribe_text: e.target.value })} />
             <input className="input" type="number" min="1" max="5" placeholder="Daily limit" value={settingsForm.daily_send_limit || 5} onChange={(e) => setSettings({ ...settingsForm, daily_send_limit: Number(e.target.value || 5) })} />
+          </div>
+          <div className="grid gap-3 rounded border border-zinc-800 p-3 text-xs text-zinc-300" data-voryx-approved-sending-window>
+            <div>
+              <div className="mb-2 font-medium text-zinc-200">Approved sending window</div>
+              <div className="flex flex-wrap gap-2">
+                {WEEKDAYS.map((day) => (
+                  <label className="flex items-center gap-1 rounded border border-zinc-800 px-2 py-1" key={day}>
+                    <input type="checkbox" checked={allowedDays.includes(day)} onChange={(event) => updateAllowedDay(day, event.target.checked)} />
+                    {day.slice(0, 3)}
+                  </label>
+                ))}
+              </div>
+              <p className="mt-1 text-zinc-500">No selected days means every day is allowed.</p>
+            </div>
+            <div className="grid gap-2 md:grid-cols-5">
+              <label className="grid gap-1">
+                <span>Start time</span>
+                <input className="input" type="time" value={allowedHours.start || '09:00'} onChange={(event) => updateAllowedHour('start', event.target.value)} />
+              </label>
+              <label className="grid gap-1">
+                <span>End time</span>
+                <input className="input" type="time" value={allowedHours.end || '17:00'} onChange={(event) => updateAllowedHour('end', event.target.value)} />
+              </label>
+              <label className="grid gap-1">
+                <span>Start date</span>
+                <input className="input" type="date" value={settingsForm.allowed_sending_start_date || ''} onChange={(event) => setSettings({ ...settingsForm, allowed_sending_start_date: event.target.value || null })} />
+              </label>
+              <label className="grid gap-1">
+                <span>End date</span>
+                <input className="input" type="date" value={settingsForm.allowed_sending_end_date || ''} onChange={(event) => setSettings({ ...settingsForm, allowed_sending_end_date: event.target.value || null })} />
+              </label>
+              <label className="grid gap-1">
+                <span>Timezone</span>
+                <input className="input" value={settingsForm.timezone || 'America/Toronto'} onChange={(event) => setSettings({ ...settingsForm, timezone: event.target.value })} />
+              </label>
+            </div>
           </div>
           <div className="flex flex-wrap gap-3 text-xs text-zinc-300">
             <label><input type="checkbox" checked={Boolean(settingsForm.compliance_acknowledged)} onChange={(e) => setSettings({ ...settingsForm, compliance_acknowledged: e.target.checked })} /> Compliance acknowledged</label>

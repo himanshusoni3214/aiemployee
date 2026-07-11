@@ -282,6 +282,8 @@ class CompanyOutreachSettings(Base):
     hourly_send_limit: Mapped[int]=mapped_column(Integer, default=1)
     allowed_sending_days: Mapped[list]=mapped_column(JSON, default=list)
     allowed_sending_hours: Mapped[dict]=mapped_column(JSON, default=dict)
+    allowed_sending_start_date: Mapped[str|None]=mapped_column(String, nullable=True)
+    allowed_sending_end_date: Mapped[str|None]=mapped_column(String, nullable=True)
     timezone: Mapped[str]=mapped_column(String, default='America/Toronto')
     approved_sender_connected: Mapped[bool]=mapped_column(Boolean, default=False)
     compliance_acknowledged: Mapped[bool]=mapped_column(Boolean, default=False)

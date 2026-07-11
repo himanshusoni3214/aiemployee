@@ -206,6 +206,60 @@ class OutreachControlsTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_real_send_blocks_outside_approved_sending_date_range(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            settings = CompanyOutreachSettings(company_id=company.id, **{k: v for k, v in default_outreach_settings(company.id).items() if k != 'company_id'})
+            settings.sender_name = 'Voryx'
+            settings.sender_email = 'voryxio@gmail.com'
+            settings.reply_to_email = 'voryxio@gmail.com'
+            settings.physical_mailing_address = '123 QA St'
+            settings.compliance_acknowledged = True
+            settings.prospect_sending_enabled = True
+            settings.allowed_sending_days = []
+            settings.allowed_sending_hours = {'start': '00:00', 'end': '23:59'}
+            settings.allowed_sending_start_date = '2099-01-01'
+            settings.allowed_sending_end_date = '2099-12-31'
+            db.add(settings)
+            db.add(LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach'))
+            db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP.', status='draft_approved'))
+            db.flush()
+
+            preview = controlled_batch_preview(db, campaign)
+
+            self.assertFalse(preview['can_send_controlled_batch'])
+            self.assertIn('Outside the approved sending date range.', preview['blockers'])
+            self.assertEqual(preview['window']['window']['dates']['start'], '2099-01-01')
+            self.assertEqual(preview['prospect_emails_sent'], 0)
+        finally:
+            db.close()
+
+    def test_invalid_approved_sending_date_fails_closed(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            settings = CompanyOutreachSettings(company_id=company.id, **{k: v for k, v in default_outreach_settings(company.id).items() if k != 'company_id'})
+            settings.sender_name = 'Voryx'
+            settings.sender_email = 'voryxio@gmail.com'
+            settings.reply_to_email = 'voryxio@gmail.com'
+            settings.physical_mailing_address = '123 QA St'
+            settings.compliance_acknowledged = True
+            settings.prospect_sending_enabled = True
+            settings.allowed_sending_start_date = 'not-a-date'
+            db.add(settings)
+            db.add(LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach'))
+            db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP.', status='draft_approved'))
+            db.flush()
+
+            preview = controlled_batch_preview(db, campaign)
+
+            self.assertFalse(preview['can_send_controlled_batch'])
+            self.assertIn('Allowed sending dates are invalid.', preview['blockers'])
+            self.assertEqual(preview['prospect_emails_sent'], 0)
+        finally:
+            db.close()
+
     def test_schedule_next_window_records_job_and_evidence_without_sending(self):
         db = self.Session()
         with tempfile.TemporaryDirectory() as tmp:
