@@ -191,29 +191,22 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("isOperationalWorker", source)
         self.assertNotIn("<ModelPolicyPanel key={employee.id}", source)
 
-    def test_outreach_controls_show_readiness_and_prospect_toggle(self):
+    def test_outreach_controls_show_simple_email_marketing_workflow(self):
         source = read_frontend("components/OutreachControlsPanel.tsx")
 
-        self.assertIn("data-voryx-outreach-readiness", source)
-        self.assertIn("data-voryx-ai-sales-control-center", source)
+        self.assertIn("data-voryx-email-marketing-employee", source)
         self.assertIn("data-voryx-next-recommended-action", source)
-        self.assertIn("data-voryx-sales-employee-stats", source)
-        self.assertIn("data-voryx-primary-sales-actions", source)
+        self.assertIn("data-voryx-simple-email-actions", source)
+        self.assertIn("data-voryx-email-advanced", source)
         self.assertIn("data-voryx-sender-verification", source)
-        self.assertIn("Lead-to-Email Workflow", source)
-        self.assertIn("Approve all visible leads", source)
-        self.assertIn("Generate drafts for", source)
-        self.assertIn("Preview email batch", source)
-        self.assertIn("Dry-run prepare", source)
-        self.assertIn("Send 1 real email", source)
-        self.assertIn("Schedule batch for next sending window", source)
-        self.assertIn("Connect Gmail / Verify thread tracking", source)
-        self.assertIn("Calling: not connected", source)
-        self.assertIn("SEND 1 REAL EMAIL", source)
+        for label in ["Generate leads", "Approve visible leads", "Generate email draft", "Use draft as-is", "Send test", "Send approved emails", "Report"]:
+            self.assertIn(label, source)
+        self.assertIn("Save draft changes", source)
+        self.assertIn("Use this draft", source)
         self.assertIn("SEND CONTROLLED BATCH", source)
-        self.assertIn("Approve all generated drafts", source)
-        self.assertIn("Approve selected drafts", source)
-        self.assertIn("Batch Preview", source)
+        self.assertIn("Cold calling, text marketing and social outreach are separate employees", source)
+        self.assertNotIn("Dry-run prepare", source)
+        self.assertNotIn("Send 1 real email", source)
 
     def test_campaign_detail_has_operational_sections(self):
         source = read_frontend("app/campaigns/page.tsx")

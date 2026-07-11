@@ -43,7 +43,7 @@ export function DailyReportPanel({ initialReport, initialText }: { initialReport
   }
 
   return (
-    <div className="card space-y-4">
+    <div className="card space-y-4" data-voryx-daily-report>
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
           <h2 className="font-semibold">Deterministic Daily Report</h2>
