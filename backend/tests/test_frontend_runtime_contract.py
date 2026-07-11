@@ -200,7 +200,7 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("data-voryx-email-advanced", source)
         self.assertIn("data-voryx-sender-verification", source)
         self.assertIn("data-voryx-approved-sending-window", source)
-        for label in ["Generate leads", "Approve visible leads", "Generate email draft", "Use draft as-is", "Send test", "Send approved emails", "Report"]:
+        for label in ["Generate leads", "Approve visible leads", "Generate email draft", "Approve all drafts", "Send test", "Send approved emails", "Report"]:
             self.assertIn(label, source)
         for label in ["Approved sending window", "Start time", "End time", "Start date", "End date", "Timezone"]:
             self.assertIn(label, source)
@@ -209,7 +209,10 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("allowed_sending_start_date", source)
         self.assertIn("allowed_sending_end_date", source)
         self.assertIn("Save draft changes", source)
-        self.assertIn("Use this draft", source)
+        self.assertIn("Approve this draft", source)
+        self.assertIn("Saving or approving will add it automatically", source)
+        self.assertNotIn("Use draft as-is", source)
+        self.assertNotIn("Use this draft", source)
         self.assertIn("SEND CONTROLLED BATCH", source)
         self.assertIn("Cold calling, text marketing and social outreach are separate employees", source)
         self.assertNotIn("Dry-run prepare", source)

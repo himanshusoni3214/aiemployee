@@ -52,6 +52,7 @@ from app.services.outreach import (
     APPROVED_INTERNAL_RECIPIENT as OUTREACH_INTERNAL_RECIPIENT,
     SEND_MODE_DRY_RUN,
     SEND_MODE_REAL_PROSPECT,
+    body_with_unsubscribe,
     bulk_update_drafts,
     controlled_batch_preview,
     create_internal_test_event,
@@ -63,6 +64,7 @@ from app.services.outreach import (
     lead_key_for,
     reply_monitor_status,
     prepare_controlled_batch,
+    required_unsubscribe_text,
     schedule_controlled_batch_next_window,
     send_real_controlled_batch,
     review_items_from_rows,
@@ -789,9 +791,10 @@ def bulk_outreach_draft_action(campaign_id: str, payload: dict=Body(...), db: Se
 def update_outreach_draft(draft_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
     draft = db.get(OutreachDraft, draft_id)
     if not draft: raise HTTPException(404, 'Draft not found')
-    for key in ('subject', 'body'):
-        if key in payload:
-            setattr(draft, key, str(payload[key]))
+    if 'subject' in payload:
+        draft.subject = str(payload['subject'])
+    if 'body' in payload:
+        draft.body = body_with_unsubscribe(str(payload['body']), required_unsubscribe_text(db, draft.company_id))
     draft.status = 'draft_needs_review'
     draft.updated_at = datetime.utcnow()
     log(db, 'Outreach Draft Edited', 'OutreachDraft', draft.id, draft.company_id, user.id)
@@ -822,6 +825,7 @@ def outreach_draft_action(draft_id: str, action: str, db: Session=Depends(get_db
     draft = db.get(OutreachDraft, draft_id)
     if not draft: raise HTTPException(404, 'Draft not found')
     if action == 'approve':
+        draft.body = body_with_unsubscribe(draft.body, required_unsubscribe_text(db, draft.company_id))
         draft.status = 'draft_approved'; draft.approved_by = user.id; draft.approved_at = datetime.utcnow()
     elif action == 'reject':
         draft.status = 'draft_rejected'
@@ -1069,6 +1073,11 @@ def _control_campaign_workers(db: Session, campaign: Campaign, action: str) -> t
     for employee in employees:
         hermes_id = _employee_hermes_job_id(employee)
         if not hermes_id:
+            continue
+        if is_safety_blocked_action(hermes_id, hermes_action):
+            result = safety_block_result(hermes_action, hermes_id, employee.name)
+            controls.append(result)
+            blocked.append({'employee_id': employee.id, 'employee_name': employee.name, 'hermes_job_id': hermes_id, 'reason': result.get('message') or result.get('reason')})
             continue
         try:
             result = HermesControlService().control(hermes_id, hermes_action)

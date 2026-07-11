@@ -22,6 +22,7 @@ from app.models.entities import (
 )
 from app.services.outreach import (
     APPROVED_INTERNAL_RECIPIENT,
+    body_with_unsubscribe,
     controlled_batch_preview,
     bulk_update_drafts,
     create_internal_test_event,
@@ -96,7 +97,7 @@ class OutreachControlsTests(unittest.TestCase):
             draft = generate_draft_for_item(db, campaign, company, {**item, 'state': 'approved_for_outreach', 'can_send': True})
             db.flush()
             self.assertEqual(draft.status, 'draft_created')
-            self.assertIn('Reply STOP', draft.body)
+            self.assertIn('Reply STOP to opt out.', draft.body)
             self.assertIn('prospect_sending_enabled', send_blockers(db, campaign, draft, internal_test=False))
 
             settings = CompanyOutreachSettings(company_id=company.id, **{k: v for k, v in default_outreach_settings(company.id).items() if k != 'company_id'})
@@ -154,7 +155,7 @@ class OutreachControlsTests(unittest.TestCase):
             settings.allowed_sending_hours = {'start': '00:00', 'end': '23:59'}
             db.add(settings)
             approval = LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach')
-            draft = OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP.', status='draft_approved')
+            draft = OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP to opt out.', status='draft_approved')
             db.add_all([approval, draft]); db.flush()
 
             preview = controlled_batch_preview(db, campaign)
@@ -191,7 +192,7 @@ class OutreachControlsTests(unittest.TestCase):
             settings.allowed_sending_hours = {'start': '00:00', 'end': '00:01'}
             db.add(settings)
             db.add(LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach'))
-            db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP.', status='draft_approved'))
+            db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP to opt out.', status='draft_approved'))
             db.flush()
 
             preview = controlled_batch_preview(db, campaign)
@@ -223,7 +224,7 @@ class OutreachControlsTests(unittest.TestCase):
             settings.allowed_sending_end_date = '2099-12-31'
             db.add(settings)
             db.add(LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach'))
-            db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP.', status='draft_approved'))
+            db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP to opt out.', status='draft_approved'))
             db.flush()
 
             preview = controlled_batch_preview(db, campaign)
@@ -249,7 +250,7 @@ class OutreachControlsTests(unittest.TestCase):
             settings.allowed_sending_start_date = 'not-a-date'
             db.add(settings)
             db.add(LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach'))
-            db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP.', status='draft_approved'))
+            db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP to opt out.', status='draft_approved'))
             db.flush()
 
             preview = controlled_batch_preview(db, campaign)
@@ -276,7 +277,7 @@ class OutreachControlsTests(unittest.TestCase):
                 settings.allowed_sending_hours = {'start': '00:00', 'end': '23:59'}
                 db.add(settings)
                 db.add(LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach'))
-                db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP.', status='draft_approved'))
+                db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP to opt out.', status='draft_approved'))
                 db.flush()
 
                 from app.core.config import settings as app_settings
@@ -301,7 +302,10 @@ class OutreachControlsTests(unittest.TestCase):
         try:
             user, company, campaign, _other, _other_campaign = self.seed(db)
             approval = LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach')
-            draft = OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP.', status='draft_created')
+            settings = CompanyOutreachSettings(company_id=company.id, **{k: v for k, v in default_outreach_settings(company.id).items() if k != 'company_id'})
+            settings.unsubscribe_text = 'Reply STOP to opt out.'
+            db.add(settings)
+            draft = OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body without footer.', status='draft_created')
             db.add_all([approval, draft]); db.flush()
 
             result = bulk_update_drafts(db, campaign, user.id, action='approve_all_generated')
@@ -309,9 +313,81 @@ class OutreachControlsTests(unittest.TestCase):
             self.assertEqual(result['updated'], 1)
             self.assertEqual(draft.status, 'draft_approved')
             self.assertEqual(draft.approved_by, user.id)
+            self.assertIn('Reply STOP to opt out.', draft.body)
             self.assertEqual(result['prospect_emails_sent'], 0)
         finally:
             db.close()
+
+    def test_bulk_approve_repairs_already_approved_draft_footer(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            settings = CompanyOutreachSettings(company_id=company.id, **{k: v for k, v in default_outreach_settings(company.id).items() if k != 'company_id'})
+            settings.unsubscribe_text = 'Reply STOP to opt out.'
+            approval = LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach')
+            draft = OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Approved body missing footer.', status='draft_approved', approved_by=user.id, approved_at=datetime.utcnow())
+            db.add_all([settings, approval, draft]); db.flush()
+
+            result = bulk_update_drafts(db, campaign, user.id, action='approve_all_generated')
+
+            self.assertEqual(result['updated'], 1)
+            self.assertEqual(draft.status, 'draft_approved')
+            self.assertIn('Reply STOP to opt out.', draft.body)
+            self.assertEqual(result['prospect_emails_sent'], 0)
+            second = bulk_update_drafts(db, campaign, user.id, action='approve_all_generated')
+            self.assertEqual(second['updated'], 0)
+        finally:
+            db.close()
+
+    def test_draft_generation_uses_company_unsubscribe_text(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            settings = CompanyOutreachSettings(company_id=company.id, **{k: v for k, v in default_outreach_settings(company.id).items() if k != 'company_id'})
+            settings.unsubscribe_text = 'Reply STOP to opt out.'
+            db.add(settings)
+            item = review_items_from_rows(db, campaign, [{'Business Name': 'A Cafe', 'Public Email': 'a@a-cafe.example'}], 'source')[0]
+            upsert_approval(db, campaign, item, 'approved_for_outreach', user.id)
+
+            draft = generate_draft_for_item(db, campaign, company, {**item, 'state': 'approved_for_outreach', 'can_send': True})
+
+            self.assertIn('Reply STOP to opt out.', draft.body)
+            self.assertNotIn('Reply STOP and I will not contact you again.', draft.body)
+        finally:
+            db.close()
+
+    def test_batch_preview_blocks_approved_draft_missing_configured_unsubscribe(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            settings = CompanyOutreachSettings(company_id=company.id, **{k: v for k, v in default_outreach_settings(company.id).items() if k != 'company_id'})
+            settings.sender_name = 'Voryx'
+            settings.sender_email = 'voryxio@gmail.com'
+            settings.reply_to_email = 'voryxio@gmail.com'
+            settings.physical_mailing_address = '123 QA St'
+            settings.compliance_acknowledged = True
+            settings.prospect_sending_enabled = True
+            settings.allowed_sending_days = []
+            settings.allowed_sending_hours = {'start': '00:00', 'end': '23:59'}
+            settings.unsubscribe_text = 'Reply STOP to opt out.'
+            db.add(settings)
+            db.add(LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach'))
+            db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body without required footer.', status='draft_approved'))
+            db.flush()
+
+            preview = controlled_batch_preview(db, campaign)
+
+            self.assertFalse(preview['can_send_controlled_batch'])
+            self.assertEqual(preview['coverage']['ready_to_send'], 0)
+            self.assertEqual(preview['blocked_recipients'][0]['reasons'], ['draft_missing_unsubscribe_text'])
+            self.assertEqual(preview['prospect_emails_sent'], 0)
+        finally:
+            db.close()
+
+    def test_body_with_unsubscribe_is_idempotent(self):
+        body = body_with_unsubscribe('Hello', 'Reply STOP to opt out.')
+        self.assertEqual(body, 'Hello\n\nReply STOP to opt out.')
+        self.assertEqual(body_with_unsubscribe(body, 'Reply STOP to opt out.'), body)
 
     def test_controlled_outreach_receipt_required_before_sent_state(self):
         db = self.Session()

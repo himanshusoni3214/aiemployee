@@ -40,6 +40,11 @@ function firstBlocker(sendStatus: any, batchPreview: BatchPreview | null) {
   return sendStatus?.human_blockers?.[0] || batchPreview?.blockers?.[0] || '';
 }
 
+function draftMissingRequiredFooter(body: string, unsubscribeText: string) {
+  const required = (unsubscribeText || '').trim();
+  return Boolean(required && !(body || '').includes(required));
+}
+
 export function OutreachControlsPanel({ companyId, campaignId }: { companyId: string; campaignId: string }) {
   const [settings, setSettings] = useState<any>(null);
   const [review, setReview] = useState<{ items: ReviewItem[]; counts: Record<string, number>; eligible_count: number; source_path?: string } | null>(null);
@@ -141,11 +146,11 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
     finally { setBusy(''); }
   }
 
-  async function useDraftsAsIs() {
+  async function approveAllDrafts() {
     setBusy('approve_all_generated');
     try {
       const result = await api(`/campaigns/${campaignId}/outreach-drafts/bulk-action`, { method: 'POST', body: JSON.stringify({ action: 'approve_all_generated', draft_ids: [] }) });
-      setMessage(`Email drafts approved: ${result.updated || 0}. No prospect email sent.`);
+      setMessage(`Approved ${result.updated || 0} drafts. Compliance footer is enforced automatically. No prospect email sent.`);
       await load();
     } catch (err: any) { setError(err.message || 'Draft approval failed'); }
     finally { setBusy(''); }
@@ -238,7 +243,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
     if (!review?.items?.length) return 'Generate leads';
     if (approvedLeads <= 0) return 'Approve leads';
     if (missingDrafts > 0 || !draftCounts.generated) return 'Generate email drafts';
-    if (draftCounts.approved <= 0) return 'Review the draft, then use it as-is or edit it';
+    if (draftCounts.approved <= 0) return 'Review drafts, then approve all drafts or edit one draft';
     if (!sendStatus?.readiness?.internal_tests) return 'Send a test email';
     if (!settingsForm.prospect_sending_enabled) return 'Turn on sending when ready';
     if (!canSend) return blocker || 'Sending is blocked until readiness passes';
@@ -272,7 +277,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
         <button className="btn-secondary text-xs" type="button" disabled={busy === 'find-leads'} onClick={findLeads}>Generate leads</button>
         <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve-visible-leads'} onClick={approveVisibleLeads}>Approve visible leads</button>
         <button className="btn-secondary text-xs" type="button" disabled={busy === 'generate-drafts' || approvedLeads <= 0} onClick={generateDrafts}>Generate email draft</button>
-        <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve_all_generated' || !draftCounts.generated} onClick={useDraftsAsIs}>Use draft as-is</button>
+        <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve_all_generated' || !draftCounts.generated} onClick={approveAllDrafts}>Approve all drafts</button>
         <button className="btn-secondary text-xs" type="button" disabled={busy === 'internal-test' || !drafts.length} onClick={sendTest}>Send test</button>
         <button className="btn text-xs" type="button" disabled={!canSend || busy === 'send-real-batch'} title={!canSend ? (blocker || 'Complete the previous steps before sending') : 'Send approved emails through Hermes/Himalaya'} onClick={sendApprovedEmails}>Send approved emails</button>
         <button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[data-voryx-daily-report]')?.scrollIntoView({ behavior: 'smooth' })}>Report</button>
@@ -306,18 +311,20 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
       <section className="grid gap-2 rounded border border-zinc-800 p-3" data-voryx-draft-review>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h4 className="text-sm font-semibold">Email Draft</h4>
-          <span className="text-xs text-zinc-500">Edit only if needed, then use draft as-is.</span>
+          <span className="text-xs text-zinc-500">Edit only if needed, then approve all drafts. Footers are added automatically.</span>
         </div>
         {visibleDrafts.map((draft) => {
           const edit = draftEdits[draft.id] || { subject: draft.subject, body: draft.body };
+          const missingFooter = draftMissingRequiredFooter(edit.body, settingsForm.unsubscribe_text || '');
           return (
             <div className="rounded border border-zinc-800 p-2" key={draft.id}>
               <div className="mb-2 flex flex-wrap justify-between gap-2 text-xs"><strong>{draft.business || draft.lead_email || draft.lead_key}</strong><span>{draft.status}</span></div>
+              {missingFooter ? <div className="mb-2 rounded border border-amber-900 bg-amber-950/20 p-2 text-xs text-amber-200">Missing unsubscribe footer. Saving or approving will add it automatically.</div> : null}
               <input className="input mb-2" value={edit.subject} onChange={(event) => setDraftEdits({ ...draftEdits, [draft.id]: { ...edit, subject: event.target.value } })} />
               <textarea className="input min-h-36 text-xs" value={edit.body} onChange={(event) => setDraftEdits({ ...draftEdits, [draft.id]: { ...edit, body: event.target.value } })} />
               <div className="mt-2 flex flex-wrap gap-2">
                 <button className="btn-secondary text-xs" type="button" disabled={busy === `save-draft:${draft.id}`} onClick={() => saveDraft(draft)}>Save draft changes</button>
-                <button className="btn-secondary text-xs" type="button" disabled={busy === `approve-draft:${draft.id}` || draft.status === 'draft_approved'} onClick={() => approveDraft(draft)}>Use this draft</button>
+                <button className="btn-secondary text-xs" type="button" disabled={busy === `approve-draft:${draft.id}` || draft.status === 'draft_approved'} onClick={() => approveDraft(draft)}>Approve this draft</button>
               </div>
             </div>
           );

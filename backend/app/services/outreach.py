@@ -229,6 +229,26 @@ def settings_payload(settings: CompanyOutreachSettings | None, company_id: str) 
     return data
 
 
+def required_unsubscribe_text(db: Session, company_id: str) -> str:
+    settings = db.scalar(select(CompanyOutreachSettings).where(CompanyOutreachSettings.company_id == company_id))
+    return str(settings_payload(settings, company_id).get("unsubscribe_text") or "Reply STOP to opt out.").strip()
+
+
+def body_has_unsubscribe(body: str | None, unsubscribe_text: str | None) -> bool:
+    required = str(unsubscribe_text or "").strip()
+    if not required:
+        return True
+    return required in str(body or "")
+
+
+def body_with_unsubscribe(body: str | None, unsubscribe_text: str | None) -> str:
+    value = str(body or "").rstrip()
+    required = str(unsubscribe_text or "").strip()
+    if not required or required in value:
+        return value
+    return f"{value}\n\n{required}" if value else required
+
+
 def validate_outreach_settings(settings: CompanyOutreachSettings | dict[str, Any] | None, *, prospect: bool) -> list[str]:
     if settings is None:
         data = {}
@@ -350,7 +370,7 @@ def generate_draft_for_item(db: Session, campaign: Campaign, company: Company, i
     offer = (campaign.description or campaign.name or "our offer").strip()
     business = item.get("business") or "there"
     subject = f"Quick idea for {business}"
-    unsubscribe = "Reply STOP and I will not contact you again."
+    unsubscribe = required_unsubscribe_text(db, campaign.company_id)
     body = (
         f"Hi {business},\n\n"
         f"I am reaching out from {company.name}. {offer}\n\n"
@@ -409,18 +429,23 @@ def bulk_update_drafts(
             item.lead_key
             for item in db.scalars(select(LeadApproval).where(LeadApproval.campaign_id == campaign.id, LeadApproval.state == "approved_for_outreach")).all()
         }
-        selected = [draft for draft in drafts if draft.lead_key in approvals and draft.status not in {"draft_approved", "draft_rejected"}]
+        selected = [draft for draft in drafts if draft.lead_key in approvals and draft.status != "draft_rejected"]
         action = "approve_selected"
     now = utc_now()
+    unsubscribe = required_unsubscribe_text(db, campaign.company_id)
     updated: list[str] = []
     created: list[str] = []
     for draft in selected:
         if action == "approve_selected":
+            repaired_body = body_with_unsubscribe(draft.body, unsubscribe)
+            changed = repaired_body != draft.body or draft.status != "draft_approved" or not draft.approved_by or not draft.approved_at
+            draft.body = repaired_body
             draft.status = "draft_approved"
             draft.approved_by = user_id
-            draft.approved_at = now
-            draft.updated_at = now
-            updated.append(draft.id)
+            draft.approved_at = draft.approved_at or now
+            if changed:
+                draft.updated_at = now
+                updated.append(draft.id)
         elif action == "reject_selected":
             draft.status = "draft_rejected"
             draft.updated_at = now
@@ -573,6 +598,7 @@ def _batch_snapshot(db: Session, campaign: Campaign, *, limit: int | None = None
     sent_recipients = _sent_recipients(db, campaign.id)
     counts = _send_counts(db, campaign, settings_data)
     window = _window_status(settings_data)
+    unsubscribe_text = str(settings_data.get("unsubscribe_text") or "").strip()
     sender = sender_verification(settings_data.get("sender_email"))
     employee = _candidate_employee(db, campaign)
     model_guard = guard_hermes_execution(db, task_type="Controlled Outreach Batch", payload={"campaign_id": campaign.id, "company_id": campaign.company_id, "hermes_job_id": getattr(employee, "hermes_job_id", None), "dry_run": True})
@@ -614,6 +640,8 @@ def _batch_snapshot(db: Session, campaign: Campaign, *, limit: int | None = None
             reasons.append("missing_draft")
         elif draft.status != "draft_approved":
             reasons.append("draft_not_approved")
+        elif not body_has_unsubscribe(draft.body, unsubscribe_text):
+            reasons.append("draft_missing_unsubscribe_text")
         if reasons:
             blocked.append({"lead_key": approval.lead_key, "business": approval.business, "email": email, "reasons": reasons})
             continue
