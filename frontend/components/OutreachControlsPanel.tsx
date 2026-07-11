@@ -18,6 +18,11 @@ type BatchPreview = {
   confirmation_required?: { send_one?: string; batch?: string };
 };
 
+function asNumber(value: unknown) {
+  const parsed = Number(value || 0);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function countDrafts(drafts: Draft[]) {
   return {
     generated: drafts.length,
@@ -28,6 +33,12 @@ function countDrafts(drafts: Draft[]) {
 
 function statusText(ok: boolean) {
   return ok ? 'Pass' : 'Blocked';
+}
+
+function formatWindow(windowInfo: any) {
+  const hours = windowInfo?.window?.hours || {};
+  const days = windowInfo?.window?.days || [];
+  return `${days.length ? days.join(', ') : 'Every day'} / ${hours.start || '00:00'}-${hours.end || '23:59'} ${windowInfo?.timezone || 'America/Toronto'}`;
 }
 
 export function OutreachControlsPanel({ companyId, campaignId }: { companyId: string; campaignId: string }) {
@@ -100,6 +111,33 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
     finally { setBusy(''); }
   }
 
+  async function findLeads() {
+    setBusy('find-leads');
+    try {
+      const result = await api(`/campaigns/${campaignId}/sales/find-leads`, { method: 'POST' });
+      setMessage(result.message || `Lead research ${result.status || 'completed'}`);
+      await load();
+    } catch (err: any) { setError(err.message || 'Find leads failed'); }
+    finally { setBusy(''); }
+  }
+
+  async function approveVisibleLeads() {
+    const candidates = (review?.items || []).filter((item) => item.computed_state === 'new' && item.state !== 'approved_for_outreach').slice(0, 50);
+    if (!candidates.length) {
+      setMessage('No visible leads need approval.');
+      return;
+    }
+    setBusy('approve-visible-leads');
+    try {
+      for (const item of candidates) {
+        await api(`/campaigns/${campaignId}/lead-review/${item.lead_key}/approve`, { method: 'POST', body: JSON.stringify({ reason: 'bulk approve visible leads' }) });
+      }
+      setMessage(`Approved ${candidates.length} visible leads`);
+      await load();
+    } catch (err: any) { setError(err.message || 'Bulk lead approval failed'); }
+    finally { setBusy(''); }
+  }
+
   async function setProspectSending(enabled: boolean) {
     setBusy(enabled ? 'enable-prospect' : 'disable-prospect');
     try {
@@ -128,6 +166,16 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
       setBatchPreview(result.result || null);
       await load();
     } catch (err: any) { setError(err.message || 'Controlled batch blocked'); }
+    finally { setBusy(''); }
+  }
+
+  async function scheduleNextWindow() {
+    setBusy('schedule-next-window');
+    try {
+      const result = await api(`/campaigns/${campaignId}/outreach/schedule-next-window`, { method: 'POST', body: JSON.stringify({ limit: 5 }) });
+      setMessage(`Batch scheduled for ${result.scheduled_for || 'next allowed sending window'}. Prospect emails sent: ${result.prospect_emails_sent || 0}`);
+      await load();
+    } catch (err: any) { setError(err.message || 'Schedule batch blocked'); }
     finally { setBusy(''); }
   }
 
@@ -183,31 +231,75 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
   const recipients = batchPreview?.recipients || sendStatus?.batch_preview?.recipients || [];
   const blockedRecipients = batchPreview?.blocked_recipients || sendStatus?.batch_preview?.blocked_recipients || [];
   const canSend = Boolean(batchPreview?.can_send_controlled_batch || sendStatus?.batch_preview?.can_send_controlled_batch);
+  const canSendOne = Boolean(batchPreview?.can_send_one_real_email || sendStatus?.batch_preview?.can_send_one_real_email);
+  const windowInfo = batchPreview?.window || sendStatus?.batch_preview?.window || {};
+  const limits = batchPreview?.limits || sendStatus?.batch_preview?.limits || {};
   const senderVerified = Boolean(settingsForm.sender_verification?.verified);
   const complianceReady = Boolean(settingsForm.physical_mailing_address && settingsForm.unsubscribe_text && settingsForm.compliance_acknowledged);
   const currentState = !senderVerified || !complianceReady ? `Sending blocked: ${sendStatus?.human_blockers?.[0] || batchPreview?.blockers?.[0] || 'sender/compliance checks incomplete'}` : !settingsForm.prospect_sending_enabled ? 'Internal test ready' : readyToSend > 0 ? 'Ready to send 1 real email' : 'Dry-run ready';
+  const repliesReceived = sendStatus?.readiness?.replies_received || 0;
+  const meetingsBooked = sendStatus?.readiness?.meetings_booked || 0;
+  const followupsDue = followups?.followups_due || 0;
+  const nextRecommendedAction = (() => {
+    if (approvedLeads <= 0) return 'Approve leads before outreach';
+    if (missingDrafts > 0) return `Generate drafts for ${missingDrafts} approved leads`;
+    if (draftCounts.pending > 0) return `Preview and approve ${draftCounts.pending} generated drafts`;
+    if (readyToSend > 0 && !settingsForm.prospect_sending_enabled) return 'Run an internal test, then enable controlled prospect sending';
+    if (readyToSend > 0 && !windowInfo.allowed) return 'Schedule batch for next sending window';
+    if (readyToSend > 0 && canSendOne) return 'Send 1 real email';
+    if (!replyMonitor?.enabled) return 'Connect reply monitor before follow-up';
+    return 'View daily report';
+  })();
 
   const workflow = [
     { key: 'sender', label: 'Sender settings', ok: Boolean(settingsForm.sender_name && settingsForm.sender_email && settingsForm.reply_to_email), detail: settingsForm.sender_email || 'Sender email missing', action: <button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[placeholder="Sender name"]')?.scrollIntoView({ behavior: 'smooth' })}>Edit sender settings</button> },
     { key: 'verify', label: 'Sender verification', ok: senderVerified, detail: `${settingsForm.sender_verification?.method || 'none'} / ${settingsForm.sender_verification?.sender_email || 'no account'} / ${settingsForm.sender_verification?.last_verified_at || '-'}`, action: <button className="btn-secondary text-xs" type="button" onClick={load}>Verify sender</button> },
     { key: 'compliance', label: 'Compliance settings', ok: complianceReady, detail: complianceReady ? 'Compliance acknowledged' : 'Physical address, unsubscribe text and acknowledgement required', action: <button className="btn-secondary text-xs" type="button" disabled={busy === 'settings'} onClick={() => updateSettings(settingsForm)}>Save compliance settings</button> },
-    { key: 'leads', label: 'Lead approval', ok: Number(approvedLeads) > 0, detail: `total=${coverage.total_leads ?? review?.items?.length ?? 0} approved=${approvedLeads} rejected=${reviewCounts.rejected || 0} DNC=${reviewCounts.do_not_contact || 0} missing=${reviewCounts.missing_email || 0} duplicates=${reviewCounts.duplicate || 0}`, action: <button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[data-voryx-lead-review]')?.scrollIntoView({ behavior: 'smooth' })}>Review leads</button> },
+    { key: 'leads', label: 'Lead approval', ok: Number(approvedLeads) > 0, detail: `total=${coverage.total_leads ?? review?.items?.length ?? 0} approved=${approvedLeads} rejected=${reviewCounts.rejected || 0} DNC=${reviewCounts.do_not_contact || 0} missing=${reviewCounts.missing_email || 0} duplicates=${reviewCounts.duplicate || 0}`, action: <div className="flex flex-wrap gap-2"><button className="btn-secondary text-xs" type="button" disabled={busy === 'find-leads'} onClick={findLeads}>Find leads</button><button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[data-voryx-lead-review]')?.scrollIntoView({ behavior: 'smooth' })}>Review leads</button><button className="btn-secondary text-xs" type="button" disabled={busy === 'approve-visible-leads'} onClick={approveVisibleLeads}>Approve all visible leads</button></div> },
     { key: 'draft-generation', label: 'Draft generation', ok: draftCounts.generated > 0, detail: `approved leads without drafts=${missingDrafts} drafts generated=${draftCounts.generated}`, action: <button className="btn-secondary text-xs" type="button" disabled={busy === 'generate-drafts'} onClick={generateDrafts}>Generate drafts for {missingDrafts || 'approved'} leads</button> },
     { key: 'draft-approval', label: 'Draft approval', ok: Number(approvedDrafts) > 0, detail: `pending=${draftCounts.pending} approved=${approvedDrafts} ready to send=${readyToSend}`, action: <div className="flex flex-wrap gap-2"><button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[data-voryx-draft-review]')?.scrollIntoView({ behavior: 'smooth' })}>Review drafts</button><button className="btn-secondary text-xs" type="button" disabled={busy === 'approve_all_generated'} onClick={() => bulkDraftAction('approve_all_generated')}>Approve all generated drafts</button></div> },
     { key: 'internal-test', label: 'Internal test', ok: Number(sendStatus?.readiness?.internal_tests || 0) > 0, detail: `${sendStatus?.readiness?.internal_tests || 0} prepared/sent. Recipient hard-limited to himanshusoni3214@gmail.com`, action: <button className="btn-secondary text-xs" type="button" disabled={!drafts.some((draft) => draft.status === 'draft_approved')} onClick={() => { const draft = drafts.find((item) => item.status === 'draft_approved'); if (draft) void draftAction(draft, 'internal-test'); }}>Prep internal test</button> },
     { key: 'enable', label: 'Enable prospect sending', ok: Boolean(settingsForm.prospect_sending_enabled), detail: settingsForm.prospect_sending_enabled ? 'Synced to DB and Hermes workspace/jobs safety policy' : 'Off until readiness passes', action: <div className="flex flex-wrap gap-2"><button className="btn-secondary text-xs" type="button" disabled={busy === 'enable-prospect' || !sendStatus?.readiness?.can_enable_prospect_sending || settingsForm.prospect_sending_enabled} onClick={() => setProspectSending(true)}>Enable</button><button className="btn-secondary text-xs" type="button" disabled={busy === 'disable-prospect' || !settingsForm.prospect_sending_enabled} onClick={() => setProspectSending(false)}>Disable</button></div> },
-    { key: 'batch', label: 'Send controlled batch', ok: canSend, detail: `approved leads=${approvedLeads} approved drafts=${approvedDrafts} ready=${readyToSend} daily remaining=${batchPreview?.limits?.daily_remaining ?? sendStatus?.batch_preview?.limits?.daily_remaining ?? 0}`, action: <div className="flex flex-wrap gap-2"><button className="btn-secondary text-xs" type="button" disabled={busy === 'preview-batch'} onClick={previewBatch}>Preview batch</button><button className="btn-secondary text-xs" type="button" disabled={!canSend || busy === 'send-controlled-batch'} onClick={sendControlledBatch}>Dry-run prepare</button><button className="btn-secondary text-xs" type="button" disabled={!canSend || busy === 'send-one-real'} onClick={() => sendReal(true)}>Send 1 real email</button><button className="btn-secondary text-xs" type="button" disabled={!canSend || busy === 'send-real-batch'} onClick={() => sendReal(false)}>Send controlled batch</button></div> },
-    { key: 'followup', label: 'Reply monitor / follow-up', ok: false, detail: followups?.reason || 'Disabled until Gmail/thread monitoring is connected', action: <span className="text-xs text-zinc-500">No follow-up send action</span> },
+    { key: 'batch', label: 'Send controlled batch', ok: canSend, detail: `approved leads=${approvedLeads} approved drafts=${approvedDrafts} ready=${readyToSend} daily remaining=${limits.daily_remaining ?? 0}`, action: <div className="flex flex-wrap gap-2"><button className="btn-secondary text-xs" type="button" disabled={busy === 'preview-batch'} onClick={previewBatch}>Preview email batch</button><button className="btn-secondary text-xs" type="button" disabled={!readyToSend || busy === 'send-controlled-batch'} onClick={sendControlledBatch}>Dry-run prepare</button>{canSendOne ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'send-one-real'} onClick={() => sendReal(true)}>Send 1 real email</button> : null}{canSend ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'send-real-batch'} onClick={() => sendReal(false)}>Send controlled batch</button> : null}<button className="btn-secondary text-xs" type="button" disabled={!readyToSend || busy === 'schedule-next-window'} onClick={scheduleNextWindow}>Schedule batch for next sending window</button></div> },
+    { key: 'followup', label: 'Reply monitor / follow-up', ok: false, detail: followups?.reason || 'Disabled until Gmail/thread monitoring is connected', action: <button className="btn-secondary text-xs" type="button" disabled>Connect Gmail / Verify thread tracking</button> },
   ];
 
   return (
-    <div className="mt-3 grid gap-3 rounded border border-zinc-800 p-3" data-voryx-outreach-controls>
+    <div className="mt-3 grid gap-3 rounded border border-zinc-800 p-3" data-voryx-outreach-controls data-voryx-ai-sales-control-center>
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div>
-          <h3 className="text-sm font-semibold text-zinc-100">Outreach Control</h3>
-          <p className="text-xs text-zinc-500">Current state: {currentState}. Approval-based, receipt-gated, and QA-safe by default.</p>
+          <h3 className="text-sm font-semibold text-zinc-100">AI Sales Employee Control Center</h3>
+          <p className="text-xs text-zinc-500">Current state: {currentState}. One approval-based workflow for leads, drafts, controlled sending, reports, and follow-up readiness.</p>
         </div>
         <div className={canSend ? 'text-xs text-emerald-400' : 'text-xs text-amber-300'}>{canSend ? 'Ready for controlled batch' : (sendStatus?.human_blockers?.[0] || batchPreview?.blockers?.[0] || 'Sending blocked')}</div>
+      </div>
+      <div className="rounded border border-emerald-900 bg-emerald-950/20 p-3" data-voryx-next-recommended-action>
+        <div className="text-xs uppercase text-emerald-300">Next recommended action</div>
+        <div className="mt-1 text-lg font-semibold text-zinc-100">{nextRecommendedAction}</div>
+        {!windowInfo.allowed ? <div className="mt-2 text-xs text-amber-200">Current time: {windowInfo.local_now || '-'} / Allowed window: {formatWindow(windowInfo)} / Next allowed send time: {windowInfo.next_allowed_send_at || '-'}</div> : null}
+      </div>
+      <div className="grid gap-2 md:grid-cols-3 xl:grid-cols-5" data-voryx-sales-employee-stats>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Leads found</p><p className="text-xl font-semibold">{coverage.total_leads ?? review?.items?.length ?? 0}</p></div>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Leads approved</p><p className="text-xl font-semibold">{approvedLeads}</p></div>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Drafts generated</p><p className="text-xl font-semibold">{draftCounts.generated}</p></div>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Drafts approved</p><p className="text-xl font-semibold">{approvedDrafts}</p></div>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Ready to send</p><p className="text-xl font-semibold">{readyToSend}</p></div>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Emails sent today</p><p className="text-xl font-semibold">{limits.daily_sent ?? 0}</p></div>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Replies received</p><p className="text-xl font-semibold">{asNumber(repliesReceived)}</p></div>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Meetings booked</p><p className="text-xl font-semibold">{asNumber(meetingsBooked)}</p></div>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Follow-ups due</p><p className="text-xl font-semibold">{asNumber(followupsDue)}</p></div>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Daily limit</p><p className="text-xl font-semibold">{limits.daily_limit ?? settingsForm.daily_send_limit ?? 5}</p></div>
+      </div>
+      <div className="flex flex-wrap gap-2" data-voryx-primary-sales-actions>
+        <button className="btn-secondary text-xs" type="button" disabled={busy === 'find-leads'} onClick={findLeads}>Find leads</button>
+        <button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[data-voryx-lead-review]')?.scrollIntoView({ behavior: 'smooth' })}>Review leads</button>
+        <button className="btn-secondary text-xs" type="button" disabled={busy === 'generate-drafts'} onClick={generateDrafts}>Generate drafts</button>
+        <button className="btn-secondary text-xs" type="button" disabled={busy === 'preview-batch'} onClick={previewBatch}>Preview email batch</button>
+        {canSendOne ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'send-one-real'} onClick={() => sendReal(true)}>Send 1 real email</button> : null}
+        {canSend ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'send-real-batch'} onClick={() => sendReal(false)}>Send controlled batch</button> : null}
+        <button className="btn-secondary text-xs" type="button" disabled={!readyToSend || busy === 'schedule-next-window'} onClick={scheduleNextWindow}>Schedule batch</button>
+        <button className="btn-secondary text-xs" type="button" disabled>View replies</button>
+        <button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[data-voryx-daily-report]')?.scrollIntoView({ behavior: 'smooth' })}>View report</button>
       </div>
       {error ? <div className="rounded border border-red-900 bg-red-950/40 p-2 text-xs text-red-200">{error}</div> : null}
       {message ? <div className="rounded border border-emerald-900 bg-emerald-950/30 p-2 text-xs text-emerald-200">{message}</div> : null}
@@ -232,14 +324,15 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
       </div>
 
       <div className="grid gap-2 rounded border border-zinc-800 p-2 text-xs" data-voryx-outreach-readiness>
-        <div className="font-semibold text-zinc-200">Send Readiness Workflow</div>
+        <div className="font-semibold text-zinc-200">Lead-to-Email Workflow</div>
         {workflow.map((step) => <div className="grid gap-2 border-t border-zinc-900 pt-2 md:grid-cols-[10rem_1fr_auto]" key={step.key}><span className={step.ok ? 'text-emerald-300' : 'text-amber-300'}>{statusText(step.ok)}: {step.label}</span><span className="text-zinc-500">{step.detail}</span><span>{step.action}</span></div>)}
       </div>
 
       <div className="grid gap-2 rounded border border-zinc-800 p-2 text-xs" data-voryx-batch-preview>
         <div className="font-semibold text-zinc-200">Batch Preview</div>
         <div className="text-zinc-400">Approved leads: {approvedLeads} / Drafts generated: {draftCounts.generated} / Approved drafts: {approvedDrafts} / Ready to send: {readyToSend} / Missing drafts: {missingDrafts} / Pending draft approval: {draftCounts.pending}</div>
-        <div className="text-zinc-400">Allowed window: {batchPreview?.window?.timezone || sendStatus?.batch_preview?.window?.timezone || 'America/Toronto'} / Daily remaining: {batchPreview?.limits?.daily_remaining ?? sendStatus?.batch_preview?.limits?.daily_remaining ?? 0} / Hourly remaining: {batchPreview?.limits?.hourly_remaining ?? sendStatus?.batch_preview?.limits?.hourly_remaining ?? 0}</div>
+        <div className="text-zinc-400">Allowed window: {formatWindow(windowInfo)} / Current time: {windowInfo.local_now || '-'} / Next allowed send: {windowInfo.next_allowed_send_at || (windowInfo.allowed ? 'now' : '-')}</div>
+        <div className="text-zinc-400">Daily remaining: {limits.daily_remaining ?? 0} / Hourly remaining: {limits.hourly_remaining ?? 0}</div>
         <div className="text-zinc-500">Real send confirmations: SEND 1 REAL EMAIL / SEND CONTROLLED BATCH</div>
         <div className="grid gap-1">
           {recipients.slice(0, 5).map((item) => <div className="rounded bg-zinc-950 p-2" key={item.lead_key}><div className="text-zinc-200">{item.business || item.lead_key} / {item.email}</div><div className="text-zinc-500">{item.subject}</div><div className="text-zinc-500">From {item.sender_email} / Reply-to {item.reply_to_email} / {item.unsubscribe_text}</div></div>)}
@@ -291,6 +384,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
         <div>Prospect send status: {(sendStatus?.human_blockers || []).join(' / ') || 'Ready for controlled sending'}</div>
         <div>Follow-up: {followups?.state || 'unknown'}{followups?.reason ? ` / ${followups.reason}` : ''}</div>
         <div>Reply Monitor: {replyMonitor?.state || 'unknown'}{replyMonitor?.reason ? ` / ${replyMonitor.reason}` : ''}</div>
+        <div>Calling: not connected. Required before enabling: voice provider, caller ID, call script, recording/transcript policy, do-not-call controls and daily call limit.</div>
         <div>Prospect emails sent during dashboard QA actions: 0</div>
       </div>
     </div>

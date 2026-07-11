@@ -2,7 +2,7 @@ import hashlib
 import json
 import os
 import re
-from datetime import datetime, time, timezone
+from datetime import datetime, time, timezone, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 from typing import Any
@@ -473,7 +473,27 @@ def _window_status(settings_payload_data: dict[str, Any], now: datetime | None =
         return {"allowed": False, "reason": "Allowed sending hours are invalid.", "timezone": timezone_name, "local_now": local_now.isoformat(), "window": allowed_hours}
     now_time = local_now.time().replace(second=0, microsecond=0)
     hour_allowed = start <= now_time <= end if start <= end else now_time >= start or now_time <= end
-    return {"allowed": bool(day_allowed and hour_allowed), "reason": None if day_allowed and hour_allowed else "Outside the approved sending day/hour window.", "timezone": timezone_name, "local_now": local_now.isoformat(), "window": {"days": allowed_days, "hours": {"start": start_text, "end": end_text}}}
+    allowed = bool(day_allowed and hour_allowed)
+    return {
+        "allowed": allowed,
+        "reason": None if allowed else "Outside the approved sending day/hour window.",
+        "timezone": timezone_name,
+        "local_now": local_now.isoformat(),
+        "next_allowed_send_at": None if allowed else _next_allowed_send_at(local_now, allowed_days, start),
+        "window": {"days": allowed_days, "hours": {"start": start_text, "end": end_text}},
+    }
+
+
+def _next_allowed_send_at(local_now: datetime, allowed_days: list[str], start: time) -> str:
+    for offset in range(0, 15):
+        candidate_date = local_now.date() + timedelta(days=offset)
+        candidate = datetime.combine(candidate_date, start, tzinfo=local_now.tzinfo)
+        if candidate <= local_now:
+            continue
+        if allowed_days and candidate.strftime("%A") not in allowed_days:
+            continue
+        return candidate.isoformat()
+    return ""
 
 
 def _latest_drafts_by_lead(drafts: list[OutreachDraft]) -> dict[str, OutreachDraft]:
@@ -608,6 +628,61 @@ def prepare_controlled_batch(db: Session, campaign: Campaign, user_id: str, *, l
     snapshot["evidence_path"] = evidence_path
     snapshot["prepared_event_ids"] = prepared
     return snapshot
+
+
+def schedule_controlled_batch_next_window(db: Session, campaign: Campaign, user_id: str, *, limit: int | None = 5) -> dict[str, Any]:
+    snapshot = _batch_snapshot(db, campaign, limit=limit)
+    recipients = snapshot.get("recipients") or snapshot.get("eligible_recipients") or []
+    if not recipients:
+        raise ValueError("Schedule blocked: no approved leads with approved drafts are ready to send")
+    next_allowed = snapshot.get("window", {}).get("next_allowed_send_at") or snapshot.get("window", {}).get("local_now")
+    now = utc_now()
+    batch_id = f"scheduled-batch-{campaign.id}-{int(now.timestamp())}"
+    evidence_path = _workspace_evidence_path(campaign.company_id, campaign.id, batch_id)
+    selected = recipients[: max(1, min(int(limit or 5), 5))]
+    job = Job(
+        campaign_id=campaign.id,
+        employee_id=snapshot.get("hermes_guard", {}).get("employee_id"),
+        connector="hermes",
+        task_type="Controlled Outreach Batch",
+        status=JobStatus.queued,
+        payload={
+            "batch_id": batch_id,
+            "mode": "scheduled_next_window",
+            "scheduled_for": next_allowed,
+            "limit": limit,
+            "source": "ai_sales_employee_control_center",
+            "dry_run": False,
+            "requires_confirmation": True,
+        },
+        result={"batch_id": batch_id, "scheduled_for": next_allowed, "selected_recipients": len(selected), "prospect_emails_sent": 0, "snapshot": snapshot},
+        logs=[
+            "Controlled batch scheduled from AI Sales Employee Control Center.",
+            "No prospect email was sent during scheduling.",
+            f"Scheduled for next allowed window: {next_allowed or 'unknown'}",
+        ],
+        evidence_type="controlled_batch_schedule",
+        source_output_path=evidence_path,
+        verification_reason="scheduled_only_no_provider_receipt",
+        attempts=0,
+        max_attempts=1,
+        created_at=now,
+    )
+    db.add(job)
+    db.flush()
+    evidence = {
+        "batch_id": batch_id,
+        "job_id": job.id,
+        "created_at": now.isoformat() + "Z",
+        "scheduled_for": next_allowed,
+        "selected_recipients": selected,
+        "prospect_emails_sent": 0,
+        "send_requires_confirmation": True,
+        "snapshot": snapshot,
+    }
+    if evidence_path:
+        Path(evidence_path).write_text(json.dumps(evidence, indent=2, sort_keys=True, default=str) + "\n", encoding="utf-8")
+    return {"ok": True, "batch_id": batch_id, "job_id": job.id, "scheduled_for": next_allowed, "evidence_path": evidence_path, "selected_recipients": len(selected), "prospect_emails_sent": 0, "snapshot": snapshot}
 
 
 def _write_send_evidence(company_id: str, campaign_id: str, batch_id: str, evidence: dict[str, Any]) -> str | None:

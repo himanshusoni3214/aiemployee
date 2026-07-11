@@ -40,6 +40,26 @@ function countJobs(jobs: Job[], campaignId: string, task?: string) {
   return jobs.filter((job) => job.campaign_id === campaignId && (!task || job.task_type === task)).length;
 }
 
+function primaryEmployee(employees: Employee[], campaignId: string) {
+  return employees.find((employee) => employee.campaign_id === campaignId && employee.status !== 'Archived' && ['Email Outreach', 'Lead Researcher', 'CRM Manager'].includes(employee.employee_type))
+    || employees.find((employee) => employee.campaign_id === campaignId && employee.status !== 'Archived');
+}
+
+function currentBlocker(campaign: Campaign, employee?: Employee) {
+  if (!employee) return 'Create or provision an AI Sales Employee for this campaign.';
+  if (!employee.hermes_job_id) return 'Employee is not connected to Hermes yet.';
+  if (campaign.dry_run_mode !== false && Number(campaign.daily_email_goal || 0) > 0) return 'Email sending is disabled until sender, compliance and internal-test readiness pass.';
+  if (employee.status === 'Paused') return 'Employee schedule is paused.';
+  return 'No current blocker detected.';
+}
+
+function campaignGoal(campaign: Campaign) {
+  const target = campaign.target_audience || 'target customers';
+  const area = campaign.geographic_area || 'selected market';
+  const industry = campaign.industry || 'selected niche';
+  return `${campaign.name}: find and convert ${target} in ${area} for ${industry}.`;
+}
+
 export default async function CampaignsPage({ searchParams }: { searchParams?: Promise<Record<string, string | string[] | undefined>> }) {
   const params = (await searchParams) || {};
   const companies = await serverApi<Company[]>('/companies', []);
@@ -81,48 +101,41 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-sm text-zinc-500">Companies &gt; {companyId ? companyName.get(companyId) : 'Select Company'} &gt; Campaigns</p>
-          <h1 className="text-2xl font-semibold">Campaigns</h1>
+          <p className="text-sm text-zinc-500">Company &gt; Campaign &gt; AI Sales Employee</p>
+          <h1 className="text-2xl font-semibold">AI Sales Employee Control Center</h1>
         </div>
-        <div className="text-sm text-zinc-400">{campaigns.length} campaigns</div>
+        <div className="text-sm text-zinc-400">{campaigns.length} sales campaigns</div>
       </div>
       <CompanySelector companies={companies} selectedCompanyId={companyId} label="Company" />
       {!companyId ? <div className="card text-sm text-amber-300">Select a company to manage campaigns.</div> : null}
       <div className="grid gap-3 md:grid-cols-4">
-        <div className="card"><p className="text-sm text-zinc-400">Active</p><p className="mt-2 text-3xl font-semibold">{campaigns.filter((campaign) => campaign.status === 'Active').length}</p></div>
-        <div className="card"><p className="text-sm text-zinc-400">Outreach Jobs</p><p className="mt-2 text-3xl font-semibold">{jobs.filter((job) => job.task_type === 'Send Outreach').length}</p></div>
-        <div className="card"><p className="text-sm text-zinc-400">Lead Jobs</p><p className="mt-2 text-3xl font-semibold">{jobs.filter((job) => job.task_type === 'Generate Leads').length}</p></div>
-        <div className="card"><p className="text-sm text-zinc-400">Failed Jobs</p><p className="mt-2 text-3xl font-semibold">{jobs.filter((job) => job.status === 'Failed').length}</p></div>
+        <div className="card"><p className="text-sm text-zinc-400">Active sales employees</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.status !== 'Archived').length}</p></div>
+        <div className="card"><p className="text-sm text-zinc-400">Lead research runs</p><p className="mt-2 text-3xl font-semibold">{jobs.filter((job) => job.task_type === 'Generate Leads').length}</p></div>
+        <div className="card"><p className="text-sm text-zinc-400">Controlled email runs</p><p className="mt-2 text-3xl font-semibold">{jobs.filter((job) => job.task_type === 'Controlled Outreach Batch' || job.task_type === 'Send Outreach').length}</p></div>
+        <div className="card"><p className="text-sm text-zinc-400">Needs attention</p><p className="mt-2 text-3xl font-semibold">{jobs.filter((job) => job.status === 'Failed' || job.status === 'Blocked').length}</p></div>
       </div>
       <div className="table-wrap">
         <table className="ops-table">
-          <thead><tr><th>Campaign</th><th>Company</th><th>Blueprint</th><th>Target Definition</th><th>Provisioning</th><th>Daily Goals</th><th>Imported Jobs</th><th>Status</th></tr></thead>
+          <thead><tr><th>Sales campaign</th><th>Company</th><th>AI employee</th><th>Goal</th><th>Daily targets</th><th>Status</th></tr></thead>
           <tbody>
-            {campaigns.map((campaign) => (
+            {campaigns.map((campaign) => {
+              const employee = primaryEmployee(employees, campaign.id);
+              return (
               <tr key={campaign.id}>
                 <td className="font-medium text-stone-100">{campaign.name}</td>
                 <td>{companyName.get(campaign.company_id) || campaign.company_id}</td>
-                <td>{(campaign.campaign_type || 'custom').replaceAll('_', ' ')}</td>
+                <td>{employee ? `${employee.name} / ${employee.employee_type}` : 'No AI employee yet'}</td>
                 <td>
                   <div className="max-w-md text-xs text-zinc-400">
                     <div>{campaign.industry || 'Industry missing'} / {campaign.geographic_area || 'Location missing'}</div>
                     <div>{campaign.target_audience || 'Target customer not set'}</div>
-                    <div>{campaign.description || 'Offer/product and notes not set'}</div>
-                    <div>{campaign.dry_run_mode === false ? 'Email sending enabled' : 'Lead generation only. Email sending disabled.'}</div>
-                    <div>Report: {campaign.report_recipient || 'not set'} / {campaign.timezone || 'America/Toronto'}</div>
                   </div>
                 </td>
-                <td>
-                  <div>{campaign.provisioning_state || 'Draft'}</div>
-                  <div className="text-xs text-zinc-500">{(hermesIdsByCampaign.get(campaign.id) || []).join(' / ') || String(campaign.provisioning_result?.hermes_job_id || '') || 'No Hermes job'}</div>
-                  <div className="text-xs text-zinc-500">{String(campaign.provisioning_result?.approved_script || '').includes('voryx_generic_lead_research.py') ? 'Generic lead script' : ''}</div>
-                </td>
                 <td>{campaign.daily_lead_goal ?? 0} leads, {campaign.daily_email_goal ?? 0} emails</td>
-                <td>{countJobs(jobs, campaign.id)} total / {countJobs(jobs, campaign.id, 'Send Outreach')} outreach</td>
                 <td>{campaign.status}</td>
               </tr>
-            ))}
-            {!campaigns.length ? <tr><td colSpan={8} className="text-zinc-400">{companyId ? 'No campaigns for selected company' : 'No company selected'}</td></tr> : null}
+            );})}
+            {!campaigns.length ? <tr><td colSpan={6} className="text-zinc-400">{companyId ? 'No campaigns for selected company' : 'No company selected'}</td></tr> : null}
           </tbody>
         </table>
       </div>
@@ -130,50 +143,73 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
         <div className="space-y-3">
           {campaigns.map((campaign) => {
             const detail = (leadDetails as Record<string, { schema: LeadSchema; outputs: LeadOutputs }>)[campaign.id] || { schema: {}, outputs: { outputs: [], rows: [] } };
+            const employee = primaryEmployee(employees, campaign.id);
+            const campaignSchedules = schedules.filter((schedule) => employees.some((item) => item.id === schedule.employee_id && item.campaign_id === campaign.id));
+            const nextSchedule = campaignSchedules.find((schedule) => !schedule.is_paused) || campaignSchedules[0];
             return (
               <div className="card" key={campaign.id}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <h2 className="text-lg font-semibold">{campaign.name}</h2>
-                    <p className="text-sm text-zinc-400">Lead Sheet Fields and Generated Files. Locked fields are preserved; custom fields save to PostgreSQL and workspace config.</p>
-                    <p className="mt-1 text-xs text-zinc-500">Add Lead Researcher / Add Daily Reporter / Add Outreach Draft Writer from AI Employees. Reply Handler and Voice Agent are not connected.</p>
+                    <p className="text-sm text-zinc-500">Company &gt; {companyName.get(campaign.company_id) || campaign.company_id} &gt; {campaign.name} &gt; AI Sales Employee</p>
+                    <h2 className="text-xl font-semibold">{employee?.name || 'AI Sales Employee'}</h2>
+                    <p className="text-sm text-zinc-400">{campaignGoal(campaign)}</p>
+                    <p className="mt-1 text-xs text-zinc-500">Current blocker: {currentBlocker(campaign, employee)}</p>
                   </div>
-                  <div className="text-xs text-zinc-500">{(hermesIdsByCampaign.get(campaign.id) || []).join(' / ') || String(campaign.provisioning_result?.hermes_job_id || 'No Hermes job')}</div>
+                  <div className="text-right text-xs text-zinc-400">
+                    <div>Status: <span className="text-zinc-100">{employee?.status || campaign.status}</span></div>
+                    <div>Next scheduled action: <LocalTime value={nextSchedule?.next_run_at} /></div>
+                  </div>
                 </div>
                 <div className="mt-4 grid gap-3" data-voryx-campaign-detail-sections>
                   <section className="rounded border border-zinc-800 p-3">
-                    <h3 className="text-sm font-semibold">Overview</h3>
+                    <h3 className="text-sm font-semibold">Goal</h3>
                     <p className="mt-1 text-xs text-zinc-400">{campaign.industry || 'Industry missing'} / {campaign.geographic_area || 'Location missing'} / {campaign.target_audience || 'Target customer missing'}</p>
+                    <p className="mt-1 text-xs text-zinc-400">{campaign.description || 'Offer/product and notes not set'}</p>
                   </section>
                   <section className="rounded border border-zinc-800 p-3">
-                    <h3 className="text-sm font-semibold">Lead Sheet / Leads</h3>
+                    <h3 className="text-sm font-semibold">Leads</h3>
                     <LeadSchemaEditor campaignId={campaign.id} initialSchema={detail.schema || {}} />
                   </section>
                   <section className="rounded border border-zinc-800 p-3">
-                    <h3 className="text-sm font-semibold">Generated Files</h3>
+                    <h3 className="text-sm font-semibold">Lead Files</h3>
                     <LeadOutputsPanel outputs={detail.outputs.outputs || []} rows={detail.outputs.rows || []} />
                   </section>
                   <section className="rounded border border-zinc-800 p-3">
-                    <h3 className="text-sm font-semibold">Outreach Control</h3>
+                    <h3 className="text-sm font-semibold">Email Sending Workflow</h3>
                     <OutreachControlsPanel companyId={campaign.company_id} campaignId={campaign.id} />
                   </section>
                   <section className="rounded border border-zinc-800 p-3">
-                    <h3 className="text-sm font-semibold">Drafts</h3>
-                    <p className="mt-1 text-xs text-zinc-400">Draft generation, approval, and internal testing are controlled in Outreach Control above. Prospect sends stay blocked unless readiness passes.</p>
+                    <h3 className="text-sm font-semibold">Replies and Meetings</h3>
+                    <p className="mt-1 text-xs text-zinc-400">Reply Monitor: not connected. Follow-up is blocked until Gmail thread monitoring, bounces, unsubscribes and reply classification are connected.</p>
+                    <p className="mt-1 text-xs text-zinc-400">Meetings booked: 0. Appointment booking will activate only after reply monitor and calendar policy are connected.</p>
                   </section>
                   <section className="rounded border border-zinc-800 p-3">
-                    <h3 className="text-sm font-semibold">Employees</h3>
-                    <div className="mt-2 grid gap-1 text-xs text-zinc-400">{employees.filter((employee) => employee.campaign_id === campaign.id && employee.status !== 'Archived').map((employee) => <div key={employee.id}>{employee.name} / {employee.employee_type} / {employee.status} / {employee.hermes_job_id || 'no Hermes job'}</div>)}</div>
+                    <h3 className="text-sm font-semibold">Calling</h3>
+                    <p className="mt-1 text-xs text-zinc-400">Status: not connected. Required before enabling: voice provider, caller ID, call script, recording/transcript policy, do-not-call controls and daily call limit.</p>
                   </section>
                   <section className="rounded border border-zinc-800 p-3">
-                    <h3 className="text-sm font-semibold">Schedule</h3>
-                    <div className="mt-2 grid gap-1 text-xs text-zinc-400">{schedules.filter((schedule) => employees.some((employee) => employee.id === schedule.employee_id && employee.campaign_id === campaign.id)).map((schedule) => <div key={schedule.id}>{schedule.name} / {schedule.is_paused ? 'Paused' : 'Active'} / {schedule.cron} / next <LocalTime value={schedule.next_run_at} /></div>)}</div>
+                    <h3 className="text-sm font-semibold">Daily Report</h3>
+                    <p className="mt-1 text-xs text-zinc-400">Business-readable daily reports summarize what happened today, leads found, drafts created, emails sent, replies, meetings, blockers, next recommended action and files.</p>
                   </section>
-                  <section className="rounded border border-zinc-800 p-3">
-                    <h3 className="text-sm font-semibold">Reports</h3>
-                    <p className="mt-1 text-xs text-zinc-400">Daily reports use the approved internal report recipient and durable receipt evidence before they count as sent.</p>
-                  </section>
-                  <ModelPolicyPanel scope="company" companyId={campaign.company_id} title="Model Policy" compact />
+                  <details className="rounded border border-zinc-800 p-3">
+                    <summary className="cursor-pointer text-sm font-semibold">Advanced</summary>
+                    <div className="mt-3 grid gap-3">
+                      <section className="rounded border border-zinc-900 p-3">
+                        <h3 className="text-sm font-semibold">Hermes Sync and Job IDs</h3>
+                        <p className="mt-1 text-xs text-zinc-400">{(hermesIdsByCampaign.get(campaign.id) || []).join(' / ') || String(campaign.provisioning_result?.hermes_job_id || 'No Hermes job')}</p>
+                        <p className="mt-1 text-xs text-zinc-500">Provisioning: {campaign.provisioning_state || 'Draft'} / Imported jobs: {countJobs(jobs, campaign.id)} total</p>
+                      </section>
+                      <section className="rounded border border-zinc-900 p-3">
+                        <h3 className="text-sm font-semibold">Raw Schedules</h3>
+                        <div className="mt-2 grid gap-1 text-xs text-zinc-400">{campaignSchedules.map((schedule) => <div key={schedule.id}>{schedule.name} / {schedule.is_paused ? 'Paused' : 'Active'} / {schedule.cron} / next <LocalTime value={schedule.next_run_at} /></div>)}</div>
+                      </section>
+                      <section className="rounded border border-zinc-900 p-3">
+                        <h3 className="text-sm font-semibold">Raw Employees</h3>
+                        <div className="mt-2 grid gap-1 text-xs text-zinc-400">{employees.filter((item) => item.campaign_id === campaign.id && item.status !== 'Archived').map((item) => <div key={item.id}>{item.name} / {item.employee_type} / {item.status} / {item.hermes_job_id || 'no Hermes job'}</div>)}</div>
+                      </section>
+                      <ModelPolicyPanel scope="company" companyId={campaign.company_id} title="Model Policy" compact />
+                    </div>
+                  </details>
                 </div>
               </div>
             );

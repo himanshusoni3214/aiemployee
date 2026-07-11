@@ -18,6 +18,7 @@ from app.services.audit import log
 from app.services.connectors import get_connector
 from app.services.daily_report import generate_daily_report, render_report, write_report_artifact
 from app.services.hermes_control import HermesControlError, HermesControlService
+from app.services.hermes_jobs_json_executor import execute_scheduled_jobs_json_task
 from app.services.hermes_live import HermesLiveMonitor
 from app.services.hermes_safety import SAFETY_LOCK_MESSAGE, is_safety_blocked_action, safety_block_result
 from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as _sync_hermes_snapshot
@@ -62,6 +63,7 @@ from app.services.outreach import (
     lead_key_for,
     reply_monitor_status,
     prepare_controlled_batch,
+    schedule_controlled_batch_next_window,
     send_real_controlled_batch,
     review_items_from_rows,
     send_blockers,
@@ -853,6 +855,90 @@ def preview_controlled_outreach_batch(campaign_id: str, limit: int|None=None, db
     campaign = db.get(Campaign, campaign_id)
     if not campaign: raise HTTPException(404, 'Campaign not found')
     return controlled_batch_preview(db, campaign, limit=limit)
+
+
+@router.post('/campaigns/{campaign_id}/sales/find-leads')
+def sales_employee_find_leads(campaign_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    employee = db.scalar(
+        select(AIEmployee)
+        .where(
+            AIEmployee.campaign_id == campaign.id,
+            AIEmployee.status != EmployeeStatus.archived,
+            AIEmployee.employee_type.in_(['Lead Researcher', 'Lead Research', 'Lead Generator']),
+            AIEmployee.hermes_job_id.is_not(None),
+        )
+        .order_by(AIEmployee.name)
+    )
+    if not employee:
+        employee = db.scalar(
+            select(AIEmployee)
+            .where(
+                AIEmployee.company_id == campaign.company_id,
+                AIEmployee.status != EmployeeStatus.archived,
+                AIEmployee.employee_type.in_(['Lead Researcher', 'Lead Research', 'Lead Generator']),
+                AIEmployee.hermes_job_id.is_not(None),
+            )
+            .order_by(AIEmployee.name)
+        )
+    if not employee or not employee.hermes_job_id:
+        raise HTTPException(400, 'Find leads requires a provisioned Lead Research employee with a Hermes job ID.')
+    schedule = db.scalar(select(Schedule).where(Schedule.employee_id == employee.id).order_by(Schedule.name).limit(1))
+    payload = dict(schedule.payload or {}) if schedule and isinstance(schedule.payload, dict) else {}
+    payload.update({'campaign_id': campaign.id, 'company_id': campaign.company_id, 'hermes_job_id': employee.hermes_job_id, 'source': 'ai_sales_employee_control_center'})
+    started = datetime.utcnow()
+    job = Job(
+        employee_id=employee.id,
+        campaign_id=campaign.id,
+        connector='hermes',
+        task_type='Generate Leads',
+        status=JobStatus.running,
+        payload=payload,
+        logs=['Find leads requested from AI Sales Employee Control Center.'],
+        attempts=1,
+        max_attempts=1,
+        started_at=started,
+        created_at=started,
+    )
+    db.add(job); db.flush()
+    result = execute_scheduled_jobs_json_task('Generate Leads', payload)
+    status = str(result.get('status') or '').lower()
+    job.result = result.get('results') or result
+    job.logs = list(job.logs or []) + list(result.get('logs') or [])
+    job.ended_at = datetime.utcnow()
+    if status == 'ok':
+        job.status = JobStatus.completed
+        job.verification_reason = 'lead_research_output_verified'
+    elif status == 'blocked':
+        job.status = JobStatus.blocked
+        job.error_message = result.get('error')
+        job.verification_reason = 'lead_research_blocked'
+    elif status == 'unsupported':
+        job.status = JobStatus.skipped
+        job.error_message = result.get('error')
+        job.verification_reason = 'lead_research_unsupported'
+    else:
+        job.status = JobStatus.failed
+        job.error_message = result.get('error') or 'Lead research execution failed'
+        job.verification_reason = 'lead_research_failed'
+    log(db, 'AI Sales Employee Find Leads', 'Campaign', campaign.id, campaign.company_id, user.id, {'job_id': job.id, 'hermes_job_id': employee.hermes_job_id, 'status': job.status.value, 'prospect_emails_sent': 0})
+    db.commit(); db.refresh(job)
+    return {'ok': job.status == JobStatus.completed, 'job_id': job.id, 'status': job.status.value, 'message': job.error_message or 'Lead research completed with Hermes evidence.', 'result': job.result, 'prospect_emails_sent': 0}
+
+
+@router.post('/campaigns/{campaign_id}/outreach/schedule-next-window')
+def schedule_controlled_outreach_next_window(campaign_id: str, payload: dict=Body(default={}), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    campaign = db.get(Campaign, campaign_id)
+    if not campaign: raise HTTPException(404, 'Campaign not found')
+    try:
+        result = schedule_controlled_batch_next_window(db, campaign, user.id, limit=int(payload.get('limit') or 5))
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(400, {'message': str(exc), 'preview': controlled_batch_preview(db, campaign), 'prospect_emails_sent': 0}) from exc
+    log(db, 'Controlled Batch Scheduled', 'Campaign', campaign.id, campaign.company_id, user.id, {'batch_id': result.get('batch_id'), 'job_id': result.get('job_id'), 'scheduled_for': result.get('scheduled_for'), 'prospect_emails_sent': 0})
+    db.commit()
+    return result
 
 
 @router.post('/campaigns/{campaign_id}/outreach/send-controlled-batch')

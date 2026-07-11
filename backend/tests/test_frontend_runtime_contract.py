@@ -195,11 +195,20 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         source = read_frontend("components/OutreachControlsPanel.tsx")
 
         self.assertIn("data-voryx-outreach-readiness", source)
+        self.assertIn("data-voryx-ai-sales-control-center", source)
+        self.assertIn("data-voryx-next-recommended-action", source)
+        self.assertIn("data-voryx-sales-employee-stats", source)
+        self.assertIn("data-voryx-primary-sales-actions", source)
         self.assertIn("data-voryx-sender-verification", source)
-        self.assertIn("Send Readiness Workflow", source)
-        self.assertIn("Preview batch", source)
+        self.assertIn("Lead-to-Email Workflow", source)
+        self.assertIn("Approve all visible leads", source)
+        self.assertIn("Generate drafts for", source)
+        self.assertIn("Preview email batch", source)
         self.assertIn("Dry-run prepare", source)
         self.assertIn("Send 1 real email", source)
+        self.assertIn("Schedule batch for next sending window", source)
+        self.assertIn("Connect Gmail / Verify thread tracking", source)
+        self.assertIn("Calling: not connected", source)
         self.assertIn("SEND 1 REAL EMAIL", source)
         self.assertIn("SEND CONTROLLED BATCH", source)
         self.assertIn("Approve all generated drafts", source)
@@ -210,7 +219,12 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         source = read_frontend("app/campaigns/page.tsx")
 
         self.assertIn("data-voryx-campaign-detail-sections", source)
-        for label in ["Overview", "Lead Sheet / Leads", "Generated Files", "Outreach Control", "Drafts", "Employees", "Schedule", "Reports", "Model Policy"]:
+        self.assertIn("AI Sales Employee Control Center", source)
+        self.assertIn("Company &gt; Campaign &gt; AI Sales Employee", source)
+        self.assertIn("Current blocker:", source)
+        self.assertIn("<details", source)
+        self.assertIn("Advanced", source)
+        for label in ["Goal", "Leads", "Lead Files", "Email Sending Workflow", "Replies and Meetings", "Calling", "Daily Report", "Hermes Sync and Job IDs", "Raw Schedules", "Raw Employees", "Model Policy"]:
             self.assertIn(label, source)
 
     def test_jobs_page_displays_delivery_evidence_fields(self):

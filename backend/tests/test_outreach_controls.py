@@ -33,6 +33,7 @@ from app.services.outreach import (
     validate_outreach_settings,
     outreach_readiness,
     prepare_controlled_batch,
+    schedule_controlled_batch_next_window,
     send_real_controlled_batch,
     sender_verification,
 )
@@ -174,6 +175,42 @@ class OutreachControlsTests(unittest.TestCase):
             self.assertIn('real_send_confirmed', str(missing_confirmation.exception))
         finally:
             db.close()
+
+    def test_schedule_next_window_records_job_and_evidence_without_sending(self):
+        db = self.Session()
+        with tempfile.TemporaryDirectory() as tmp:
+            try:
+                user, company, campaign, _other, _other_campaign = self.seed(db)
+                settings = CompanyOutreachSettings(company_id=company.id, **{k: v for k, v in default_outreach_settings(company.id).items() if k != 'company_id'})
+                settings.sender_name = 'Voryx'
+                settings.sender_email = 'voryxio@gmail.com'
+                settings.reply_to_email = 'voryxio@gmail.com'
+                settings.physical_mailing_address = '123 QA St'
+                settings.compliance_acknowledged = True
+                settings.prospect_sending_enabled = True
+                settings.allowed_sending_days = []
+                settings.allowed_sending_hours = {'start': '00:00', 'end': '23:59'}
+                db.add(settings)
+                db.add(LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach'))
+                db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP.', status='draft_approved'))
+                db.flush()
+
+                from app.core.config import settings as app_settings
+                original_path = app_settings.hermes_data_path
+                app_settings.hermes_data_path = tmp
+                try:
+                    result = schedule_controlled_batch_next_window(db, campaign, user.id, limit=5)
+                finally:
+                    app_settings.hermes_data_path = original_path
+
+                self.assertEqual(result['prospect_emails_sent'], 0)
+                self.assertEqual(result['selected_recipients'], 1)
+                job = db.get(Job, result['job_id'])
+                self.assertEqual(job.status.value, 'Queued')
+                self.assertEqual(job.evidence_type, 'controlled_batch_schedule')
+                self.assertTrue(job.source_output_path)
+            finally:
+                db.close()
 
     def test_bulk_approve_generated_drafts_for_approved_leads(self):
         db = self.Session()
