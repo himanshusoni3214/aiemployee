@@ -197,15 +197,20 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("data-voryx-email-marketing-employee", source)
         self.assertIn("data-voryx-next-recommended-action", source)
         self.assertIn("data-voryx-simple-email-actions", source)
+        self.assertIn("data-voryx-outreach-mode", source)
+        self.assertIn("showLeadWorkflow", source)
+        self.assertIn("showEmailWorkflow", source)
+        self.assertIn("Use approved Lead Research leads or connect this workflow to a lead source", source)
         self.assertIn("data-voryx-email-advanced", source)
         self.assertIn("data-voryx-sender-verification", source)
         self.assertIn("data-voryx-approved-sending-window", source)
         for label in ["Generate leads", "Approve visible leads", "Generate email draft", "Approve all drafts", "Send test", "Send approved emails", "Report"]:
             self.assertIn(label, source)
-        for label in ["Approved sending window", "Start time", "End time", "Start date", "End date", "Timezone"]:
+        for label in ["Approved sending window", "Start time", "End time", "Start date", "End date", "Timezone", "Hourly limit"]:
             self.assertIn(label, source)
         self.assertIn("allowed_sending_days", source)
         self.assertIn("allowed_sending_hours", source)
+        self.assertIn("hourly_send_limit", source)
         self.assertIn("allowed_sending_start_date", source)
         self.assertIn("allowed_sending_end_date", source)
         self.assertIn("Save draft changes", source)
@@ -215,6 +220,7 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertNotIn("Use this draft", source)
         self.assertIn("SEND CONTROLLED BATCH", source)
         self.assertIn("Cold calling, text marketing and social outreach are separate employees", source)
+        self.assertIn("do not treat assumed addresses as safe", source)
         self.assertNotIn("Dry-run prepare", source)
         self.assertNotIn("Send 1 real email", source)
 
@@ -222,6 +228,10 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         source = read_frontend("app/campaigns/page.tsx")
 
         self.assertIn("data-voryx-campaign-detail-sections", source)
+        self.assertIn("DailyReportPanel", source)
+        self.assertIn("isLeadResearchEmployee", source)
+        self.assertIn("isEmailOutreachEmployee", source)
+        self.assertIn("isReportingEmployee", source)
         self.assertIn("AI Sales Employee Control Center", source)
         self.assertIn("Company &gt; Campaign &gt; AI Sales Employee", source)
         self.assertIn("Current blocker:", source)
@@ -248,6 +258,14 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("detail?.detail?.message", source)
         self.assertIn("console.error('API request failed'", source)
         self.assertIn("throw new Error(errorMessage", source)
+
+    def test_daily_report_route_uses_jobs_json_executor_with_receipt_evidence(self):
+        source = (ROOT / "backend" / "app" / "api" / "routes.py").read_text(encoding="utf-8")
+
+        self.assertIn("execute_scheduled_jobs_json_task", source)
+        self.assertIn("'hermes_job_id': '5881b72113ce'", source)
+        self.assertIn("'provider_message_id': delivery_job.provider_message_id", source)
+        self.assertIn("'Daily report delivered with provider receipt evidence.'", source)
 
 
 if __name__ == "__main__":

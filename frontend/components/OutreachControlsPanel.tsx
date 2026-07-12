@@ -17,6 +17,7 @@ type BatchPreview = {
   prospect_emails_sent?: number;
   confirmation_required?: { send_one?: string; batch?: string };
 };
+type OutreachMode = 'lead_research' | 'email_outreach' | 'full';
 
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
@@ -45,7 +46,17 @@ function draftMissingRequiredFooter(body: string, unsubscribeText: string) {
   return Boolean(required && !(body || '').includes(required));
 }
 
-export function OutreachControlsPanel({ companyId, campaignId }: { companyId: string; campaignId: string }) {
+export function OutreachControlsPanel({
+  companyId,
+  campaignId,
+  mode = 'full',
+  reportHref,
+}: {
+  companyId: string;
+  campaignId: string;
+  mode?: OutreachMode;
+  reportHref?: string;
+}) {
   const [settings, setSettings] = useState<any>(null);
   const [review, setReview] = useState<{ items: ReviewItem[]; counts: Record<string, number>; eligible_count: number; source_path?: string } | null>(null);
   const [drafts, setDrafts] = useState<Draft[]>([]);
@@ -225,6 +236,8 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
   }
 
   const settingsForm = settings || {};
+  const showLeadWorkflow = mode === 'lead_research' || mode === 'full';
+  const showEmailWorkflow = mode === 'email_outreach' || mode === 'full';
   const allowedDays = Array.isArray(settingsForm.allowed_sending_days) ? settingsForm.allowed_sending_days : [];
   const allowedHours = settingsForm.allowed_sending_hours || {};
   const reviewCounts = review?.counts || {};
@@ -240,7 +253,12 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
   const visibleDrafts = drafts.filter((draft) => draft.status !== 'draft_rejected').slice(0, 5);
   const blocker = firstBlocker(sendStatus, batchPreview);
   const nextStep = (() => {
-    if (!review?.items?.length) return 'Generate leads';
+    if (!showEmailWorkflow) {
+      if (!review?.items?.length) return 'Generate leads';
+      if (approvedLeads <= 0) return 'Review and approve real leads';
+      return 'Lead research complete for approved leads';
+    }
+    if (!review?.items?.length) return 'Use approved Lead Research leads or connect this workflow to a lead source';
     if (approvedLeads <= 0) return 'Approve leads';
     if (missingDrafts > 0 || !draftCounts.generated) return 'Generate email drafts';
     if (draftCounts.approved <= 0) return 'Review drafts, then approve all drafts or edit one draft';
@@ -251,11 +269,11 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
   })();
 
   return (
-    <div className="mt-3 grid gap-4 rounded border border-zinc-800 p-3" data-voryx-outreach-controls data-voryx-email-marketing-employee>
+    <div className="mt-3 grid gap-4 rounded border border-zinc-800 p-3" data-voryx-outreach-controls data-voryx-email-marketing-employee data-voryx-outreach-mode={mode}>
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-zinc-100">Email Marketing Employee</h3>
-          <p className="text-xs text-zinc-500">Simple flow: generate leads, approve leads, review one draft, test, send, report.</p>
+          <h3 className="text-sm font-semibold text-zinc-100">{showEmailWorkflow ? 'Email Marketing Workflow' : 'Lead Research Workflow'}</h3>
+          <p className="text-xs text-zinc-500">{showEmailWorkflow ? 'Simple flow: review approved leads, generate drafts, test, send, report.' : 'Generate real leads, inspect source evidence, then approve only valid contacts.'}</p>
         </div>
         <div className="rounded border border-emerald-900 bg-emerald-950/20 px-3 py-2 text-xs text-emerald-200" data-voryx-next-recommended-action>
           Next: <span className="font-semibold">{nextStep}</span>
@@ -274,15 +292,16 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
       </div>
 
       <div className="flex flex-wrap gap-2" data-voryx-simple-email-actions>
-        <button className="btn-secondary text-xs" type="button" disabled={busy === 'find-leads'} onClick={findLeads}>Generate leads</button>
-        <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve-visible-leads'} onClick={approveVisibleLeads}>Approve visible leads</button>
-        <button className="btn-secondary text-xs" type="button" disabled={busy === 'generate-drafts' || approvedLeads <= 0} onClick={generateDrafts}>Generate email draft</button>
-        <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve_all_generated' || !draftCounts.generated} onClick={approveAllDrafts}>Approve all drafts</button>
-        <button className="btn-secondary text-xs" type="button" disabled={busy === 'internal-test' || !drafts.length} onClick={sendTest}>Send test</button>
-        <button className="btn text-xs" type="button" disabled={!canSend || busy === 'send-real-batch'} title={!canSend ? (blocker || 'Complete the previous steps before sending') : 'Send approved emails through Hermes/Himalaya'} onClick={sendApprovedEmails}>Send approved emails</button>
-        <button className="btn-secondary text-xs" type="button" onClick={() => document.querySelector('[data-voryx-daily-report]')?.scrollIntoView({ behavior: 'smooth' })}>Report</button>
+        {showLeadWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'find-leads'} onClick={findLeads}>Generate leads</button> : null}
+        {showLeadWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve-visible-leads'} onClick={approveVisibleLeads}>Approve visible leads</button> : null}
+        {showEmailWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'generate-drafts' || approvedLeads <= 0} onClick={generateDrafts}>Generate email draft</button> : null}
+        {showEmailWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve_all_generated' || !draftCounts.generated} onClick={approveAllDrafts}>Approve all drafts</button> : null}
+        {showEmailWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'internal-test' || !drafts.length} onClick={sendTest}>Send test</button> : null}
+        {showEmailWorkflow ? <button className="btn text-xs" type="button" disabled={!canSend || busy === 'send-real-batch'} title={!canSend ? (blocker || 'Complete the previous steps before sending') : 'Send approved emails through Hermes/Himalaya'} onClick={sendApprovedEmails}>Send approved emails</button> : null}
+        <a className="btn-secondary text-xs" href={reportHref || `/reports?company_id=${companyId}`}>Report</a>
       </div>
-      {!canSend && readyToSend > 0 ? <div className="rounded border border-amber-900 bg-amber-950/20 p-2 text-xs text-amber-200">Send is blocked: {blocker || 'readiness checks are incomplete'}. {windowInfo?.allowed === false ? `Allowed window: ${formatWindow(windowInfo)}. Next allowed send: ${windowInfo.next_allowed_send_at || '-'}.` : null}</div> : null}
+      {showEmailWorkflow ? <div className="rounded border border-amber-900 bg-amber-950/20 p-2 text-xs text-amber-200">Send only to verified, real public inboxes. Current lead rows do not include a separate email-verification flag, so do not treat assumed addresses as safe.</div> : null}
+      {showEmailWorkflow && !canSend && readyToSend > 0 ? <div className="rounded border border-amber-900 bg-amber-950/20 p-2 text-xs text-amber-200">Send is blocked: {blocker || 'readiness checks are incomplete'}. {windowInfo?.allowed === false ? `Allowed window: ${formatWindow(windowInfo)}. Next allowed send: ${windowInfo.next_allowed_send_at || '-'}.` : null}</div> : null}
 
       <section className="rounded border border-zinc-800 p-3" data-voryx-lead-review>
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
@@ -308,7 +327,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
         </div>
       </section>
 
-      <section className="grid gap-2 rounded border border-zinc-800 p-3" data-voryx-draft-review>
+      {showEmailWorkflow ? <section className="grid gap-2 rounded border border-zinc-800 p-3" data-voryx-draft-review>
         <div className="flex flex-wrap items-center justify-between gap-2">
           <h4 className="text-sm font-semibold">Email Draft</h4>
           <span className="text-xs text-zinc-500">Edit only if needed, then approve all drafts. Footers are added automatically.</span>
@@ -330,9 +349,9 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
           );
         })}
         {!visibleDrafts.length ? <p className="text-xs text-zinc-500">No email draft yet. Approve leads, then generate an email draft.</p> : null}
-      </section>
+      </section> : null}
 
-      <details className="rounded border border-zinc-800 p-3" data-voryx-email-advanced>
+      {showEmailWorkflow ? <details className="rounded border border-zinc-800 p-3" data-voryx-email-advanced>
         <summary className="cursor-pointer text-sm font-semibold">Advanced email settings and Hermes safety</summary>
         <div className="mt-3 grid gap-3">
           <div className="grid gap-2 md:grid-cols-3">
@@ -342,6 +361,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
             <input className="input" placeholder="Physical mailing address" value={settingsForm.physical_mailing_address || ''} onChange={(e) => setSettings({ ...settingsForm, physical_mailing_address: e.target.value })} />
             <input className="input" placeholder="Unsubscribe text" value={settingsForm.unsubscribe_text || ''} onChange={(e) => setSettings({ ...settingsForm, unsubscribe_text: e.target.value })} />
             <input className="input" type="number" min="1" max="5" placeholder="Daily limit" value={settingsForm.daily_send_limit || 5} onChange={(e) => setSettings({ ...settingsForm, daily_send_limit: Number(e.target.value || 5) })} />
+            <input className="input" type="number" min="1" max="5" placeholder="Hourly limit" value={settingsForm.hourly_send_limit || 1} onChange={(e) => setSettings({ ...settingsForm, hourly_send_limit: Number(e.target.value || 1) })} />
           </div>
           <div className="grid gap-3 rounded border border-zinc-800 p-3 text-xs text-zinc-300" data-voryx-approved-sending-window>
             <div>
@@ -398,7 +418,7 @@ export function OutreachControlsPanel({ companyId, campaignId }: { companyId: st
             <div>Prospect emails sent during QA actions: 0</div>
           </div>
         </div>
-      </details>
+      </details> : null}
     </div>
   );
 }

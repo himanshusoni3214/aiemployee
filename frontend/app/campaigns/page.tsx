@@ -4,6 +4,7 @@ import { defaultConnectorCapabilities, type ConnectorCapabilities } from '../../
 import { CompanySelector } from '../../components/CompanySelector';
 import { LeadOutputsPanel } from '../../components/LeadOutputsPanel';
 import { OutreachControlsPanel } from '../../components/OutreachControlsPanel';
+import { DailyReportPanel } from '../../components/DailyReportPanel';
 import { LeadSchemaEditor } from '../../components/LeadSchemaEditor';
 import { queryString, selectedCompanyId } from '../../lib/companySelection';
 import { ModelPolicyPanel } from '../../components/ModelPolicyPanel';
@@ -43,6 +44,18 @@ function countJobs(jobs: Job[], campaignId: string, task?: string) {
 function primaryEmployee(employees: Employee[], campaignId: string) {
   return employees.find((employee) => employee.campaign_id === campaignId && employee.status !== 'Archived' && ['Email Outreach', 'Lead Researcher', 'CRM Manager'].includes(employee.employee_type))
     || employees.find((employee) => employee.campaign_id === campaignId && employee.status !== 'Archived');
+}
+
+function isLeadResearchEmployee(employee?: Employee, campaign?: Campaign) {
+  return employee?.employee_type === 'Lead Researcher' || campaign?.campaign_type === 'lead_generation' || /lead research|lead generation/i.test(campaign?.name || '');
+}
+
+function isEmailOutreachEmployee(employee?: Employee, campaign?: Campaign) {
+  return ['Email Outreach', 'Draft Writer', 'Outreach Draft Writer', 'Email Sender'].includes(employee?.employee_type || '') || /outreach|email/i.test(campaign?.name || '');
+}
+
+function isReportingEmployee(employee?: Employee, campaign?: Campaign) {
+  return ['CRM Manager', 'Report Manager', 'Daily Reporter'].includes(employee?.employee_type || '') || /report/i.test(campaign?.name || '');
 }
 
 function currentBlocker(campaign: Campaign, employee?: Employee) {
@@ -144,6 +157,9 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
           {campaigns.map((campaign) => {
             const detail = (leadDetails as Record<string, { schema: LeadSchema; outputs: LeadOutputs }>)[campaign.id] || { schema: {}, outputs: { outputs: [], rows: [] } };
             const employee = primaryEmployee(employees, campaign.id);
+            const isLeadResearch = isLeadResearchEmployee(employee, campaign);
+            const isEmailOutreach = isEmailOutreachEmployee(employee, campaign);
+            const isReporting = isReportingEmployee(employee, campaign);
             const campaignSchedules = schedules.filter((schedule) => employees.some((item) => item.id === schedule.employee_id && item.campaign_id === campaign.id));
             const nextSchedule = campaignSchedules.find((schedule) => !schedule.is_paused) || campaignSchedules[0];
             return (
@@ -166,18 +182,23 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                     <p className="mt-1 text-xs text-zinc-400">{campaign.industry || 'Industry missing'} / {campaign.geographic_area || 'Location missing'} / {campaign.target_audience || 'Target customer missing'}</p>
                     <p className="mt-1 text-xs text-zinc-400">{campaign.description || 'Offer/product and notes not set'}</p>
                   </section>
-                  <section className="rounded border border-zinc-800 p-3">
+                  {isLeadResearch ? <section className="rounded border border-zinc-800 p-3">
                     <h3 className="text-sm font-semibold">Leads</h3>
                     <LeadSchemaEditor campaignId={campaign.id} initialSchema={detail.schema || {}} />
-                  </section>
-                  <section className="rounded border border-zinc-800 p-3">
+                  </section> : null}
+                  {isLeadResearch ? <section className="rounded border border-zinc-800 p-3">
                     <h3 className="text-sm font-semibold">Lead Files</h3>
                     <LeadOutputsPanel outputs={detail.outputs.outputs || []} rows={detail.outputs.rows || []} />
-                  </section>
-                  <section className="rounded border border-zinc-800 p-3">
-                    <h3 className="text-sm font-semibold">Email Sending Workflow</h3>
-                    <OutreachControlsPanel companyId={campaign.company_id} campaignId={campaign.id} />
-                  </section>
+                  </section> : null}
+                  {isLeadResearch || isEmailOutreach ? <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">{isLeadResearch && !isEmailOutreach ? 'Lead Research Workflow' : 'Email Sending Workflow'}</h3>
+                    <OutreachControlsPanel
+                      companyId={campaign.company_id}
+                      campaignId={campaign.id}
+                      mode={isLeadResearch && !isEmailOutreach ? 'lead_research' : 'email_outreach'}
+                      reportHref={`/reports${queryString({ company_id: campaign.company_id })}`}
+                    />
+                  </section> : null}
                   <section className="rounded border border-zinc-800 p-3">
                     <h3 className="text-sm font-semibold">Replies and Meetings</h3>
                     <p className="mt-1 text-xs text-zinc-400">Reply Monitor: not connected. Follow-up is blocked until Gmail thread monitoring, bounces, unsubscribes and reply classification are connected.</p>
@@ -187,10 +208,17 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                     <h3 className="text-sm font-semibold">Calling</h3>
                     <p className="mt-1 text-xs text-zinc-400">Status: not connected. Required before enabling: voice provider, caller ID, call script, recording/transcript policy, do-not-call controls and daily call limit.</p>
                   </section>
-                  <section className="rounded border border-zinc-800 p-3">
+                  {isReporting ? <section className="rounded border border-zinc-800 p-3">
                     <h3 className="text-sm font-semibold">Daily Report</h3>
                     <p className="mt-1 text-xs text-zinc-400">Business-readable daily reports summarize what happened today, leads found, drafts created, emails sent, replies, meetings, blockers, next recommended action and files.</p>
-                  </section>
+                    <div className="mt-3">
+                      <DailyReportPanel initialReport={null} initialText="" />
+                    </div>
+                  </section> : <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">Daily Report</h3>
+                    <p className="mt-1 text-xs text-zinc-400">Reports are controlled by the CRM Manager / Daily Reporter employee.</p>
+                    <a className="btn-secondary mt-2 inline-flex text-xs" href={`/reports${queryString({ company_id: campaign.company_id })}`}>Open reports</a>
+                  </section>}
                   <details className="rounded border border-zinc-800 p-3">
                     <summary className="cursor-pointer text-sm font-semibold">Advanced</summary>
                     <div className="mt-3 grid gap-3">

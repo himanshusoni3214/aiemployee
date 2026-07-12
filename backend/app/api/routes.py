@@ -22,7 +22,7 @@ from app.services.hermes_jobs_json_executor import execute_scheduled_jobs_json_t
 from app.services.hermes_live import HermesLiveMonitor
 from app.services.hermes_safety import SAFETY_LOCK_MESSAGE, is_safety_blocked_action, safety_block_result
 from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as _sync_hermes_snapshot
-from app.services.internal_mail_queue import enqueue_daily_report_delivery, ingest_internal_mail_receipts
+from app.services.internal_mail_queue import ingest_internal_mail_receipts
 from app.services.model_policy import (
     default_policy_payload,
     effective_policy,
@@ -34,7 +34,7 @@ from app.services.model_policy import (
     validate_policy,
     write_company_workspace_policy,
 )
-from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, validate_report_recipient
+from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, parse_datetime, validate_report_recipient
 from app.services.template_provisioning import (
     PROVISIONED_STATES,
     allowed_employee_types_for_campaign,
@@ -1588,32 +1588,55 @@ def create_daily_report(data: DailyReportRequest, db: Session=Depends(get_db), u
             raise HTTPException(400, str(exc)) from exc
         try:
             subject = f"Brew It By Sash Daily Outreach Report - {report['report_date']}"
-            delivery_job, queued = enqueue_daily_report_delivery(
-                db,
-                recipient=recipient,
-                subject=subject,
-                artifact_path=artifact,
-                report_date=report['report_date'],
-                company_id=data.company_id,
-                campaign_id=data.campaign_id,
+            execution = execute_scheduled_jobs_json_task(
+                'Daily Report',
+                {
+                    'hermes_job_id': '5881b72113ce',
+                    'recipient': recipient,
+                    'subject': subject,
+                    'report_date': report['report_date'],
+                    'report_only_acceptance': True,
+                    'source': 'dashboard_daily_report_button',
+                },
             )
+            execution_status = str(execution.get('status') or '').lower()
+            execution_results = execution.get('results') if isinstance(execution.get('results'), dict) else {}
+            now = datetime.utcnow()
+            delivery_job = Job(
+                employee_id=None,
+                campaign_id=data.campaign_id,
+                connector='hermes',
+                task_type='Daily Report',
+                status=JobStatus.completed if execution_status == 'ok' else JobStatus.failed,
+                payload={'source': 'jobs_json_daily_report_executor', 'kind': 'daily_report', 'report_only_acceptance': True, 'report_date': report['report_date'], 'hermes_job_id': '5881b72113ce'},
+                result=execution_results or execution,
+                logs=list(execution.get('logs') or []),
+                error_message=None if execution_status == 'ok' else (execution.get('error') or 'Daily report delivery failed'),
+                recipient_email=recipient,
+                delivery_status=str(execution_results.get('delivery_status') or ('sent' if execution_status == 'ok' else 'failed')),
+                provider_message_id=execution_results.get('provider_message_id'),
+                sent_at=parse_datetime(execution_results.get('sent_at')) if execution_results.get('sent_at') else None,
+                evidence_type='rfc_message_id' if execution_results.get('provider_message_id') else 'jobs_json_daily_report',
+                source_output_path=str(execution_results.get('artifact_path') or artifact),
+                verification_reason='provider message ID present for configured report recipient' if execution_results.get('provider_message_id') else (execution.get('error') or 'Daily report delivery did not return provider message evidence'),
+                attempts=1,
+                max_attempts=1,
+                started_at=now,
+                ended_at=now,
+                created_at=now,
+            )
+            db.add(delivery_job)
+            db.flush()
             delivery = {
-                'status': 'queued',
-                'delivery_status': 'queued',
+                'status': delivery_job.delivery_status,
+                'delivery_status': delivery_job.delivery_status,
                 'recipient': recipient,
                 'subject': subject,
-                'artifact_path': str(artifact),
-                'request_id': queued['request']['request_id'],
-                'request_path': queued['request_path'],
-                'processor_path': queued['processor_path'],
+                'artifact_path': delivery_job.source_output_path,
                 'job_id': delivery_job.id,
-                'message': 'Daily report queued for Hermes internal mail processor; completion requires receipt evidence.',
+                'provider_message_id': delivery_job.provider_message_id,
+                'message': 'Daily report delivered with provider receipt evidence.' if delivery_job.provider_message_id else 'Daily report delivery failed; provider receipt evidence is missing.',
             }
-            try:
-                delivery['hermes_control'] = HermesControlService().trigger_internal_mail_processor()
-            except HermesControlError as exc:
-                delivery['hermes_control_error'] = str(exc)
-                _append_log_once(delivery_job, f'Hermes processor trigger failed: {exc}')
         except Exception as exc:
             delivery = {'status': 'failed', 'recipient': recipient, 'artifact_path': str(artifact), 'error': str(exc)}
             delivery_job = Job(
