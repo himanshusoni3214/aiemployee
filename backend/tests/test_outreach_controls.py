@@ -417,6 +417,21 @@ class OutreachControlsTests(unittest.TestCase):
                 'can_send': True,
             }
             upsert_approval(db, source_campaign, source_item, 'approved_for_outreach', user.id)
+            stale_item = {
+                'lead_key': 'stale-lead',
+                'source_run_id': 'old-run',
+                'business': 'Old Cafe',
+                'email': 'old@example.com',
+                'domain': 'example.com',
+                'state': 'approved_for_outreach',
+                'computed_state': 'new',
+                'reason': 'old approved',
+                'raw': {'Business Name': 'Old Cafe', 'Public Email': 'old@example.com'},
+                'can_send': True,
+            }
+            upsert_approval(db, outreach_campaign, stale_item, 'approved_for_outreach', user.id, 'old source')
+            stale_draft = generate_draft_for_item(db, outreach_campaign, company, stale_item)
+            db.flush()
 
             def fake_reader(read_db, campaign):
                 if campaign.id == source_campaign.id:
@@ -433,6 +448,8 @@ class OutreachControlsTests(unittest.TestCase):
 
             self.assertTrue(result['ok'])
             self.assertEqual(result['lead_source_campaign_id'], source_campaign.id)
+            self.assertEqual(result['source_sync']['stale_approvals_rejected'], 1)
+            self.assertEqual(result['source_sync']['drafts_rejected'], 1)
             self.assertEqual(result['mirrored_approvals'], 1)
             mirrored = db.scalar(select(LeadApproval).where(LeadApproval.campaign_id == outreach_campaign.id, LeadApproval.lead_key == 'lead-source-1'))
             self.assertIsNotNone(mirrored)
@@ -440,6 +457,10 @@ class OutreachControlsTests(unittest.TestCase):
             draft = db.scalar(select(OutreachDraft).where(OutreachDraft.campaign_id == outreach_campaign.id, OutreachDraft.lead_key == 'lead-source-1'))
             self.assertIsNotNone(draft)
             self.assertEqual(draft.lead_email, 'owner@example.com')
+            db.refresh(stale_draft)
+            stale_approval = db.scalar(select(LeadApproval).where(LeadApproval.campaign_id == outreach_campaign.id, LeadApproval.lead_key == 'stale-lead'))
+            self.assertEqual(stale_approval.state, 'rejected')
+            self.assertEqual(stale_draft.status, 'draft_rejected')
             self.assertEqual(result['prospect_emails_sent'], 0)
         finally:
             routes._campaign_review_items = original_reader
@@ -493,8 +514,8 @@ class OutreachControlsTests(unittest.TestCase):
 
             self.assertTrue(result['ok'])
             self.assertEqual(result['state'], 'rejected')
-            self.assertEqual(result['mirrored']['campaign_id'], outreach_campaign.id)
-            self.assertEqual(result['mirrored']['updated_drafts'], 1)
+            self.assertEqual(result['mirrored'][0]['campaign_id'], outreach_campaign.id)
+            self.assertEqual(result['mirrored'][0]['updated_drafts'], 1)
             source_approval = db.scalar(select(LeadApproval).where(LeadApproval.campaign_id == source_campaign.id, LeadApproval.lead_key == 'lead-source-1'))
             target_approval = db.scalar(select(LeadApproval).where(LeadApproval.campaign_id == outreach_campaign.id, LeadApproval.lead_key == 'lead-source-1'))
             db.refresh(draft)
@@ -513,9 +534,61 @@ class OutreachControlsTests(unittest.TestCase):
             )
             self.assertTrue(result['ok'])
             self.assertEqual(result['state'], 'approved_for_outreach')
-            self.assertEqual(result['mirrored']['updated_drafts'], 1)
+            self.assertEqual(result['mirrored'][0]['updated_drafts'], 1)
             db.refresh(draft)
             self.assertEqual(draft.status, 'draft_needs_review')
+        finally:
+            routes._campaign_review_items = original_reader
+            db.close()
+
+    def test_lead_review_action_auto_mirrors_to_same_company_email_outreach_campaign(self):
+        db = self.Session()
+        original_reader = routes._campaign_review_items
+        try:
+            user, company, source_campaign, _other, _other_campaign = self.seed(db)
+            outreach_campaign = Campaign(
+                id='campaign-outreach',
+                company_id=company.id,
+                name='Cafe Email Outreach',
+                industry='cafes',
+                status=Status.active,
+            )
+            db.add(outreach_campaign)
+            db.flush()
+            source_item = {
+                'lead_key': 'lead-source-2',
+                'source_run_id': 'source-run',
+                'business': 'B Cafe',
+                'email': 'owner2@example.com',
+                'domain': 'example.com',
+                'state': 'new',
+                'computed_state': 'new',
+                'reason': '',
+                'raw': {'Business Name': 'B Cafe', 'Public Email': 'owner2@example.com'},
+                'can_send': False,
+            }
+
+            def fake_reader(read_db, campaign):
+                if campaign.id == source_campaign.id:
+                    return [source_item], '/opt/data/home/leads/source.csv'
+                return [], None
+
+            routes._campaign_review_items = fake_reader
+            result = routes.campaign_lead_review_action(
+                source_campaign.id,
+                'lead-source-2',
+                'approve',
+                payload={'reason': 'approved from lead research'},
+                db=db,
+                user=user,
+            )
+
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['state'], 'approved_for_outreach')
+            self.assertEqual(result['mirrored'][0]['campaign_id'], outreach_campaign.id)
+            mirrored = db.scalar(select(LeadApproval).where(LeadApproval.campaign_id == outreach_campaign.id, LeadApproval.lead_key == 'lead-source-2'))
+            self.assertIsNotNone(mirrored)
+            self.assertEqual(mirrored.state, 'approved_for_outreach')
         finally:
             routes._campaign_review_items = original_reader
             db.close()

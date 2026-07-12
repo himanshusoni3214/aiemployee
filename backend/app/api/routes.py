@@ -669,6 +669,68 @@ def _mirror_lead_review_to_target(db: Session, source_campaign: Campaign, target
     return {'campaign_id': target_campaign.id, 'approval_id': approval.id, 'state': approval.state, 'updated_drafts': updated_drafts}
 
 
+def _default_outreach_review_targets(db: Session, source_campaign: Campaign) -> list[Campaign]:
+    candidates = db.scalars(select(Campaign).where(Campaign.company_id == source_campaign.company_id, Campaign.id != source_campaign.id)).all()
+    targets: list[Campaign] = []
+    for campaign in candidates:
+        employee = db.scalar(select(AIEmployee).where(AIEmployee.campaign_id == campaign.id))
+        searchable = f"{campaign.id or ''} {campaign.name or ''} {campaign.campaign_type or ''} {getattr(employee, 'employee_type', '') or ''} {getattr(employee, 'name', '') or ''}".lower()
+        if 'outreach' in searchable or 'email' in searchable:
+            targets.append(campaign)
+    return targets
+
+
+def _mirror_lead_review_to_targets(db: Session, source_campaign: Campaign, target_campaign_id: str | None, item: dict, state: str, user_id: str, reason: str) -> list[dict]:
+    if target_campaign_id:
+        mirrored = _mirror_lead_review_to_target(db, source_campaign, target_campaign_id, item, state, user_id, reason)
+        return [mirrored] if mirrored else []
+    results: list[dict] = []
+    for target in _default_outreach_review_targets(db, source_campaign):
+        mirrored = _mirror_lead_review_to_target(db, source_campaign, target.id, item, state, user_id, reason)
+        if mirrored:
+            results.append(mirrored)
+    return results
+
+
+def _sync_outreach_target_to_source_items(db: Session, source_campaign: Campaign, target_campaign: Campaign, items: list[dict], user_id: str) -> dict:
+    current_keys = {item['lead_key'] for item in items}
+    current_states = {
+        item['lead_key']: item.get('state')
+        for item in items
+        if item.get('state') in {'approved_for_outreach', 'rejected', 'do_not_contact', 'unsubscribed'}
+    }
+    mirrored = 0
+    for item in items:
+        state = current_states.get(item['lead_key'])
+        if not state:
+            continue
+        _mirror_lead_review_to_target(db, source_campaign, target_campaign.id, item, state, user_id, f"synced from latest source {source_campaign.id}")
+        mirrored += 1
+
+    now = datetime.utcnow()
+    stale_approvals = 0
+    for approval in db.scalars(select(LeadApproval).where(LeadApproval.campaign_id == target_campaign.id, LeadApproval.lead_key.not_in(current_keys or {'__none__'}))).all():
+        if approval.state == 'approved_for_outreach':
+            history = list(approval.history or [])
+            history.append({'at': now.isoformat() + 'Z', 'user_id': user_id, 'state': 'rejected', 'reason': f'not in latest source {source_campaign.id}'})
+            approval.state = 'rejected'
+            approval.reason = f'not in latest source {source_campaign.id}'
+            approval.history = history
+            approval.updated_at = now
+            stale_approvals += 1
+
+    rejected_keys = {lead_key for lead_key, state in current_states.items() if state in {'rejected', 'do_not_contact', 'unsubscribed'}}
+    rejected_keys.update({approval.lead_key for approval in db.scalars(select(LeadApproval).where(LeadApproval.campaign_id == target_campaign.id, LeadApproval.state == 'rejected')).all()})
+    rejected_drafts = 0
+    for draft in db.scalars(select(OutreachDraft).where(OutreachDraft.campaign_id == target_campaign.id)).all():
+        if draft.lead_key not in current_keys or draft.lead_key in rejected_keys:
+            if draft.status != 'draft_rejected':
+                draft.status = 'draft_rejected'
+                draft.updated_at = now
+                rejected_drafts += 1
+    return {'mirrored': mirrored, 'stale_approvals_rejected': stale_approvals, 'drafts_rejected': rejected_drafts}
+
+
 @router.get('/companies/{company_id}/outreach-settings')
 def get_company_outreach_settings(company_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
     company = db.get(Company, company_id)
@@ -752,7 +814,7 @@ def campaign_lead_review_action(campaign_id: str, lead_key: str, action: str, pa
     reason = str(payload.get('reason') or action)
     try:
         approval = upsert_approval(db, campaign, item, state, user.id, reason)
-        mirrored = _mirror_lead_review_to_target(db, campaign, str(payload.get('target_campaign_id') or '').strip() or None, item, state, user.id, reason)
+        mirrored = _mirror_lead_review_to_targets(db, campaign, str(payload.get('target_campaign_id') or '').strip() or None, item, state, user.id, reason)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if state in {'do_not_contact', 'unsubscribed'} and item.get('email'):
@@ -786,10 +848,14 @@ def generate_outreach_drafts(campaign_id: str, payload: dict=Body(default={}), d
         if source_campaign.company_id != campaign.company_id:
             raise HTTPException(400, 'Lead source campaign must belong to the same company')
     items, source_path = _campaign_review_items(db, source_campaign)
+    source_sync = _sync_outreach_target_to_source_items(db, source_campaign, campaign, items, user.id) if source_campaign.id != campaign.id else {}
     created = []
     skipped = []
     mirrored = 0
     for item in items:
+        if item.get('state') != 'approved_for_outreach':
+            skipped.append({'lead_key': item['lead_key'], 'state': item['state']})
+            continue
         if not item.get('can_send'):
             skipped.append({'lead_key': item['lead_key'], 'state': item['state']})
             continue
@@ -800,9 +866,9 @@ def generate_outreach_drafts(campaign_id: str, payload: dict=Body(default={}), d
             created.append(draft)
         except ValueError as exc:
             skipped.append({'lead_key': item['lead_key'], 'error': str(exc)})
-    log(db, 'Outreach Drafts Generated', 'Campaign', campaign.id, campaign.company_id, user.id, {'created': len(created), 'skipped': len(skipped), 'mirrored_approvals': mirrored, 'lead_source_campaign_id': source_campaign.id, 'lead_source_path': source_path, 'draft_only': True})
+    log(db, 'Outreach Drafts Generated', 'Campaign', campaign.id, campaign.company_id, user.id, {'created': len(created), 'skipped': len(skipped), 'mirrored_approvals': mirrored, 'source_sync': source_sync, 'lead_source_campaign_id': source_campaign.id, 'lead_source_path': source_path, 'draft_only': True})
     db.commit()
-    return {'ok': True, 'created': len(created), 'skipped': skipped, 'mirrored_approvals': mirrored, 'lead_source_campaign_id': source_campaign.id, 'lead_source_path': source_path, 'drafts': [draft_to_payload(draft) for draft in created], 'prospect_emails_sent': 0}
+    return {'ok': True, 'created': len(created), 'skipped': skipped, 'mirrored_approvals': mirrored, 'source_sync': source_sync, 'lead_source_campaign_id': source_campaign.id, 'lead_source_path': source_path, 'drafts': [draft_to_payload(draft) for draft in created], 'prospect_emails_sent': 0}
 
 
 @router.post('/campaigns/{campaign_id}/outreach-drafts/bulk-action')
