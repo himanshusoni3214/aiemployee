@@ -747,25 +747,36 @@ def list_outreach_drafts(campaign_id: str, db: Session=Depends(get_db), user: Us
 
 
 @router.post('/campaigns/{campaign_id}/outreach-drafts/generate')
-def generate_outreach_drafts(campaign_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+def generate_outreach_drafts(campaign_id: str, payload: dict=Body(default={}), db: Session=Depends(get_db), user: User=Depends(require_write)):
     campaign = db.get(Campaign, campaign_id)
     if not campaign: raise HTTPException(404, 'Campaign not found')
     company = db.get(Company, campaign.company_id)
-    items, _source = _campaign_review_items(db, campaign)
+    source_campaign = campaign
+    source_campaign_id = str(payload.get('source_campaign_id') or '').strip()
+    if source_campaign_id and source_campaign_id != campaign.id:
+        source_campaign = db.get(Campaign, source_campaign_id)
+        if not source_campaign:
+            raise HTTPException(404, 'Lead source campaign not found')
+        if source_campaign.company_id != campaign.company_id:
+            raise HTTPException(400, 'Lead source campaign must belong to the same company')
+    items, source_path = _campaign_review_items(db, source_campaign)
     created = []
     skipped = []
+    mirrored = 0
     for item in items:
         if not item.get('can_send'):
             skipped.append({'lead_key': item['lead_key'], 'state': item['state']})
             continue
         try:
+            target_approval = upsert_approval(db, campaign, item, 'approved_for_outreach', user.id, f"mirrored from {source_campaign.id}")
+            mirrored += 1 if target_approval else 0
             draft = generate_draft_for_item(db, campaign, company, item)
             created.append(draft)
         except ValueError as exc:
             skipped.append({'lead_key': item['lead_key'], 'error': str(exc)})
-    log(db, 'Outreach Drafts Generated', 'Campaign', campaign.id, campaign.company_id, user.id, {'created': len(created), 'skipped': len(skipped), 'draft_only': True})
+    log(db, 'Outreach Drafts Generated', 'Campaign', campaign.id, campaign.company_id, user.id, {'created': len(created), 'skipped': len(skipped), 'mirrored_approvals': mirrored, 'lead_source_campaign_id': source_campaign.id, 'lead_source_path': source_path, 'draft_only': True})
     db.commit()
-    return {'ok': True, 'created': len(created), 'skipped': skipped, 'drafts': [draft_to_payload(draft) for draft in created], 'prospect_emails_sent': 0}
+    return {'ok': True, 'created': len(created), 'skipped': skipped, 'mirrored_approvals': mirrored, 'lead_source_campaign_id': source_campaign.id, 'lead_source_path': source_path, 'drafts': [draft_to_payload(draft) for draft in created], 'prospect_emails_sent': 0}
 
 
 @router.post('/campaigns/{campaign_id}/outreach-drafts/bulk-action')

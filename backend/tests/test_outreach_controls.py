@@ -39,6 +39,7 @@ from app.services.outreach import (
     sender_verification,
 )
 from app.services.internal_mail_queue import enqueue_controlled_outreach_delivery, ingest_internal_mail_receipts, queue_root
+from app.api import routes
 
 
 class OutreachControlsTests(unittest.TestCase):
@@ -388,6 +389,61 @@ class OutreachControlsTests(unittest.TestCase):
         body = body_with_unsubscribe('Hello', 'Reply STOP to opt out.')
         self.assertEqual(body, 'Hello\n\nReply STOP to opt out.')
         self.assertEqual(body_with_unsubscribe(body, 'Reply STOP to opt out.'), body)
+
+    def test_generate_outreach_drafts_can_use_lead_source_campaign(self):
+        db = self.Session()
+        original_reader = routes._campaign_review_items
+        try:
+            user, company, source_campaign, _other, _other_campaign = self.seed(db)
+            outreach_campaign = Campaign(
+                id='campaign-outreach',
+                company_id=company.id,
+                name='Cafe Outreach Drafting',
+                industry='cafes',
+                status=Status.active,
+            )
+            db.add(outreach_campaign)
+            db.flush()
+            source_item = {
+                'lead_key': 'lead-source-1',
+                'source_run_id': 'source-run',
+                'business': 'A Cafe',
+                'email': 'owner@example.com',
+                'domain': 'example.com',
+                'state': 'approved_for_outreach',
+                'computed_state': 'new',
+                'reason': 'approved',
+                'raw': {'Business Name': 'A Cafe', 'Public Email': 'owner@example.com'},
+                'can_send': True,
+            }
+            upsert_approval(db, source_campaign, source_item, 'approved_for_outreach', user.id)
+
+            def fake_reader(read_db, campaign):
+                if campaign.id == source_campaign.id:
+                    return [source_item], '/opt/data/home/leads/source.csv'
+                return [], None
+
+            routes._campaign_review_items = fake_reader
+            result = routes.generate_outreach_drafts(
+                outreach_campaign.id,
+                payload={'source_campaign_id': source_campaign.id},
+                db=db,
+                user=user,
+            )
+
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['lead_source_campaign_id'], source_campaign.id)
+            self.assertEqual(result['mirrored_approvals'], 1)
+            mirrored = db.scalar(select(LeadApproval).where(LeadApproval.campaign_id == outreach_campaign.id, LeadApproval.lead_key == 'lead-source-1'))
+            self.assertIsNotNone(mirrored)
+            self.assertEqual(mirrored.state, 'approved_for_outreach')
+            draft = db.scalar(select(OutreachDraft).where(OutreachDraft.campaign_id == outreach_campaign.id, OutreachDraft.lead_key == 'lead-source-1'))
+            self.assertIsNotNone(draft)
+            self.assertEqual(draft.lead_email, 'owner@example.com')
+            self.assertEqual(result['prospect_emails_sent'], 0)
+        finally:
+            routes._campaign_review_items = original_reader
+            db.close()
 
     def test_controlled_outreach_receipt_required_before_sent_state(self):
         db = self.Session()

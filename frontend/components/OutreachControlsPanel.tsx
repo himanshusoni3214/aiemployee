@@ -50,11 +50,13 @@ export function OutreachControlsPanel({
   companyId,
   campaignId,
   mode = 'full',
+  leadSourceCampaignId,
   reportHref,
 }: {
   companyId: string;
   campaignId: string;
   mode?: OutreachMode;
+  leadSourceCampaignId?: string;
   reportHref?: string;
 }) {
   const [settings, setSettings] = useState<any>(null);
@@ -69,9 +71,10 @@ export function OutreachControlsPanel({
 
   async function load() {
     try {
+      const reviewCampaignId = leadSourceCampaignId || campaignId;
       const [settingsData, reviewData, draftData, sendData, previewData] = await Promise.all([
         api(`/companies/${companyId}/outreach-settings`),
-        api(`/campaigns/${campaignId}/lead-review`),
+        api(`/campaigns/${reviewCampaignId}/lead-review`),
         api(`/campaigns/${campaignId}/outreach-drafts`),
         api(`/campaigns/${campaignId}/outreach-send/status`),
         api(`/campaigns/${campaignId}/outreach/preview-batch`),
@@ -88,7 +91,7 @@ export function OutreachControlsPanel({
     }
   }
 
-  useEffect(() => { load(); }, [companyId, campaignId]);
+  useEffect(() => { load(); }, [companyId, campaignId, leadSourceCampaignId]);
 
   async function updateSettings(next: any) {
     setBusy('settings');
@@ -150,7 +153,10 @@ export function OutreachControlsPanel({
   async function generateDrafts() {
     setBusy('generate-drafts');
     try {
-      const result = await api(`/campaigns/${campaignId}/outreach-drafts/generate`, { method: 'POST' });
+      const result = await api(`/campaigns/${campaignId}/outreach-drafts/generate`, {
+        method: 'POST',
+        body: JSON.stringify({ source_campaign_id: leadSourceCampaignId || campaignId }),
+      });
       setMessage(`Email drafts ready: ${result.created || 0} created. No prospect email sent.`);
       await load();
     } catch (err: any) { setError(err.message || 'Email draft generation failed'); }
@@ -244,8 +250,10 @@ export function OutreachControlsPanel({
   const draftCounts = countDrafts(drafts);
   const coverage = batchPreview?.coverage || sendStatus?.batch_preview?.coverage || {};
   const approvedLeads = Number(coverage.approved_leads ?? reviewCounts.approved_for_outreach ?? 0);
+  const sourceApprovedLeads = Number(reviewCounts.approved_for_outreach ?? 0);
+  const approvedLeadsForActions = showEmailWorkflow && sourceApprovedLeads > approvedLeads ? sourceApprovedLeads : approvedLeads;
   const readyToSend = Number(coverage.ready_to_send ?? 0);
-  const missingDrafts = Number(coverage.approved_leads_without_drafts ?? Math.max(0, approvedLeads - draftCounts.generated));
+  const missingDrafts = Number(coverage.approved_leads_without_drafts ?? Math.max(0, approvedLeadsForActions - draftCounts.generated));
   const canSend = Boolean(batchPreview?.can_send_controlled_batch || sendStatus?.batch_preview?.can_send_controlled_batch);
   const windowInfo = batchPreview?.window || sendStatus?.batch_preview?.window || {};
   const limits = batchPreview?.limits || sendStatus?.batch_preview?.limits || {};
@@ -259,7 +267,7 @@ export function OutreachControlsPanel({
       return 'Lead research complete for approved leads';
     }
     if (!review?.items?.length) return 'Use approved Lead Research leads or connect this workflow to a lead source';
-    if (approvedLeads <= 0) return 'Approve leads';
+    if (approvedLeadsForActions <= 0) return 'Approve leads in Lead Research first';
     if (missingDrafts > 0 || !draftCounts.generated) return 'Generate email drafts';
     if (draftCounts.approved <= 0) return 'Review drafts, then approve all drafts or edit one draft';
     if (!sendStatus?.readiness?.internal_tests) return 'Send a test email';
@@ -285,7 +293,7 @@ export function OutreachControlsPanel({
 
       <div className="grid gap-2 md:grid-cols-5" data-voryx-email-stats>
         <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Leads found</p><p className="text-xl font-semibold">{coverage.total_leads ?? review?.items?.length ?? 0}</p></div>
-        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Approved</p><p className="text-xl font-semibold">{approvedLeads}</p></div>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Approved</p><p className="text-xl font-semibold">{approvedLeadsForActions}</p></div>
         <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Drafts</p><p className="text-xl font-semibold">{draftCounts.generated}</p></div>
         <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Ready to send</p><p className="text-xl font-semibold">{readyToSend}</p></div>
         <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Sent today</p><p className="text-xl font-semibold">{limits.daily_sent ?? 0}</p></div>
@@ -294,7 +302,7 @@ export function OutreachControlsPanel({
       <div className="flex flex-wrap gap-2" data-voryx-simple-email-actions>
         {showLeadWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'find-leads'} onClick={findLeads}>Generate leads</button> : null}
         {showLeadWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve-visible-leads'} onClick={approveVisibleLeads}>Approve visible leads</button> : null}
-        {showEmailWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'generate-drafts' || approvedLeads <= 0} onClick={generateDrafts}>Generate email draft</button> : null}
+        {showEmailWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'generate-drafts' || approvedLeadsForActions <= 0} onClick={generateDrafts}>Generate email draft</button> : null}
         {showEmailWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve_all_generated' || !draftCounts.generated} onClick={approveAllDrafts}>Approve all drafts</button> : null}
         {showEmailWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'internal-test' || !drafts.length} onClick={sendTest}>Send test</button> : null}
         {showEmailWorkflow ? <button className="btn text-xs" type="button" disabled={!canSend || busy === 'send-real-batch'} title={!canSend ? (blocker || 'Complete the previous steps before sending') : 'Send approved emails through Hermes/Himalaya'} onClick={sendApprovedEmails}>Send approved emails</button> : null}
@@ -321,7 +329,7 @@ export function OutreachControlsPanel({
                   <button className="btn-secondary text-xs" type="button" disabled={busy.startsWith(item.lead_key)} onClick={() => reviewAction(item, 'reject')}>Reject</button>
                 </td>
               </tr>)}
-              {!visibleLeads.length ? <tr><td colSpan={4} className="text-zinc-500">No leads yet. Generate leads first.</td></tr> : null}
+              {!visibleLeads.length ? <tr><td colSpan={4} className="text-zinc-500">{showEmailWorkflow ? 'No approved lead source is connected yet.' : 'No leads yet. Generate leads first.'}</td></tr> : null}
             </tbody>
           </table>
         </div>

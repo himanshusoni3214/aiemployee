@@ -58,6 +58,13 @@ function isReportingEmployee(employee?: Employee, campaign?: Campaign) {
   return ['CRM Manager', 'Report Manager', 'Daily Reporter'].includes(employee?.employee_type || '') || /report/i.test(campaign?.name || '');
 }
 
+function leadSourceCampaignFor(campaigns: Campaign[], companyId: string, targetCampaignId?: string) {
+  const candidates = campaigns.filter((campaign) => campaign.company_id === companyId && campaign.id !== targetCampaignId);
+  const searchable = (campaign: Campaign) => `${campaign.id || ''} ${campaign.name || ''} ${campaign.campaign_type || ''}`;
+  return candidates.find((campaign) => /lead[-_ ]research|lead[-_ ]generation/i.test(searchable(campaign)))
+    || candidates.find((campaign) => campaign.campaign_type === 'lead_generation');
+}
+
 function currentBlocker(campaign: Campaign, employee?: Employee) {
   if (!employee) return 'Create or provision an AI Sales Employee for this campaign.';
   if (!employee.hermes_job_id) return 'Employee is not connected to Hermes yet.';
@@ -160,6 +167,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             const isLeadResearch = isLeadResearchEmployee(employee, campaign);
             const isEmailOutreach = isEmailOutreachEmployee(employee, campaign);
             const isReporting = isReportingEmployee(employee, campaign);
+            const leadSourceCampaign = isEmailOutreach ? leadSourceCampaignFor(campaigns, campaign.company_id, campaign.id) : undefined;
             const campaignSchedules = schedules.filter((schedule) => employees.some((item) => item.id === schedule.employee_id && item.campaign_id === campaign.id));
             const nextSchedule = campaignSchedules.find((schedule) => !schedule.is_paused) || campaignSchedules[0];
             return (
@@ -196,6 +204,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                       companyId={campaign.company_id}
                       campaignId={campaign.id}
                       mode={isLeadResearch && !isEmailOutreach ? 'lead_research' : 'email_outreach'}
+                      leadSourceCampaignId={leadSourceCampaign?.id}
                       reportHref={`/reports${queryString({ company_id: campaign.company_id })}`}
                     />
                   </section> : null}
