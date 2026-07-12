@@ -203,6 +203,7 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("leadSourceCampaignId", source)
         self.assertIn("source_campaign_id", source)
         self.assertIn("reviewCampaignId", source)
+        self.assertIn("target_campaign_id: campaignId", source)
         campaigns = read_frontend("app/campaigns/page.tsx")
         self.assertIn("leadSourceCampaignFor", campaigns)
         self.assertIn("targetCampaignId", campaigns)

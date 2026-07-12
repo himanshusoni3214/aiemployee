@@ -445,6 +445,66 @@ class OutreachControlsTests(unittest.TestCase):
             routes._campaign_review_items = original_reader
             db.close()
 
+    def test_lead_review_reject_from_source_campaign_mirrors_to_outreach_draft(self):
+        db = self.Session()
+        original_reader = routes._campaign_review_items
+        try:
+            user, company, source_campaign, _other, _other_campaign = self.seed(db)
+            outreach_campaign = Campaign(
+                id='campaign-outreach',
+                company_id=company.id,
+                name='Cafe Outreach Drafting',
+                industry='cafes',
+                status=Status.active,
+            )
+            db.add(outreach_campaign)
+            db.flush()
+            source_item = {
+                'lead_key': 'lead-source-1',
+                'source_run_id': 'source-run',
+                'business': 'A Cafe',
+                'email': 'owner@example.com',
+                'domain': 'example.com',
+                'state': 'approved_for_outreach',
+                'computed_state': 'new',
+                'reason': 'approved',
+                'raw': {'Business Name': 'A Cafe', 'Public Email': 'owner@example.com'},
+                'can_send': True,
+            }
+            upsert_approval(db, source_campaign, source_item, 'approved_for_outreach', user.id)
+            upsert_approval(db, outreach_campaign, source_item, 'approved_for_outreach', user.id, 'mirrored')
+            draft = generate_draft_for_item(db, outreach_campaign, company, source_item)
+            db.flush()
+
+            def fake_reader(read_db, campaign):
+                if campaign.id == source_campaign.id:
+                    return [source_item], '/opt/data/home/leads/source.csv'
+                return [], None
+
+            routes._campaign_review_items = fake_reader
+            result = routes.campaign_lead_review_action(
+                source_campaign.id,
+                'lead-source-1',
+                'reject',
+                payload={'reason': 'reject', 'target_campaign_id': outreach_campaign.id},
+                db=db,
+                user=user,
+            )
+
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['state'], 'rejected')
+            self.assertEqual(result['mirrored']['campaign_id'], outreach_campaign.id)
+            self.assertEqual(result['mirrored']['updated_drafts'], 1)
+            source_approval = db.scalar(select(LeadApproval).where(LeadApproval.campaign_id == source_campaign.id, LeadApproval.lead_key == 'lead-source-1'))
+            target_approval = db.scalar(select(LeadApproval).where(LeadApproval.campaign_id == outreach_campaign.id, LeadApproval.lead_key == 'lead-source-1'))
+            db.refresh(draft)
+            self.assertEqual(source_approval.state, 'rejected')
+            self.assertEqual(target_approval.state, 'rejected')
+            self.assertEqual(draft.status, 'draft_rejected')
+        finally:
+            routes._campaign_review_items = original_reader
+            db.close()
+
     def test_controlled_outreach_receipt_required_before_sent_state(self):
         db = self.Session()
         with tempfile.TemporaryDirectory() as tmp:

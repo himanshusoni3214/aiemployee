@@ -645,6 +645,26 @@ def _review_item_by_key(db: Session, campaign: Campaign, lead_key: str) -> dict:
     return item
 
 
+def _mirror_lead_review_to_target(db: Session, source_campaign: Campaign, target_campaign_id: str | None, item: dict, state: str, user_id: str, reason: str) -> dict | None:
+    if not target_campaign_id or target_campaign_id == source_campaign.id:
+        return None
+    target_campaign = db.get(Campaign, target_campaign_id)
+    if not target_campaign:
+        raise HTTPException(404, 'Target outreach campaign not found')
+    if target_campaign.company_id != source_campaign.company_id:
+        raise HTTPException(400, 'Target outreach campaign must belong to the same company')
+    approval = upsert_approval(db, target_campaign, item, state, user_id, reason)
+    updated_drafts = 0
+    if state in {'rejected', 'do_not_contact', 'unsubscribed'}:
+        drafts = db.scalars(select(OutreachDraft).where(OutreachDraft.campaign_id == target_campaign.id, OutreachDraft.lead_key == item['lead_key'])).all()
+        for draft in drafts:
+            if draft.status != 'draft_rejected':
+                draft.status = 'draft_rejected'
+                draft.updated_at = datetime.utcnow()
+                updated_drafts += 1
+    return {'campaign_id': target_campaign.id, 'approval_id': approval.id, 'state': approval.state, 'updated_drafts': updated_drafts}
+
+
 @router.get('/companies/{company_id}/outreach-settings')
 def get_company_outreach_settings(company_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
     company = db.get(Company, company_id)
@@ -725,17 +745,19 @@ def campaign_lead_review_action(campaign_id: str, lead_key: str, action: str, pa
     item = _review_item_by_key(db, campaign, lead_key)
     action = action.replace('-', '_').lower()
     state = {'approve': 'approved_for_outreach', 'reject': 'rejected', 'do_not_contact': 'do_not_contact'}.get(action, action)
+    reason = str(payload.get('reason') or action)
     try:
-        approval = upsert_approval(db, campaign, item, state, user.id, str(payload.get('reason') or action))
+        approval = upsert_approval(db, campaign, item, state, user.id, reason)
+        mirrored = _mirror_lead_review_to_target(db, campaign, str(payload.get('target_campaign_id') or '').strip() or None, item, state, user.id, reason)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
     if state in {'do_not_contact', 'unsubscribed'} and item.get('email'):
         existing = db.scalar(select(SuppressionEntry).where(SuppressionEntry.company_id == campaign.company_id, SuppressionEntry.kind == 'email', SuppressionEntry.value == item['email']))
         if not existing:
             db.add(SuppressionEntry(company_id=campaign.company_id, kind='email', value=item['email'], reason='Lead review suppression', source='lead_review'))
-    log(db, 'Lead Review Updated', 'LeadApproval', approval.id, campaign.company_id, user.id, {'lead_key': lead_key, 'state': state})
+    log(db, 'Lead Review Updated', 'LeadApproval', approval.id, campaign.company_id, user.id, {'lead_key': lead_key, 'state': state, 'mirrored': mirrored})
     db.commit(); db.refresh(approval)
-    return {'ok': True, 'lead_key': lead_key, 'state': approval.state, 'history': approval.history}
+    return {'ok': True, 'lead_key': lead_key, 'state': approval.state, 'history': approval.history, 'mirrored': mirrored}
 
 
 @router.get('/campaigns/{campaign_id}/outreach-drafts')

@@ -143,7 +143,11 @@ export function OutreachControlsPanel({
   async function reviewAction(item: ReviewItem, action: string) {
     setBusy(`${item.lead_key}:${action}`);
     try {
-      const result = await api(`/campaigns/${campaignId}/lead-review/${item.lead_key}/${action}`, { method: 'POST', body: JSON.stringify({ reason: action }) });
+      const reviewCampaignId = leadSourceCampaignId || campaignId;
+      const result = await api(`/campaigns/${reviewCampaignId}/lead-review/${item.lead_key}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({ reason: action, target_campaign_id: campaignId }),
+      });
       setMessage(result.message || `Lead ${action} saved`);
       await load();
     } catch (err: any) { setError(err.message || 'Lead review action failed'); }
