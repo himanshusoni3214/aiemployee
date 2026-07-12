@@ -655,13 +655,17 @@ def _mirror_lead_review_to_target(db: Session, source_campaign: Campaign, target
         raise HTTPException(400, 'Target outreach campaign must belong to the same company')
     approval = upsert_approval(db, target_campaign, item, state, user_id, reason)
     updated_drafts = 0
-    if state in {'rejected', 'do_not_contact', 'unsubscribed'}:
-        drafts = db.scalars(select(OutreachDraft).where(OutreachDraft.campaign_id == target_campaign.id, OutreachDraft.lead_key == item['lead_key'])).all()
-        for draft in drafts:
+    drafts = db.scalars(select(OutreachDraft).where(OutreachDraft.campaign_id == target_campaign.id, OutreachDraft.lead_key == item['lead_key'])).all()
+    for draft in drafts:
+        if state in {'rejected', 'do_not_contact', 'unsubscribed'}:
             if draft.status != 'draft_rejected':
                 draft.status = 'draft_rejected'
                 draft.updated_at = datetime.utcnow()
                 updated_drafts += 1
+        elif state == 'approved_for_outreach' and draft.status == 'draft_rejected':
+            draft.status = 'draft_needs_review'
+            draft.updated_at = datetime.utcnow()
+            updated_drafts += 1
     return {'campaign_id': target_campaign.id, 'approval_id': approval.id, 'state': approval.state, 'updated_drafts': updated_drafts}
 
 

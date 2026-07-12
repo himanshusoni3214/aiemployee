@@ -21,11 +21,13 @@ type OutreachMode = 'lead_research' | 'email_outreach' | 'full';
 
 const WEEKDAYS = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday', 'Sunday'];
 
-function countDrafts(drafts: Draft[]) {
+function countDrafts(drafts: Draft[], allowedLeadKeys?: Set<string>) {
+  const activeDrafts = drafts.filter((draft) => draft.status !== 'draft_rejected' && (!allowedLeadKeys || allowedLeadKeys.has(draft.lead_key)));
   return {
-    generated: drafts.length,
-    approved: drafts.filter((draft) => draft.status === 'draft_approved').length,
-    editable: drafts.filter((draft) => draft.status !== 'draft_rejected').length,
+    generated: activeDrafts.length,
+    approved: activeDrafts.filter((draft) => draft.status === 'draft_approved').length,
+    editable: activeDrafts.length,
+    rejected: drafts.length - activeDrafts.length,
   };
 }
 
@@ -251,18 +253,22 @@ export function OutreachControlsPanel({
   const allowedDays = Array.isArray(settingsForm.allowed_sending_days) ? settingsForm.allowed_sending_days : [];
   const allowedHours = settingsForm.allowed_sending_hours || {};
   const reviewCounts = review?.counts || {};
-  const draftCounts = countDrafts(drafts);
+  const approvedSourceLeadKeys = showEmailWorkflow && leadSourceCampaignId
+    ? new Set((review?.items || []).filter((item) => item.state === 'approved_for_outreach').map((item) => item.lead_key))
+    : undefined;
+  const draftCounts = countDrafts(drafts, approvedSourceLeadKeys);
   const coverage = batchPreview?.coverage || sendStatus?.batch_preview?.coverage || {};
   const approvedLeads = Number(coverage.approved_leads ?? reviewCounts.approved_for_outreach ?? 0);
   const sourceApprovedLeads = Number(reviewCounts.approved_for_outreach ?? 0);
-  const approvedLeadsForActions = showEmailWorkflow && sourceApprovedLeads > approvedLeads ? sourceApprovedLeads : approvedLeads;
+  const approvedLeadsForActions = showEmailWorkflow && leadSourceCampaignId ? sourceApprovedLeads : approvedLeads;
+  const leadsFoundForDisplay = showEmailWorkflow && leadSourceCampaignId ? Number(review?.items?.length ?? 0) : Number(coverage.total_leads ?? review?.items?.length ?? 0);
   const readyToSend = Number(coverage.ready_to_send ?? 0);
   const missingDrafts = Number(coverage.approved_leads_without_drafts ?? Math.max(0, approvedLeadsForActions - draftCounts.generated));
   const canSend = Boolean(batchPreview?.can_send_controlled_batch || sendStatus?.batch_preview?.can_send_controlled_batch);
   const windowInfo = batchPreview?.window || sendStatus?.batch_preview?.window || {};
   const limits = batchPreview?.limits || sendStatus?.batch_preview?.limits || {};
   const visibleLeads = (review?.items || []).slice(0, 20);
-  const visibleDrafts = drafts.filter((draft) => draft.status !== 'draft_rejected').slice(0, 5);
+  const visibleDrafts = drafts.filter((draft) => draft.status !== 'draft_rejected' && (!approvedSourceLeadKeys || approvedSourceLeadKeys.has(draft.lead_key))).slice(0, 5);
   const blocker = firstBlocker(sendStatus, batchPreview);
   const nextStep = (() => {
     if (!showEmailWorkflow) {
@@ -296,7 +302,7 @@ export function OutreachControlsPanel({
       {message ? <div className="rounded border border-emerald-900 bg-emerald-950/30 p-2 text-xs text-emerald-200">{message}</div> : null}
 
       <div className="grid gap-2 md:grid-cols-5" data-voryx-email-stats>
-        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Leads found</p><p className="text-xl font-semibold">{coverage.total_leads ?? review?.items?.length ?? 0}</p></div>
+        <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Leads found</p><p className="text-xl font-semibold">{leadsFoundForDisplay}</p></div>
         <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Approved</p><p className="text-xl font-semibold">{approvedLeadsForActions}</p></div>
         <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Drafts</p><p className="text-xl font-semibold">{draftCounts.generated}</p></div>
         <div className="rounded border border-zinc-800 p-2"><p className="text-xs text-zinc-500">Ready to send</p><p className="text-xl font-semibold">{readyToSend}</p></div>

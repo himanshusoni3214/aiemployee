@@ -501,6 +501,21 @@ class OutreachControlsTests(unittest.TestCase):
             self.assertEqual(source_approval.state, 'rejected')
             self.assertEqual(target_approval.state, 'rejected')
             self.assertEqual(draft.status, 'draft_rejected')
+
+            source_item['state'] = 'rejected'
+            result = routes.campaign_lead_review_action(
+                source_campaign.id,
+                'lead-source-1',
+                'approve',
+                payload={'reason': 'approve', 'target_campaign_id': outreach_campaign.id},
+                db=db,
+                user=user,
+            )
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['state'], 'approved_for_outreach')
+            self.assertEqual(result['mirrored']['updated_drafts'], 1)
+            db.refresh(draft)
+            self.assertEqual(draft.status, 'draft_needs_review')
         finally:
             routes._campaign_review_items = original_reader
             db.close()
