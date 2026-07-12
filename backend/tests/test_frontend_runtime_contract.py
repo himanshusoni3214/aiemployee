@@ -208,6 +208,10 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("leadsFoundForDisplay", source)
         self.assertIn("approvedSourceLeadKeys", source)
         self.assertIn("allowedLeadKeys.has(draft.lead_key)", source)
+        self.assertIn("showAllLeads", source)
+        self.assertIn("Show all {allReviewItems.length} leads", source)
+        self.assertIn("Approve all eligible leads", source)
+        self.assertIn("approveEligibleLeads", source)
         self.assertIn("showEmailWorkflow && leadSourceCampaignId ? sourceApprovedLeads : approvedLeads", source)
         campaigns = read_frontend("app/campaigns/page.tsx")
         self.assertIn("leadSourceCampaignFor", campaigns)
@@ -218,7 +222,7 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("data-voryx-email-advanced", source)
         self.assertIn("data-voryx-sender-verification", source)
         self.assertIn("data-voryx-approved-sending-window", source)
-        for label in ["Generate leads", "Approve visible leads", "Generate email draft", "Approve all drafts", "Send test", "Send approved emails", "Report"]:
+        for label in ["Generate leads", "Approve all eligible leads", "Generate email draft", "Approve all drafts", "Send test", "Send approved emails", "Report"]:
             self.assertIn(label, source)
         for label in ["Approved sending window", "Start time", "End time", "Start date", "End date", "Timezone", "Hourly limit"]:
             self.assertIn(label, source)

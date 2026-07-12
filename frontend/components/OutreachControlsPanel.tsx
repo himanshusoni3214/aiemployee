@@ -70,6 +70,7 @@ export function OutreachControlsPanel({
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [draftEdits, setDraftEdits] = useState<Record<string, { subject: string; body: string }>>({});
+  const [showAllLeads, setShowAllLeads] = useState(false);
 
   async function load() {
     try {
@@ -125,18 +126,18 @@ export function OutreachControlsPanel({
     finally { setBusy(''); }
   }
 
-  async function approveVisibleLeads() {
-    const candidates = (review?.items || []).filter((item) => item.computed_state === 'new' && item.state !== 'approved_for_outreach').slice(0, 50);
+  async function approveEligibleLeads() {
+    const candidates = (review?.items || []).filter((item) => item.computed_state === 'new' && item.state !== 'approved_for_outreach');
     if (!candidates.length) {
-      setMessage('No visible leads need approval.');
+      setMessage('No current eligible leads need approval.');
       return;
     }
-    setBusy('approve-visible-leads');
+    setBusy('approve-eligible-leads');
     try {
       for (const item of candidates) {
         await api(`/campaigns/${campaignId}/lead-review/${item.lead_key}/approve`, { method: 'POST', body: JSON.stringify({ reason: 'approved from email employee workflow' }) });
       }
-      setMessage(`Approved ${candidates.length} visible leads`);
+      setMessage(`Approved ${candidates.length} eligible current leads`);
       await load();
     } catch (err: any) { setError(err.message || 'Lead approval failed'); }
     finally { setBusy(''); }
@@ -267,7 +268,9 @@ export function OutreachControlsPanel({
   const canSend = Boolean(batchPreview?.can_send_controlled_batch || sendStatus?.batch_preview?.can_send_controlled_batch);
   const windowInfo = batchPreview?.window || sendStatus?.batch_preview?.window || {};
   const limits = batchPreview?.limits || sendStatus?.batch_preview?.limits || {};
-  const visibleLeads = (review?.items || []).slice(0, 20);
+  const allReviewItems = review?.items || [];
+  const visibleLeads = showAllLeads ? allReviewItems : allReviewItems.slice(0, 20);
+  const hiddenLeadCount = Math.max(0, allReviewItems.length - visibleLeads.length);
   const visibleDrafts = drafts.filter((draft) => draft.status !== 'draft_rejected' && (!approvedSourceLeadKeys || approvedSourceLeadKeys.has(draft.lead_key))).slice(0, 5);
   const blocker = firstBlocker(sendStatus, batchPreview);
   const nextStep = (() => {
@@ -311,7 +314,7 @@ export function OutreachControlsPanel({
 
       <div className="flex flex-wrap gap-2" data-voryx-simple-email-actions>
         {showLeadWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'find-leads'} onClick={findLeads}>Generate leads</button> : null}
-        {showLeadWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve-visible-leads'} onClick={approveVisibleLeads}>Approve visible leads</button> : null}
+        {showLeadWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve-eligible-leads'} onClick={approveEligibleLeads}>Approve all eligible leads</button> : null}
         {showEmailWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'generate-drafts' || approvedLeadsForActions <= 0} onClick={generateDrafts}>Generate email draft</button> : null}
         {showEmailWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'approve_all_generated' || !draftCounts.generated} onClick={approveAllDrafts}>Approve all drafts</button> : null}
         {showEmailWorkflow ? <button className="btn-secondary text-xs" type="button" disabled={busy === 'internal-test' || !drafts.length} onClick={sendTest}>Send test</button> : null}
@@ -324,7 +327,11 @@ export function OutreachControlsPanel({
       <section className="rounded border border-zinc-800 p-3" data-voryx-lead-review>
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <h4 className="text-sm font-semibold">Leads</h4>
-          <span className="text-xs text-zinc-500">{review?.source_path || 'No lead file loaded'}</span>
+          <div className="flex flex-wrap items-center gap-2">
+            <span className="text-xs text-zinc-500">{review?.source_path || 'No lead file loaded'}</span>
+            {hiddenLeadCount > 0 ? <button className="btn-secondary text-xs" type="button" onClick={() => setShowAllLeads(true)}>Show all {allReviewItems.length} leads</button> : null}
+            {showAllLeads && allReviewItems.length > 20 ? <button className="btn-secondary text-xs" type="button" onClick={() => setShowAllLeads(false)}>Show first 20</button> : null}
+          </div>
         </div>
         <div className="max-h-72 overflow-auto">
           <table className="ops-table text-xs">
