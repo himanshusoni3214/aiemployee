@@ -244,8 +244,16 @@ class FrontendRuntimeContractTests(unittest.TestCase):
 
     def test_campaign_detail_has_operational_sections(self):
         source = read_frontend("app/campaigns/page.tsx")
+        layout = read_frontend("app/layout.tsx")
 
         self.assertIn("data-voryx-campaign-detail-sections", source)
+        self.assertIn("displayCampaigns", source)
+        self.assertIn("Email Marketing Campaign", source)
+        self.assertIn("Lead generation + email drafting + reporting", source)
+        self.assertIn("Historical review decisions are separate from the current lead pool", source)
+        self.assertIn("Sales Campaigns", layout)
+        self.assertNotIn("['Employees', '/employees']", layout)
+        self.assertNotIn("['Schedules', '/scheduler']", layout)
         self.assertIn("DailyReportPanel", source)
         self.assertIn("isLeadResearchEmployee", source)
         self.assertIn("isEmailOutreachEmployee", source)
@@ -257,7 +265,7 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("Current blocker:", source)
         self.assertIn("<details", source)
         self.assertIn("Advanced", source)
-        for label in ["Goal", "Leads", "Lead Files", "Email Sending Workflow", "Replies and Meetings", "Calling", "Daily Report", "Hermes Sync and Job IDs", "Raw Schedules", "Raw Employees", "Model Policy"]:
+        for label in ["Goal", "Leads", "Lead Source", "Email Sending Workflow", "Replies and Meetings", "Calling", "Daily Report", "Hermes Sync and Job IDs", "Raw Schedules", "Raw Employees", "Model Policy"]:
             self.assertIn(label, source)
 
     def test_jobs_page_displays_delivery_evidence_fields(self):

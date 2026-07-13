@@ -5,9 +5,8 @@ import { LogoutButton } from '../components/LogoutButton';
 const links = [
   ['Dashboard', '/dashboard'],
   ['Companies', '/companies'],
-  ['Campaigns', '/campaigns'],
-  ['Employees', '/employees'],
-  ['Schedules', '/scheduler'],
+  ['Sales Campaigns', '/campaigns'],
+  ['Leads', '/campaigns'],
   ['Jobs', '/jobs'],
   ['Logs', '/reports'],
   ['Health', '/system'],

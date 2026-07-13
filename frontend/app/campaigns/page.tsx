@@ -116,6 +116,11 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
     hermesIdsByCampaign.set(campaign.id, unique.length > 4 ? [...unique.slice(0, 4), `+${unique.length - 4} more`] : unique);
   });
   const companyOptions = companies.filter((company) => company.status !== 'Archived').map((company) => ({ value: company.id, label: company.name }));
+  const hasEmailWorkflow = campaigns.some((campaign) => isEmailOutreachEmployee(primaryEmployee(employees, campaign.id), campaign));
+  const displayCampaigns = campaigns.filter((campaign) => {
+    const employee = primaryEmployee(employees, campaign.id);
+    return !(hasEmailWorkflow && (isLeadResearchEmployee(employee, campaign) || isReportingEmployee(employee, campaign)));
+  });
 
   return (
     <div className="space-y-5">
@@ -124,7 +129,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
           <p className="text-sm text-zinc-500">Company &gt; Campaign &gt; AI Sales Employee</p>
           <h1 className="text-2xl font-semibold">AI Sales Employee Control Center</h1>
         </div>
-        <div className="text-sm text-zinc-400">{campaigns.length} sales campaigns</div>
+        <div className="text-sm text-zinc-400">{displayCampaigns.length} sales workflows</div>
       </div>
       <CompanySelector companies={companies} selectedCompanyId={companyId} label="Company" />
       {!companyId ? <div className="card text-sm text-amber-300">Select a company to manage campaigns.</div> : null}
@@ -138,13 +143,14 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
         <table className="ops-table">
           <thead><tr><th>Sales campaign</th><th>Company</th><th>AI employee</th><th>Goal</th><th>Daily targets</th><th>Status</th></tr></thead>
           <tbody>
-            {campaigns.map((campaign) => {
+            {displayCampaigns.map((campaign) => {
               const employee = primaryEmployee(employees, campaign.id);
+              const leadSourceCampaign = isEmailOutreachEmployee(employee, campaign) ? leadSourceCampaignFor(campaigns, campaign.company_id, campaign.id) : undefined;
               return (
               <tr key={campaign.id}>
-                <td className="font-medium text-stone-100">{campaign.name}</td>
+                <td className="font-medium text-stone-100">{leadSourceCampaign ? 'Email Marketing Campaign' : campaign.name}</td>
                 <td>{companyName.get(campaign.company_id) || campaign.company_id}</td>
-                <td>{employee ? `${employee.name} / ${employee.employee_type}` : 'No AI employee yet'}</td>
+                <td>{leadSourceCampaign ? 'Lead generation + email drafting + reporting' : employee ? `${employee.name} / ${employee.employee_type}` : 'No AI employee yet'}</td>
                 <td>
                   <div className="max-w-md text-xs text-zinc-400">
                     <div>{campaign.industry || 'Industry missing'} / {campaign.geographic_area || 'Location missing'}</div>
@@ -155,27 +161,30 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                 <td>{campaign.status}</td>
               </tr>
             );})}
-            {!campaigns.length ? <tr><td colSpan={6} className="text-zinc-400">{companyId ? 'No campaigns for selected company' : 'No company selected'}</td></tr> : null}
+            {!displayCampaigns.length ? <tr><td colSpan={6} className="text-zinc-400">{companyId ? 'No campaigns for selected company' : 'No company selected'}</td></tr> : null}
           </tbody>
         </table>
       </div>
       {companyId ? (
         <div className="space-y-3">
-          {campaigns.map((campaign) => {
+          {displayCampaigns.map((campaign) => {
             const detail = (leadDetails as Record<string, { schema: LeadSchema; outputs: LeadOutputs }>)[campaign.id] || { schema: {}, outputs: { outputs: [], rows: [] } };
             const employee = primaryEmployee(employees, campaign.id);
             const isLeadResearch = isLeadResearchEmployee(employee, campaign);
             const isEmailOutreach = isEmailOutreachEmployee(employee, campaign);
             const isReporting = isReportingEmployee(employee, campaign);
             const leadSourceCampaign = isEmailOutreach ? leadSourceCampaignFor(campaigns, campaign.company_id, campaign.id) : undefined;
+            const leadSourceDetail = leadSourceCampaign ? (leadDetails as Record<string, { schema: LeadSchema; outputs: LeadOutputs }>)[leadSourceCampaign.id] || { schema: {}, outputs: { outputs: [], rows: [] } } : null;
+            const reportCampaign = campaigns.find((item) => item.company_id === campaign.company_id && isReportingEmployee(primaryEmployee(employees, item.id), item));
             const campaignSchedules = schedules.filter((schedule) => employees.some((item) => item.id === schedule.employee_id && item.campaign_id === campaign.id));
             const nextSchedule = campaignSchedules.find((schedule) => !schedule.is_paused) || campaignSchedules[0];
+            const workflowTitle = leadSourceCampaign ? 'Email Marketing Campaign' : employee?.name || 'AI Sales Employee';
             return (
               <div className="card" key={campaign.id}>
                 <div className="flex flex-wrap items-start justify-between gap-3">
                   <div>
-                    <p className="text-sm text-zinc-500">Company &gt; {companyName.get(campaign.company_id) || campaign.company_id} &gt; {campaign.name} &gt; AI Sales Employee</p>
-                    <h2 className="text-xl font-semibold">{employee?.name || 'AI Sales Employee'}</h2>
+                    <p className="text-sm text-zinc-500">Company &gt; {companyName.get(campaign.company_id) || campaign.company_id} &gt; {workflowTitle}</p>
+                    <h2 className="text-xl font-semibold">{workflowTitle}</h2>
                     <p className="text-sm text-zinc-400">{campaignGoal(campaign)}</p>
                     <p className="mt-1 text-xs text-zinc-500">Current blocker: {currentBlocker(campaign, employee)}</p>
                   </div>
@@ -194,9 +203,10 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                     <h3 className="text-sm font-semibold">Leads</h3>
                     <LeadSchemaEditor campaignId={campaign.id} initialSchema={detail.schema || {}} />
                   </section> : null}
-                  {isLeadResearch ? <section className="rounded border border-zinc-800 p-3">
-                    <h3 className="text-sm font-semibold">Lead Files</h3>
-                    <LeadOutputsPanel outputs={detail.outputs.outputs || []} rows={detail.outputs.rows || []} />
+                  {isLeadResearch || leadSourceCampaign ? <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">Lead Source</h3>
+                    <p className="mb-2 text-xs text-zinc-400">Current unique lead source: {leadSourceCampaign?.name || campaign.name}. Historical review decisions are separate from the current lead pool.</p>
+                    <LeadOutputsPanel outputs={(leadSourceDetail?.outputs.outputs || detail.outputs.outputs) || []} rows={(leadSourceDetail?.outputs.rows || detail.outputs.rows) || []} />
                   </section> : null}
                   {isLeadResearch || isEmailOutreach ? <section className="rounded border border-zinc-800 p-3">
                     <h3 className="text-sm font-semibold">{isLeadResearch && !isEmailOutreach ? 'Lead Research Workflow' : 'Email Sending Workflow'}</h3>
@@ -217,7 +227,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                     <h3 className="text-sm font-semibold">Calling</h3>
                     <p className="mt-1 text-xs text-zinc-400">Status: not connected. Required before enabling: voice provider, caller ID, call script, recording/transcript policy, do-not-call controls and daily call limit.</p>
                   </section>
-                  {isReporting ? <section className="rounded border border-zinc-800 p-3">
+                  {isReporting || leadSourceCampaign ? <section className="rounded border border-zinc-800 p-3">
                     <h3 className="text-sm font-semibold">Daily Report</h3>
                     <p className="mt-1 text-xs text-zinc-400">Business-readable daily reports summarize what happened today, leads found, drafts created, emails sent, replies, meetings, blockers, next recommended action and files.</p>
                     <div className="mt-3">
