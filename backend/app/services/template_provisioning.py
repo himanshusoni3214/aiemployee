@@ -58,9 +58,9 @@ DEFAULT_CUSTOM_LEAD_FIELDS = [
 ]
 CAMPAIGN_BLUEPRINT_REGISTRY = {
     "sales_outreach": {
-        "label": "Sales / Outreach Campaign",
-        "required_fields": ["name", "industry", "geographic_area", "target_audience", "daily_lead_goal", "email_sending_disabled"],
-        "description": "Business objective with lead research, internal reporting, and draft-only outreach workers.",
+        "label": "B2B Sales Campaign",
+        "required_fields": ["name", "industry", "geographic_area", "target_audience", "daily_lead_goal", "outreach_channels", "approval_level", "limits", "email_sending_disabled"],
+        "description": "Business objective that auto-provisions lead research, email outreach support workers, reporting, and disabled future channels.",
     },
     "lead_generation": {
         "label": "Lead Generation Campaign",
@@ -79,6 +79,13 @@ EMPLOYEE_TEMPLATE_REGISTRY = {
         "employee_types": ["Lead Researcher"],
         "required_fields": ["campaign.industry", "campaign.geographic_area", "campaign.target_audience", "daily_lead_goal", "lead_schema", "email_sending_disabled"],
         "disabled": False,
+    },
+    "lead_verifier": {
+        "label": "Lead Verifier",
+        "employee_types": ["Lead Verifier"],
+        "required_fields": ["canonical_lead_pool", "public_source_evidence"],
+        "disabled": True,
+        "reason": "Verification is handled by the Lead Workspace quality gate until a separate verification provider is connected.",
     },
     "daily_reporter": {
         "label": "Daily Reporter / CRM Manager",
@@ -211,7 +218,7 @@ def _lead_research_config(campaign: Campaign, employee: AIEmployee | None = None
         raise ValueError("Lead Research template requires Target customer.")
     if int(campaign.daily_lead_goal or 0) <= 0:
         raise ValueError("Lead Research template requires Lead count greater than 0.")
-    if campaign.daily_email_goal or campaign.daily_email_limit or campaign.dry_run_mode is False:
+    if campaign.dry_run_mode is False:
         raise ValueError("Lead Research template requires email sending disabled.")
     limit = max(int(campaign.daily_lead_goal or 0), 1)
     result = campaign.provisioning_result if isinstance(campaign.provisioning_result, dict) else {}
@@ -334,7 +341,7 @@ def update_campaign_lead_schema(campaign: Campaign, schema: dict[str, Any]) -> d
 def _campaign_supports_lead_research(campaign: Campaign | None) -> bool:
     if not campaign:
         return False
-    return bool((campaign.industry or "").strip() and (campaign.geographic_area or "").strip() and (campaign.target_audience or "").strip() and int(campaign.daily_lead_goal or 0) > 0 and campaign.dry_run_mode is not False and not (campaign.daily_email_goal or campaign.daily_email_limit))
+    return bool((campaign.industry or "").strip() and (campaign.geographic_area or "").strip() and (campaign.target_audience or "").strip() and int(campaign.daily_lead_goal or 0) > 0 and campaign.dry_run_mode is not False)
 
 
 def _campaign_supports_daily_reporter(campaign: Campaign | None) -> bool:
@@ -346,13 +353,15 @@ def _campaign_supports_daily_reporter(campaign: Campaign | None) -> bool:
 def _campaign_supports_outreach_draft(campaign: Campaign | None) -> bool:
     if not campaign:
         return False
-    return bool((campaign.target_audience or "").strip() and (campaign.description or "").strip() and campaign.dry_run_mode is not False and not (campaign.daily_email_goal or campaign.daily_email_limit))
+    return bool((campaign.target_audience or "").strip() and (campaign.description or "").strip() and campaign.dry_run_mode is not False)
 
 
 def _employee_template_key(employee_type: str | None) -> str:
     value = (employee_type or "Custom").strip().lower()
     if value in {"lead researcher", "lead_researcher"}:
         return "lead_researcher"
+    if value in {"lead verifier", "lead_verifier"}:
+        return "lead_verifier"
     if value in {"crm manager", "report manager", "daily reporter", "daily_reporter"}:
         return "daily_reporter"
     if value in {"email outreach", "draft writer", "outreach draft writer", "outreach_draft_writer"}:
@@ -407,6 +416,7 @@ def allowed_employee_types_for_campaign(campaign: Campaign | None) -> list[str]:
     if _campaign_supports_outreach_draft(campaign):
         allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["outreach_draft_writer"]["employee_types"])
     if campaign_type == "sales_outreach":
+        allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["lead_verifier"]["employee_types"])
         allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["email_sender"]["employee_types"])
         allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["reply_monitor"]["employee_types"])
         allowed.extend(EMPLOYEE_TEMPLATE_REGISTRY["follow_up_manager"]["employee_types"])
@@ -422,8 +432,10 @@ def validate_campaign_blueprint(campaign: Campaign) -> None:
         raise ValueError(f"Unsupported campaign blueprint: {campaign.campaign_type}")
     if not (campaign.name or "").strip():
         raise ValueError("Campaign name is required.")
-    if campaign.dry_run_mode is False or campaign.daily_email_goal or campaign.daily_email_limit:
-        raise ValueError("Campaign email sending must remain disabled.")
+    if campaign.dry_run_mode is False:
+        raise ValueError("Campaign email sending must remain disabled until compliance and approval gates pass.")
+    if campaign.campaign_type == "lead_generation" and (campaign.daily_email_goal or campaign.daily_email_limit):
+        raise ValueError("Lead Generation campaigns cannot have email send goals or limits.")
     if campaign.campaign_type in {"sales_outreach", "lead_generation"}:
         if not (campaign.industry or "").strip():
             raise ValueError("Campaign requires Industry / niche.")
@@ -436,7 +448,7 @@ def validate_campaign_blueprint(campaign: Campaign) -> None:
     result = dict(campaign.provisioning_result or {})
     result.setdefault("campaign_blueprint", campaign.campaign_type)
     result.setdefault("lead_schema", normalize_lead_schema(result))
-    result.setdefault("message", "Campaign blueprint saved. Add employee templates to provision Hermes jobs.")
+    result.setdefault("message", "Sales campaign blueprint saved. Default employees are provisioned automatically for supported channels.")
     campaign.provisioning_result = result
     if campaign.provisioning_state in {None, "Provisioned", "Provisioning"}:
         campaign.provisioning_state = "Draft"
@@ -674,6 +686,11 @@ def _employee_template_spec(campaign: Campaign, employee: AIEmployee, job_id: st
 
 def _validate_employee_template_requirements(campaign: Campaign, employee: AIEmployee) -> None:
     key = _employee_template_key(employee.employee_type)
+    if key == "lead_verifier":
+        employee.status = EmployeeStatus.paused
+        employee.dry_run_mode = True
+        employee.paused_reason = "Lead Verifier is represented by Lead Workspace quality gates until a verification provider is connected."
+        return
     if key == "email_sender":
         employee.status = EmployeeStatus.paused
         employee.dry_run_mode = True
@@ -711,7 +728,7 @@ def _validate_employee_template_requirements(campaign: Campaign, employee: AIEmp
     if key == "outreach_draft_writer":
         if not (campaign.description or "").strip():
             raise ValueError("Outreach Draft Writer requires offer/product and tone in campaign notes.")
-        if campaign.daily_email_goal or campaign.daily_email_limit or campaign.dry_run_mode is False:
+        if campaign.dry_run_mode is False:
             raise ValueError("Outreach Draft Writer requires no send action and email sending disabled.")
 
 
@@ -724,7 +741,7 @@ def provision_employee_template(db: Session, employee: AIEmployee, user_id: str 
     key = _employee_template_key(employee.employee_type)
     if key == "custom":
         return None
-    if key in {"email_sender", "reply_monitor", "follow_up_manager"}:
+    if key in {"lead_verifier", "email_sender", "reply_monitor", "follow_up_manager"}:
         _validate_employee_template_requirements(campaign, employee)
         return {"provisioned": False, "employee_template": key, "message": employee.paused_reason, "manual_control_only": True}
     _validate_employee_template_requirements(campaign, employee)
@@ -788,6 +805,80 @@ def provision_employee_template(db: Session, employee: AIEmployee, user_id: str 
         campaign.provisioning_state = "Provisioned"
     log(db, "Employee Template Provisioned", "AIEmployee", employee.id, employee.company_id, user_id, {"employee_template": key, "hermes_job_id": job_id, "hermes_control": control})
     return {"provisioned": True, "employee_template": key, "hermes_job_id": job_id, "schedule_id": schedule.id, "hermes_control": control}
+
+
+SALES_DEFAULT_EMPLOYEES = [
+    ("Lead Researcher", "Lead Researcher", True),
+    ("Lead Verifier", "Lead Verifier", False),
+    ("Email Draft Writer", "Email Outreach", True),
+    ("Email Sender", "Email Sender", False),
+    ("Reply Monitor", "Reply Monitor", False),
+    ("Follow-up Manager", "Follow-up Manager", False),
+    ("Daily Reporter", "CRM Manager", True),
+]
+
+
+def _default_employee_name(campaign: Campaign, label: str) -> str:
+    return f"{campaign.name} {label}"
+
+
+def provision_sales_campaign_defaults(db: Session, campaign: Campaign, user_id: str | None = None) -> dict[str, Any]:
+    validate_campaign_blueprint(campaign)
+    if campaign.campaign_type != "sales_outreach":
+        raise ValueError("Sales campaign defaults require campaign_type=sales_outreach")
+    result = dict(campaign.provisioning_result or {})
+    result.setdefault("campaign_blueprint", "sales_outreach")
+    result.setdefault("channels", {"email": "enabled", "calling": "not_connected", "sms_text": "not_connected", "social_outreach": "not_connected", "whatsapp": "not_connected"})
+    result.setdefault("approval_level", result.get("approval_level") or "approve_every_lead_and_draft")
+    employees_result: list[dict[str, Any]] = []
+    for label, employee_type, has_hermes in SALES_DEFAULT_EMPLOYEES:
+        employee = db.scalar(select(AIEmployee).where(AIEmployee.campaign_id == campaign.id, AIEmployee.employee_type == employee_type).limit(1))
+        if not employee:
+            employee = AIEmployee(
+                company_id=campaign.company_id,
+                campaign_id=campaign.id,
+                name=_default_employee_name(campaign, label),
+                employee_type=employee_type,
+                prompt=f"{label} for {campaign.name}",
+                status=EmployeeStatus.paused,
+                dry_run_mode=True,
+                daily_email_limit=0,
+                paused_reason="Provisioned paused by Sales Campaign wizard.",
+            )
+            db.add(employee)
+            db.flush()
+        else:
+            employee.name = employee.name or _default_employee_name(campaign, label)
+            employee.company_id = campaign.company_id
+            employee.campaign_id = campaign.id
+            employee.status = EmployeeStatus.paused if employee.status != EmployeeStatus.archived else employee.status
+        if has_hermes:
+            try:
+                provisioned = provision_employee_template(db, employee, user_id) or {"provisioned": False}
+            except ValueError as exc:
+                if employee_type == "Email Outreach" and "offer/product" in str(exc):
+                    employee.paused_reason = "Email Draft Writer needs offer/product notes before draft automation is provisioned."
+                    provisioned = {"provisioned": False, "employee_template": _employee_template_key(employee_type), "message": employee.paused_reason}
+                else:
+                    raise
+        else:
+            _validate_employee_template_requirements(campaign, employee)
+            provisioned = {"provisioned": False, "employee_template": _employee_template_key(employee_type), "message": employee.paused_reason, "manual_control_only": True}
+        employees_result.append({
+            "employee_id": employee.id,
+            "name": employee.name,
+            "employee_type": employee.employee_type,
+            "hermes_job_id": employee.hermes_job_id,
+            "status": employee.status.value if hasattr(employee.status, "value") else str(employee.status),
+            **provisioned,
+        })
+    result["employees"] = employees_result
+    result["provisioned"] = True
+    result["message"] = "Sales campaign workspace provisioned with default email-channel employees. Future channels are visible but not connected."
+    campaign.provisioning_result = result
+    campaign.provisioning_state = "Provisioned"
+    log(db, "Sales Campaign Defaults Provisioned", "Campaign", campaign.id, campaign.company_id, user_id, {"employees": employees_result, "channels": result.get("channels")})
+    return result
 
 def mark_provisioning_failed(campaign: Campaign, exc: Exception) -> None:
     campaign.provisioning_state = "Provisioning Failed"

@@ -13,7 +13,7 @@ from app.api import routes
 from app.core.config import settings
 from app.models.base import Base
 from app.models.entities import AIEmployee, Campaign, Company, EmployeeStatus, Job, Schedule, Status, User, Role
-from app.services.template_provisioning import APPROVED_INTERNAL_RECIPIENT, provision_campaign_template, provision_employee_template, validate_campaign_blueprint
+from app.services.template_provisioning import APPROVED_INTERNAL_RECIPIENT, provision_campaign_template, provision_employee_template, validate_campaign_blueprint, provision_sales_campaign_defaults
 
 
 class TemplateProvisioningTests(unittest.TestCase):
@@ -245,6 +245,37 @@ class TemplateProvisioningTests(unittest.TestCase):
         finally:
             db.close()
 
+
+    def test_sales_outreach_auto_provisions_default_employee_set(self):
+        db = self.Session()
+        try:
+            company = Company(id="company-sales", name="Sales Co", status=Status.active)
+            campaign = Campaign(
+                id="campaign-sales",
+                company_id=company.id,
+                name="Sales Campaign",
+                campaign_type="sales_outreach",
+                industry="cafes",
+                geographic_area="Toronto",
+                target_audience="independent cafe owners",
+                description="Offer: cold brew wholesale",
+                daily_lead_goal=10,
+                daily_email_goal=5,
+                daily_email_limit=5,
+                dry_run_mode=True,
+                internal_test_recipient="himanshusoni3214@gmail.com",
+                report_recipient="himanshusoni3214@gmail.com",
+                provisioning_result={"lead_source": {"type": "real_directory"}},
+            )
+            db.add_all([company, campaign]); db.flush()
+            result = provision_sales_campaign_defaults(db, campaign, "admin")
+            employee_types = {item["employee_type"] for item in result["employees"]}
+            self.assertTrue({"Lead Researcher", "Lead Verifier", "Email Outreach", "Email Sender", "Reply Monitor", "Follow-up Manager", "CRM Manager"}.issubset(employee_types))
+            self.assertEqual(result["channels"]["email"], "enabled")
+            self.assertEqual(result["channels"]["calling"], "not_connected")
+            self.assertEqual(campaign.provisioning_state, "Provisioned")
+        finally:
+            db.close()
 
 if __name__ == "__main__":
     unittest.main()

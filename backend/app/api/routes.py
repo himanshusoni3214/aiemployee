@@ -43,6 +43,7 @@ from app.services.template_provisioning import (
     normalize_lead_schema,
     provision_campaign_template,
     provision_employee_template,
+    provision_sales_campaign_defaults,
     template_registry_payload,
     update_campaign_lead_schema,
     validate_campaign_blueprint,
@@ -466,7 +467,10 @@ def crud(model, schema, label: str):
         if model is Campaign:
             try:
                 validate_campaign_blueprint(obj)
-                if (obj.campaign_type or 'custom').strip().lower() in {'lead_research', 'daily_reporting', 'outreach_drafting'}:
+                campaign_type = (obj.campaign_type or 'custom').strip().lower()
+                if campaign_type == 'sales_outreach':
+                    provision_sales_campaign_defaults(db, obj, user.id)
+                elif campaign_type in {'lead_research', 'daily_reporting', 'outreach_drafting'}:
                     provision_campaign_template(db, obj, user.id)
             except ValueError as exc:
                 db.rollback()
@@ -502,7 +506,12 @@ def crud(model, schema, label: str):
         if model is Campaign:
             try:
                 validate_campaign_blueprint(obj)
-                if (obj.campaign_type or 'custom').strip().lower() in {'lead_research', 'daily_reporting', 'outreach_drafting'}:
+                campaign_type = (obj.campaign_type or 'custom').strip().lower()
+                if campaign_type == 'sales_outreach':
+                    should_provision = previous_campaign_type != obj.campaign_type or obj.provisioning_state not in {'Provisioned', 'Active', 'Paused'}
+                    if should_provision:
+                        provision_sales_campaign_defaults(db, obj, user.id)
+                elif campaign_type in {'lead_research', 'daily_reporting', 'outreach_drafting'}:
                     should_provision = previous_campaign_type != obj.campaign_type or obj.provisioning_state not in {'Provisioned', 'Active', 'Paused'}
                     if should_provision:
                         provision_campaign_template(db, obj, user.id)
@@ -632,9 +641,53 @@ def _latest_campaign_csv_rows(campaign: Campaign, db: Session) -> tuple[list[dic
     return rows, Path(csv_output['path']).stem, csv_output['path']
 
 
+
+def _lead_status_from_review_item(item: dict) -> LeadStatus:
+    state = str(item.get("state") or "").lower()
+    if state in {"sent", "contacted"}:
+        return LeadStatus.contacted
+    if item.get("can_send") or state == "approved_for_outreach" or str(item.get("email_confidence") or "") == "verified":
+        return LeadStatus.verified
+    return LeadStatus.generated
+
+
+def _sync_canonical_lead_pool(db: Session, campaign: Campaign, items: list[dict], source_path: str | None = None) -> dict[str, int]:
+    created = 0
+    updated = 0
+    for item in items:
+        email = str(item.get("email") or "").strip().lower() or None
+        business = str(item.get("business") or "").strip() or None
+        website = str(item.get("website") or item.get("raw", {}).get("Website") or item.get("raw", {}).get("website") or "").strip() or None
+        phone = str(item.get("raw", {}).get("Phone") or item.get("raw", {}).get("phone") or "").strip() or None
+        lead = None
+        if email:
+            lead = db.scalar(select(Lead).where(Lead.company_id == campaign.company_id, Lead.email == email).limit(1))
+        if not lead and business:
+            lead = db.scalar(select(Lead).where(Lead.company_id == campaign.company_id, Lead.business == business, Lead.website == website).limit(1))
+        if not lead:
+            lead = Lead(company_id=campaign.company_id, campaign_id=campaign.id, business=business, email=email, phone=phone, website=website, status=_lead_status_from_review_item(item))
+            db.add(lead)
+            created += 1
+        else:
+            changed = False
+            for field, value in {"campaign_id": campaign.id, "business": business, "email": email, "phone": phone, "website": website}.items():
+                if value and getattr(lead, field) != value:
+                    setattr(lead, field, value)
+                    changed = True
+            status = _lead_status_from_review_item(item)
+            if lead.status != status:
+                lead.status = status
+                changed = True
+            if changed:
+                updated += 1
+    return {"created": created, "updated": updated, "total": len(items)}
+
+
 def _campaign_review_items(db: Session, campaign: Campaign) -> tuple[list[dict], str | None]:
     rows, source_run_id, source_path = _latest_campaign_csv_rows(campaign, db)
-    return review_items_from_rows(db, campaign, rows, source_run_id), source_path
+    items = review_items_from_rows(db, campaign, rows, source_run_id)
+    _sync_canonical_lead_pool(db, campaign, items, source_path)
+    return items, source_path
 
 
 def _review_item_by_key(db: Session, campaign: Campaign, lead_key: str) -> dict:
@@ -801,7 +854,9 @@ def campaign_lead_review(campaign_id: str, db: Session=Depends(get_db), user: Us
     counts: dict[str, int] = {}
     for item in items:
         counts[item['state']] = counts.get(item['state'], 0) + 1
-    return {'campaign_id': campaign.id, 'company_id': campaign.company_id, 'source_path': source_path, 'items': items, 'counts': counts, 'eligible_count': sum(1 for item in items if item.get('can_send')), 'approval_eligible_count': sum(1 for item in items if item.get('approval_eligible'))}
+    lead_pool = _sync_canonical_lead_pool(db, campaign, items, source_path)
+    db.commit()
+    return {'campaign_id': campaign.id, 'company_id': campaign.company_id, 'source_path': source_path, 'items': items, 'counts': counts, 'eligible_count': sum(1 for item in items if item.get('can_send')), 'approval_eligible_count': sum(1 for item in items if item.get('approval_eligible')), 'canonical_lead_pool': lead_pool}
 
 
 @router.post('/campaigns/{campaign_id}/lead-review/{lead_key}/{action}')

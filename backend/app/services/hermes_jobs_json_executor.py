@@ -20,6 +20,9 @@ OUTREACH_FOLLOWUP_JOB_ID = "b03a2d0f1149"
 APPROVED_JOB_IDS = {LEAD_RESEARCH_JOB_ID, DAILY_REPORT_JOB_ID}
 BLOCKED_JOB_IDS = {OUTREACH_DRAFT_JOB_ID, OUTREACH_FOLLOWUP_JOB_ID}
 GENERIC_LEAD_RESEARCH_SCRIPT = "/opt/data/home/leads/voryx_generic_lead_research.py"
+BIBS_LEAD_SOURCE_CONFIG = "bibs_real_lead_source_config.json"
+BIBS_CAMPAIGN_ID = "campaign-brew-it-by-sash-lead-research"
+BIBS_COMPANY_ID = "company-brew-it-by-sash"
 
 DATA_ROOT = Path(os.getenv("HERMES_EXECUTION_DATA_PATH", "/opt/data"))
 LEADS_DIR = DATA_ROOT / "home" / "leads"
@@ -173,6 +176,44 @@ def _container_path(path: str) -> Path:
     return Path(value)
 
 
+
+def _business_key(row: dict[str, str]) -> str:
+    business = str(row.get("Business Name") or row.get("business_name") or row.get("business") or row.get("company") or "").strip().lower()
+    website = str(row.get("Website") or row.get("website") or row.get("domain") or "").strip().lower().removeprefix("https://").removeprefix("http://").removeprefix("www.").split("/", 1)[0]
+    return f"{business}|{website}" if business or website else ""
+
+
+def _existing_bibs_business_keys(exclude: Path | None = None) -> set[str]:
+    keys: set[str] = set()
+    for path in LEADS_DIR.glob("leads_brew_it*.csv"):
+        if exclude is not None and path.resolve() == exclude.resolve():
+            continue
+        try:
+            import csv
+            with path.open(newline="", encoding="utf-8", errors="replace") as handle:
+                for row in csv.DictReader(handle):
+                    key = _business_key(row)
+                    if key:
+                        keys.add(key)
+        except Exception:
+            continue
+    return keys
+
+
+def _csv_business_keys(path: Path) -> set[str]:
+    keys: set[str] = set()
+    try:
+        import csv
+        with path.open(newline="", encoding="utf-8", errors="replace") as handle:
+            for row in csv.DictReader(handle):
+                key = _business_key(row)
+                if key:
+                    keys.add(key)
+    except Exception:
+        return set()
+    return keys
+
+
 def _payload_mentions_send_outreach(payload: Any) -> bool:
     try:
         return "send_outreach.py" in json.dumps(payload, sort_keys=True)
@@ -181,41 +222,70 @@ def _payload_mentions_send_outreach(payload: Any) -> bool:
 
 
 def _execute_lead_research(task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
-    script = LEADS_DIR / "generate_leads.py"
+    source_config = LEADS_DIR / BIBS_LEAD_SOURCE_CONFIG
+    if not source_config.exists():
+        return _failed(
+            "real_source_not_configured: BIBS Lead Research is configured only with the old CSV consolidation helper. Add /opt/data/home/leads/bibs_real_lead_source_config.json with an uploaded_seed_csv, manual_import, or supported source before running lead generation.",
+            logs=[
+                "REAL_SOURCE_NOT_CONFIGURED",
+                "Blocked legacy generate_leads.py because it repeats the same 28 BIBS leads.",
+                "No prospect email sent.",
+            ],
+            results={"error_code": "real_source_not_configured", "prospect_emails_sent": 0},
+        )
+    script = _container_path(GENERIC_LEAD_RESEARCH_SCRIPT)
     if not script.exists():
-        return _failed(f"Lead Research script not found: {script}")
-    before = _latest_lead_output()
-    result = _run(["python3", str(script)], cwd=LEADS_DIR)
+        return _failed(f"Generic Lead Research script not found: {GENERIC_LEAD_RESEARCH_SCRIPT}")
+    before_keys = _existing_bibs_business_keys()
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    args = [
+        "python3",
+        str(script),
+        "--company-id", BIBS_COMPANY_ID,
+        "--campaign-id", BIBS_CAMPAIGN_ID,
+        "--employee-id", "",
+        "--hermes-job-id", LEAD_RESEARCH_JOB_ID,
+        "--industry", "Cold Brew Coffee B2B Outreach",
+        "--location", "Toronto",
+        "--target-customer", "independent cafes, restaurants, boutique grocers and hospitality buyers",
+        "--exclude", "franchises, chains, already contacted businesses, duplicate prior BIBS leads",
+        "--limit", str(int(payload.get("limit") or 25)),
+        "--output-dir", str(LEADS_DIR),
+        "--config", str(source_config),
+        "--notes", "BIBS real source-backed lead research",
+        "--no-email",
+    ]
+    result = _run(args, cwd=LEADS_DIR)
+    logs = _logs_from_completed_process(result)
     if result.returncode != 0:
+        return _failed(_first_error_line(logs) or "BIBS source-backed lead research failed", logs=logs, results={"returncode": result.returncode, "prospect_emails_sent": 0})
+    output_path = _generic_output_from_stdout(result.stdout) or _latest_lead_output()
+    physical_output_path = _container_path(str(output_path)) if output_path else None
+    if physical_output_path is None or not physical_output_path.exists():
+        return _failed("BIBS source-backed lead research completed without an output CSV", logs=logs)
+    new_keys = _csv_business_keys(physical_output_path) - before_keys
+    if len(new_keys) < 10:
         return _failed(
-            "Lead Research execution failed",
-            logs=_logs_from_completed_process(result),
-            results={"returncode": result.returncode},
+            f"real_source_not_configured: BIBS lead run produced only {len(new_keys)} new unique businesses; refusing to mark repeated leads as success.",
+            logs=logs + [f"NEW_UNIQUE_BUSINESSES={len(new_keys)}", "No prospect email sent."],
+            results={"output_path": str(output_path), "new_unique_businesses": len(new_keys), "prospect_emails_sent": 0},
         )
-
-    output_path = _lead_output_from_stdout(result.stdout) or _latest_lead_output()
-    if output_path is None or (before is not None and output_path == before and not _file_touched_now(output_path)):
-        return _failed(
-            "Lead Research completed without a current output file",
-            logs=_logs_from_completed_process(result),
-            results={"previous_output_path": str(before) if before else None},
-        )
-
     output_record = _write_cron_output(
         LEAD_RESEARCH_JOB_ID,
         "BIBS Lead Research scheduled execution",
         task_type,
         payload,
-        _logs_from_completed_process(result),
-        {"output_path": str(output_path), "sent_count": 0},
+        logs,
+        {"output_path": str(output_path), "new_unique_businesses": len(new_keys), "sent_count": 0, "prospect_emails_sent": 0},
     )
     return {
         "status": "ok",
-        "logs": _logs_from_completed_process(result) + [f"HERMES_OUTPUT_WRITTEN path={output_record}"],
+        "logs": logs + [f"NEW_UNIQUE_BUSINESSES={len(new_keys)}", f"HERMES_OUTPUT_WRITTEN path={output_record}"],
         "results": {
             "hermes_job_id": LEAD_RESEARCH_JOB_ID,
             "output_path": str(output_path),
             "hermes_output_path": str(output_record),
+            "new_unique_businesses": len(new_keys),
             "sent_count": 0,
             "prospect_emails_sent": 0,
         },

@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 
-type ReviewItem = { lead_key: string; business?: string; email?: string; domain?: string; state: string; computed_state: string; reason?: string; can_send: boolean; approval_eligible?: boolean; email_confidence?: string; lead_quality?: string; quality_reasons?: string[]; evidence_url?: string; website?: string };
+type ReviewItem = { lead_key: string; business?: string; email?: string; domain?: string; state: string; computed_state: string; reason?: string; can_send: boolean; approval_eligible?: boolean; email_confidence?: string; lead_quality?: string; quality_reasons?: string[]; evidence_url?: string; website?: string; raw?: Record<string, any>; history?: any[] };
 type Draft = { id: string; lead_key: string; lead_email?: string; business?: string; subject: string; body: string; status: string };
 type BatchPreview = {
   coverage?: Record<string, number>;
@@ -335,23 +335,30 @@ export function OutreachControlsPanel({
         </div>
         <div className="max-h-72 overflow-auto">
           <table className="ops-table text-xs">
-            <thead><tr><th>Business</th><th>Email</th><th>Quality</th><th>Status</th><th>Action</th></tr></thead>
+            <thead><tr><th>Business</th><th>Website / phone</th><th>Email</th><th>Source / quality</th><th>Status / history</th><th>Action</th></tr></thead>
             <tbody>
               {visibleLeads.map((item) => <tr key={item.lead_key}>
                 <td>{item.business || item.lead_key}</td>
+                <td>
+                  <div>{item.website || item.raw?.Website || item.raw?.website || '-'}</div>
+                  <div className="text-zinc-500">{item.raw?.Phone || item.raw?.phone || ''}</div>
+                </td>
                 <td>{item.email || '-'}</td>
                 <td>
                   <div>{item.email_confidence || '-'}</div>
                   <div className="text-zinc-500">{item.lead_quality || ''}</div>
                   {item.evidence_url ? <a className="text-emerald-300 hover:text-emerald-200" href={item.evidence_url} target="_blank">source</a> : null}
                 </td>
-                <td>{item.state}{item.reason ? ` / ${item.reason}` : ''}</td>
+                <td>
+                  <div>{item.state}{item.reason ? ` / ${item.reason}` : ''}</div>
+                  <div className="text-zinc-500">History: {item.history?.length || 0}</div>
+                </td>
                 <td className="space-x-1">
                   <button className="btn-secondary text-xs" type="button" disabled={busy.startsWith(item.lead_key) || item.state === 'approved_for_outreach' || !item.approval_eligible} title={!item.approval_eligible ? 'Needs public or verified email evidence before approval' : 'Approve lead for draft generation'} onClick={() => reviewAction(item, 'approve')}>Approve</button>
                   <button className="btn-secondary text-xs" type="button" disabled={busy.startsWith(item.lead_key)} onClick={() => reviewAction(item, 'reject')}>Reject</button>
                 </td>
               </tr>)}
-              {!visibleLeads.length ? <tr><td colSpan={5} className="text-zinc-500">{showEmailWorkflow ? 'No approved lead source is connected yet.' : 'No leads yet. Generate leads first.'}</td></tr> : null}
+              {!visibleLeads.length ? <tr><td colSpan={6} className="text-zinc-500">{showEmailWorkflow ? 'No approved lead source is connected yet.' : 'No leads yet. Generate leads first.'}</td></tr> : null}
             </tbody>
           </table>
         </div>

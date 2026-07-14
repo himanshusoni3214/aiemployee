@@ -148,5 +148,17 @@ class HermesJobsJsonExecutorTests(unittest.TestCase):
             self.assertEqual(updated["last_status"], "ok")
 
 
+    def test_bibs_lead_research_requires_real_source_config(self):
+        from app.services import hermes_jobs_json_executor as executor
+        with unittest.mock.patch.object(executor, "LEADS_DIR") as leads_dir:
+            import tempfile
+            from pathlib import Path
+            with tempfile.TemporaryDirectory() as tmp:
+                leads_dir.__truediv__.side_effect = lambda name: Path(tmp) / name
+                leads_dir.glob.side_effect = lambda pattern: []
+                result = executor.execute_scheduled_jobs_json_task("Generate Leads", {"hermes_job_id": executor.LEAD_RESEARCH_JOB_ID})
+        self.assertEqual(result["status"], "failed")
+        self.assertIn("real_source_not_configured", result.get("error", ""))
+
 if __name__ == "__main__":
     unittest.main()

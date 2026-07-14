@@ -9,6 +9,7 @@ import { LeadSchemaEditor } from '../../components/LeadSchemaEditor';
 import { queryString, selectedCompanyId } from '../../lib/companySelection';
 import { ModelPolicyPanel } from '../../components/ModelPolicyPanel';
 import { LocalTime } from '../../components/LocalTime';
+import { SalesCampaignWizard } from '../../components/SalesCampaignWizard';
 
 type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
@@ -133,6 +134,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
       </div>
       <CompanySelector companies={companies} selectedCompanyId={companyId} label="Company" />
       {!companyId ? <div className="card text-sm text-amber-300">Select a company to manage campaigns.</div> : null}
+      {companyId ? <SalesCampaignWizard companyId={companyId} companies={companies} /> : null}
       <div className="grid gap-3 md:grid-cols-4">
         <div className="card"><p className="text-sm text-zinc-400">Active sales employees</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.status !== 'Archived').length}</p></div>
         <div className="card"><p className="text-sm text-zinc-400">Lead research runs</p><p className="mt-2 text-3xl font-semibold">{jobs.filter((job) => job.task_type === 'Generate Leads').length}</p></div>
@@ -264,8 +266,11 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
         </div>
       ) : null}
       {companyId ? (
+        <details className="card" data-voryx-advanced-raw-campaign-editor>
+          <summary className="cursor-pointer text-sm font-semibold">Advanced: raw campaign records</summary>
+          <div className="mt-3">
         <CrudPage
-          title="Create or Manage B2B Sales Campaigns"
+          title="Advanced Campaign Records"
           path="/campaigns"
           initialItems={campaigns}
           query={{ company_id: companyId }}
@@ -333,6 +338,8 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             status: 'Active',
           }}
         />
+          </div>
+        </details>
       ) : null}
     </div>
   );

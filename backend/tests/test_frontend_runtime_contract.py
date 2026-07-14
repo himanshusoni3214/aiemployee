@@ -314,3 +314,17 @@ class LeadsPageContractTests(unittest.TestCase):
         self.assertIn("email_confidence", source)
         self.assertIn("approval_eligible", source)
         self.assertIn("Needs public or verified email evidence before approval", source)
+
+
+class SalesCampaignWizardContractTests(unittest.TestCase):
+    def test_sales_campaign_wizard_is_primary_flow(self):
+        source = read_frontend("components/SalesCampaignWizard.tsx")
+        campaigns = read_frontend("app/campaigns/page.tsx")
+        self.assertIn("data-voryx-sales-campaign-wizard", source)
+        self.assertIn("B2B sales workspace setup", source)
+        self.assertIn("Calling: not connected", source)
+        self.assertIn("SMS/Text: not connected", source)
+        self.assertIn("Social outreach: not connected", source)
+        self.assertIn("WhatsApp: not connected", source)
+        self.assertIn("Advanced: raw campaign records", campaigns)
+        self.assertIn("SalesCampaignWizard", campaigns)
