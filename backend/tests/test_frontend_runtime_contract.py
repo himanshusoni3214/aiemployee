@@ -238,7 +238,7 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertNotIn("Use this draft", source)
         self.assertIn("SEND CONTROLLED BATCH", source)
         self.assertIn("Cold calling, text marketing and social outreach are separate employees", source)
-        self.assertIn("do not treat assumed addresses as safe", source)
+        self.assertIn("Assumed emails without source evidence stay blocked", source)
         self.assertNotIn("Dry-run prepare", source)
         self.assertNotIn("Send 1 real email", source)
 
@@ -252,6 +252,8 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("Lead generation + email drafting + reporting", source)
         self.assertIn("Historical review decisions are separate from the current lead pool", source)
         self.assertIn("Sales Campaigns", layout)
+        self.assertIn("['Leads', '/leads']", layout)
+        self.assertNotIn("['Leads', '/campaigns']", layout)
         self.assertNotIn("['Employees', '/employees']", layout)
         self.assertNotIn("['Schedules', '/scheduler']", layout)
         self.assertIn("DailyReportPanel", source)
@@ -298,3 +300,17 @@ class FrontendRuntimeContractTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LeadsPageContractTests(unittest.TestCase):
+    def test_leads_route_exists_and_explains_current_unique_pool(self):
+        source = (ROOT / "frontend" / "app" / "leads" / "page.tsx").read_text()
+        self.assertIn("Lead Workspace", source)
+        self.assertIn("Current unique lead pools", source)
+        self.assertIn("Assumed addresses stay visible", source)
+
+    def test_outreach_panel_displays_quality_gate(self):
+        source = (ROOT / "frontend" / "components" / "OutreachControlsPanel.tsx").read_text()
+        self.assertIn("email_confidence", source)
+        self.assertIn("approval_eligible", source)
+        self.assertIn("Needs public or verified email evidence before approval", source)

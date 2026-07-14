@@ -39,6 +39,7 @@ LEAD_STATES = {
     "rejected",
     "missing_email",
     "duplicate",
+    "assumed_email",
     "sent",
     "replied",
     "bounced",
@@ -74,11 +75,61 @@ def first_text(row: dict[str, Any], keys: list[str]) -> str:
     return ""
 
 
+
+
+def _domain_from_url(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = re.sub(r"^https?://", "", text)
+    text = text.split("/", 1)[0].split("?", 1)[0].strip()
+    if text.startswith("www."):
+        text = text[4:]
+    return text
+
+
+def lead_quality_for(row: dict[str, Any], email: str, domain: str) -> dict[str, Any]:
+    website = first_text(row, ["website", "Website", "domain", "url"])
+    source_url = first_text(row, ["source_url", "Source URL", "source", "evidence_url", "contact_page"])
+    verified = first_text(row, ["verified_at", "email_verified_at", "verification_status", "email_verification", "verified_public_email"])
+    status = first_text(row, ["lead_status", "status", "email_status"]).lower()
+    website_domain = _domain_from_url(website)
+    source_domain = _domain_from_url(source_url)
+    reasons: list[str] = []
+    if not email:
+        return {"email_confidence": "missing", "lead_quality": "missing_email", "quality_reasons": ["missing_email"], "evidence_url": source_url, "website": website}
+    if verified or "verified" in status:
+        confidence = "verified"
+        quality = "verified_public_email"
+        reasons.append("verification_metadata_present")
+    elif source_url and domain and (domain == website_domain or domain == source_domain or source_domain.endswith(domain) or domain.endswith(source_domain)):
+        confidence = "public_unverified"
+        quality = "public_source_domain_match"
+        reasons.append("source_url_matches_email_domain")
+    elif source_url:
+        confidence = "public_unverified"
+        quality = "public_source_needs_review"
+        reasons.append("source_url_present_domain_not_matched")
+    else:
+        confidence = "assumed"
+        quality = "assumed_email_no_public_source"
+        reasons.append("no_public_source_url")
+    if not website:
+        reasons.append("missing_website")
+    return {"email_confidence": confidence, "lead_quality": quality, "quality_reasons": reasons, "evidence_url": source_url, "website": website}
+
 def lead_key_for(campaign_id: str, row: dict[str, Any], source_run_id: str, index: int) -> str:
     explicit = first_text(row, ["lead_id", "id"])
     email = normalize_email(first_text(row, ["email", "public_email", "verified_public_email"]))
-    business = first_text(row, ["business_name", "business", "company", "name"])
-    seed = f"{campaign_id}:{source_run_id}:{explicit}:{email}:{business}:{index}"
+    business = first_text(row, ["business_name", "business", "company", "name"]).strip().lower()
+    website = _domain_from_url(first_text(row, ["website", "Website", "domain", "url"]))
+    source_url = _domain_from_url(first_text(row, ["source_url", "Source URL", "source", "evidence_url", "contact_page"]))
+    if explicit:
+        seed = f"{campaign_id}:explicit:{explicit}"
+    elif email:
+        seed = f"{campaign_id}:email:{email}"
+    else:
+        seed = f"{campaign_id}:business:{business}:{website or source_url}:{index}"
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:24]
 
 
@@ -293,10 +344,9 @@ def suppression_sets(db: Session, company_id: str) -> tuple[set[str], set[str]]:
 
 
 def review_items_from_rows(db: Session, campaign: Campaign, rows: list[dict[str, Any]], source_run_id: str = "latest") -> list[dict[str, Any]]:
-    approvals = {
-        item.lead_key: item
-        for item in db.scalars(select(LeadApproval).where(LeadApproval.campaign_id == campaign.id)).all()
-    }
+    approval_rows = db.scalars(select(LeadApproval).where(LeadApproval.campaign_id == campaign.id).order_by(LeadApproval.updated_at)).all()
+    approvals = {item.lead_key: item for item in approval_rows}
+    approvals_by_email = {normalize_email(item.email): item for item in approval_rows if item.email}
     suppressed_emails, suppressed_domains = suppression_sets(db, campaign.company_id)
     email_counts: dict[str, int] = {}
     domain_counts: dict[str, int] = {}
@@ -319,10 +369,15 @@ def review_items_from_rows(db: Session, campaign: Campaign, rows: list[dict[str,
             computed = "do_not_contact"; reason = "Suppression list match"
         elif email_counts.get(email, 0) > 1 or domain_counts.get(domain, 0) > 1:
             computed = "duplicate"; reason = "Duplicate email or domain in campaign source"
-        approval = approvals.get(key)
+        approval = approvals.get(key) or (approvals_by_email.get(email) if email else None)
+        quality = lead_quality_for(row, email, domain)
+        if computed == "new" and quality["email_confidence"] == "assumed":
+            computed = "assumed_email"
+            reason = "Email has no public source evidence"
         state = approval.state if approval else computed
-        if computed in {"missing_email", "duplicate", "do_not_contact"} and state in {"new", "approved_for_outreach"}:
+        if computed in {"missing_email", "duplicate", "do_not_contact", "assumed_email"} and state in {"new", "approved_for_outreach"}:
             state = computed
+        can_send = state == "approved_for_outreach" and computed == "new" and quality["email_confidence"] in {"verified", "public_unverified"}
         items.append({
             "lead_key": key,
             "source_run_id": source_run_id,
@@ -333,7 +388,13 @@ def review_items_from_rows(db: Session, campaign: Campaign, rows: list[dict[str,
             "computed_state": computed,
             "reason": approval.reason if approval else reason,
             "raw": row,
-            "can_send": state == "approved_for_outreach" and computed == "new",
+            "can_send": can_send,
+            "approval_eligible": computed == "new" and quality["email_confidence"] in {"verified", "public_unverified"},
+            "email_confidence": quality["email_confidence"],
+            "lead_quality": quality["lead_quality"],
+            "quality_reasons": quality["quality_reasons"],
+            "evidence_url": quality["evidence_url"],
+            "website": quality["website"],
             "history": approval.history if approval else [],
         })
     return items
@@ -342,8 +403,10 @@ def review_items_from_rows(db: Session, campaign: Campaign, rows: list[dict[str,
 def upsert_approval(db: Session, campaign: Campaign, item: dict[str, Any], state: str, user_id: str, reason: str = "") -> LeadApproval:
     if state not in LEAD_STATES:
         raise ValueError(f"Unsupported lead state: {state}")
-    if item["computed_state"] in {"missing_email", "duplicate", "do_not_contact"} and state == "approved_for_outreach":
+    if item["computed_state"] in {"missing_email", "duplicate", "do_not_contact", "assumed_email"} and state == "approved_for_outreach":
         raise ValueError(f"Lead cannot be approved while computed state is {item['computed_state']}")
+    if state == "approved_for_outreach" and item.get("email_confidence") not in {"verified", "public_unverified"}:
+        raise ValueError("Lead cannot be approved until it has public or verified email evidence")
     approval = db.scalar(select(LeadApproval).where(LeadApproval.campaign_id == campaign.id, LeadApproval.lead_key == item["lead_key"]))
     now = utc_now()
     history = list(approval.history or []) if approval else []

@@ -801,7 +801,7 @@ def campaign_lead_review(campaign_id: str, db: Session=Depends(get_db), user: Us
     counts: dict[str, int] = {}
     for item in items:
         counts[item['state']] = counts.get(item['state'], 0) + 1
-    return {'campaign_id': campaign.id, 'company_id': campaign.company_id, 'source_path': source_path, 'items': items, 'counts': counts, 'eligible_count': sum(1 for item in items if item.get('can_send'))}
+    return {'campaign_id': campaign.id, 'company_id': campaign.company_id, 'source_path': source_path, 'items': items, 'counts': counts, 'eligible_count': sum(1 for item in items if item.get('can_send')), 'approval_eligible_count': sum(1 for item in items if item.get('approval_eligible'))}
 
 
 @router.post('/campaigns/{campaign_id}/lead-review/{lead_key}/{action}')

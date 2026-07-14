@@ -69,7 +69,7 @@ class OutreachControlsTests(unittest.TestCase):
             db.add(SuppressionEntry(company_id=company.id, kind='email', value='blocked@blocked-cafe.example', reason='test'))
             db.flush()
             rows = [
-                {'Business Name': 'A Cafe', 'Public Email': 'a@a-cafe.example'},
+                {'Business Name': 'A Cafe', 'Website': 'https://a-cafe.example', 'Public Email': 'a@a-cafe.example', 'Source URL': 'https://a-cafe.example/contact'},
                 {'Business Name': 'Missing Cafe', 'Public Email': ''},
                 {'Business Name': 'Dup One', 'Public Email': 'dup@dup-cafe.example'},
                 {'Business Name': 'Dup Two', 'Public Email': 'dup@dup-cafe.example'},
@@ -88,11 +88,52 @@ class OutreachControlsTests(unittest.TestCase):
         finally:
             db.close()
 
+
+
+    def test_lead_key_and_approval_survive_new_daily_source_file(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            row = {'Business Name': 'Stable Cafe', 'Website': 'https://stable-cafe.example', 'Public Email': 'hello@stable-cafe.example', 'Source URL': 'https://stable-cafe.example/contact'}
+            first = review_items_from_rows(db, campaign, [row], 'leads_2026_07_12')[0]
+            second = review_items_from_rows(db, campaign, [row], 'leads_2026_07_13')[0]
+            self.assertEqual(first['lead_key'], second['lead_key'])
+            upsert_approval(db, campaign, first, 'approved_for_outreach', user.id, 'approved')
+            db.flush()
+            refreshed = review_items_from_rows(db, campaign, [row], 'leads_2026_07_14')[0]
+            self.assertEqual(refreshed['state'], 'approved_for_outreach')
+            self.assertTrue(refreshed['can_send'])
+        finally:
+            db.close()
+
+    def test_review_queue_marks_assumed_email_not_sendable(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            rows = [
+                {'Business Name': 'Assumed Cafe', 'Public Email': 'owner@assumed-cafe.example'},
+                {'Business Name': 'Public Cafe', 'Website': 'https://public-cafe.example', 'Public Email': 'hello@public-cafe.example', 'Source URL': 'https://public-cafe.example/contact'},
+            ]
+            items = review_items_from_rows(db, campaign, rows, 'source')
+            assumed = next(item for item in items if item['business'] == 'Assumed Cafe')
+            public = next(item for item in items if item['business'] == 'Public Cafe')
+            self.assertEqual(assumed['state'], 'assumed_email')
+            self.assertEqual(assumed['email_confidence'], 'assumed')
+            self.assertFalse(assumed['approval_eligible'])
+            with self.assertRaises(ValueError):
+                upsert_approval(db, campaign, assumed, 'approved_for_outreach', user.id, 'approve')
+            self.assertEqual(public['email_confidence'], 'public_unverified')
+            self.assertTrue(public['approval_eligible'])
+            approved = upsert_approval(db, campaign, public, 'approved_for_outreach', user.id, 'approve')
+            self.assertEqual(approved.state, 'approved_for_outreach')
+        finally:
+            db.close()
+
     def test_draft_generation_and_send_blockers_are_company_scoped(self):
         db = self.Session()
         try:
             user, company, campaign, other, other_campaign = self.seed(db)
-            rows = [{'Business Name': 'A Cafe', 'Public Email': 'a@a-cafe.example'}]
+            rows = [{'Business Name': 'A Cafe', 'Website': 'https://a-cafe.example', 'Public Email': 'a@a-cafe.example', 'Source URL': 'https://a-cafe.example/contact'}]
             item = review_items_from_rows(db, campaign, rows, 'source')[0]
             upsert_approval(db, campaign, item, 'approved_for_outreach', user.id)
             draft = generate_draft_for_item(db, campaign, company, {**item, 'state': 'approved_for_outreach', 'can_send': True})
@@ -347,7 +388,7 @@ class OutreachControlsTests(unittest.TestCase):
             settings = CompanyOutreachSettings(company_id=company.id, **{k: v for k, v in default_outreach_settings(company.id).items() if k != 'company_id'})
             settings.unsubscribe_text = 'Reply STOP to opt out.'
             db.add(settings)
-            item = review_items_from_rows(db, campaign, [{'Business Name': 'A Cafe', 'Public Email': 'a@a-cafe.example'}], 'source')[0]
+            item = review_items_from_rows(db, campaign, [{'Business Name': 'A Cafe', 'Website': 'https://a-cafe.example', 'Public Email': 'a@a-cafe.example', 'Source URL': 'https://a-cafe.example/contact'}], 'source')[0]
             upsert_approval(db, campaign, item, 'approved_for_outreach', user.id)
 
             draft = generate_draft_for_item(db, campaign, company, {**item, 'state': 'approved_for_outreach', 'can_send': True})
@@ -413,8 +454,11 @@ class OutreachControlsTests(unittest.TestCase):
                 'state': 'approved_for_outreach',
                 'computed_state': 'new',
                 'reason': 'approved',
-                'raw': {'Business Name': 'A Cafe', 'Public Email': 'owner@example.com'},
+                'raw': {'Business Name': 'A Cafe', 'Website': 'https://example.com', 'Public Email': 'owner@example.com', 'Source URL': 'https://example.com/contact'},
                 'can_send': True,
+                'approval_eligible': True,
+                'email_confidence': 'public_unverified',
+                'lead_quality': 'public_source_domain_match',
             }
             upsert_approval(db, source_campaign, source_item, 'approved_for_outreach', user.id)
             stale_item = {
@@ -426,8 +470,11 @@ class OutreachControlsTests(unittest.TestCase):
                 'state': 'approved_for_outreach',
                 'computed_state': 'new',
                 'reason': 'old approved',
-                'raw': {'Business Name': 'Old Cafe', 'Public Email': 'old@example.com'},
+                'raw': {'Business Name': 'Old Cafe', 'Website': 'https://example.com', 'Public Email': 'old@example.com', 'Source URL': 'https://example.com/contact'},
                 'can_send': True,
+                'approval_eligible': True,
+                'email_confidence': 'public_unverified',
+                'lead_quality': 'public_source_domain_match',
             }
             upsert_approval(db, outreach_campaign, stale_item, 'approved_for_outreach', user.id, 'old source')
             stale_draft = generate_draft_for_item(db, outreach_campaign, company, stale_item)
@@ -489,8 +536,11 @@ class OutreachControlsTests(unittest.TestCase):
                 'state': 'approved_for_outreach',
                 'computed_state': 'new',
                 'reason': 'approved',
-                'raw': {'Business Name': 'A Cafe', 'Public Email': 'owner@example.com'},
+                'raw': {'Business Name': 'A Cafe', 'Website': 'https://example.com', 'Public Email': 'owner@example.com', 'Source URL': 'https://example.com/contact'},
                 'can_send': True,
+                'approval_eligible': True,
+                'email_confidence': 'public_unverified',
+                'lead_quality': 'public_source_domain_match',
             }
             upsert_approval(db, source_campaign, source_item, 'approved_for_outreach', user.id)
             upsert_approval(db, outreach_campaign, source_item, 'approved_for_outreach', user.id, 'mirrored')
@@ -564,8 +614,11 @@ class OutreachControlsTests(unittest.TestCase):
                 'state': 'new',
                 'computed_state': 'new',
                 'reason': '',
-                'raw': {'Business Name': 'B Cafe', 'Public Email': 'owner2@example.com'},
+                'raw': {'Business Name': 'B Cafe', 'Website': 'https://example.com', 'Public Email': 'owner2@example.com', 'Source URL': 'https://example.com/contact'},
                 'can_send': False,
+                'approval_eligible': True,
+                'email_confidence': 'public_unverified',
+                'lead_quality': 'public_source_domain_match',
             }
 
             def fake_reader(read_db, campaign):

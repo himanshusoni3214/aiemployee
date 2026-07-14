@@ -2,7 +2,7 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 
-type ReviewItem = { lead_key: string; business?: string; email?: string; domain?: string; state: string; computed_state: string; reason?: string; can_send: boolean };
+type ReviewItem = { lead_key: string; business?: string; email?: string; domain?: string; state: string; computed_state: string; reason?: string; can_send: boolean; approval_eligible?: boolean; email_confidence?: string; lead_quality?: string; quality_reasons?: string[]; evidence_url?: string; website?: string };
 type Draft = { id: string; lead_key: string; lead_email?: string; business?: string; subject: string; body: string; status: string };
 type BatchPreview = {
   coverage?: Record<string, number>;
@@ -127,7 +127,7 @@ export function OutreachControlsPanel({
   }
 
   async function approveEligibleLeads() {
-    const candidates = (review?.items || []).filter((item) => item.computed_state === 'new' && item.state !== 'approved_for_outreach');
+    const candidates = (review?.items || []).filter((item) => item.approval_eligible && item.state !== 'approved_for_outreach');
     if (!candidates.length) {
       setMessage('No current eligible leads need approval.');
       return;
@@ -321,7 +321,7 @@ export function OutreachControlsPanel({
         {showEmailWorkflow ? <button className="btn text-xs" type="button" disabled={!canSend || busy === 'send-real-batch'} title={!canSend ? (blocker || 'Complete the previous steps before sending') : 'Send approved emails through Hermes/Himalaya'} onClick={sendApprovedEmails}>Send approved emails</button> : null}
         <a className="btn-secondary text-xs" href={reportHref || `/reports?company_id=${companyId}`}>Report</a>
       </div>
-      {showEmailWorkflow ? <div className="rounded border border-amber-900 bg-amber-950/20 p-2 text-xs text-amber-200">Send only to verified, real public inboxes. Current lead rows do not include a separate email-verification flag, so do not treat assumed addresses as safe.</div> : null}
+      {showEmailWorkflow ? <div className="rounded border border-amber-900 bg-amber-950/20 p-2 text-xs text-amber-200">Send only to verified or publicly evidenced business inboxes. Assumed emails without source evidence stay blocked from drafts and sending.</div> : null}
       {showEmailWorkflow && !canSend && readyToSend > 0 ? <div className="rounded border border-amber-900 bg-amber-950/20 p-2 text-xs text-amber-200">Send is blocked: {blocker || 'readiness checks are incomplete'}. {windowInfo?.allowed === false ? `Allowed window: ${formatWindow(windowInfo)}. Next allowed send: ${windowInfo.next_allowed_send_at || '-'}.` : null}</div> : null}
 
       <section className="rounded border border-zinc-800 p-3" data-voryx-lead-review>
@@ -335,18 +335,23 @@ export function OutreachControlsPanel({
         </div>
         <div className="max-h-72 overflow-auto">
           <table className="ops-table text-xs">
-            <thead><tr><th>Business</th><th>Email</th><th>Status</th><th>Action</th></tr></thead>
+            <thead><tr><th>Business</th><th>Email</th><th>Quality</th><th>Status</th><th>Action</th></tr></thead>
             <tbody>
               {visibleLeads.map((item) => <tr key={item.lead_key}>
                 <td>{item.business || item.lead_key}</td>
                 <td>{item.email || '-'}</td>
+                <td>
+                  <div>{item.email_confidence || '-'}</div>
+                  <div className="text-zinc-500">{item.lead_quality || ''}</div>
+                  {item.evidence_url ? <a className="text-emerald-300 hover:text-emerald-200" href={item.evidence_url} target="_blank">source</a> : null}
+                </td>
                 <td>{item.state}{item.reason ? ` / ${item.reason}` : ''}</td>
                 <td className="space-x-1">
-                  <button className="btn-secondary text-xs" type="button" disabled={busy.startsWith(item.lead_key) || item.state === 'approved_for_outreach' || ['missing_email','duplicate','do_not_contact'].includes(item.computed_state)} onClick={() => reviewAction(item, 'approve')}>Approve</button>
+                  <button className="btn-secondary text-xs" type="button" disabled={busy.startsWith(item.lead_key) || item.state === 'approved_for_outreach' || !item.approval_eligible} title={!item.approval_eligible ? 'Needs public or verified email evidence before approval' : 'Approve lead for draft generation'} onClick={() => reviewAction(item, 'approve')}>Approve</button>
                   <button className="btn-secondary text-xs" type="button" disabled={busy.startsWith(item.lead_key)} onClick={() => reviewAction(item, 'reject')}>Reject</button>
                 </td>
               </tr>)}
-              {!visibleLeads.length ? <tr><td colSpan={4} className="text-zinc-500">{showEmailWorkflow ? 'No approved lead source is connected yet.' : 'No leads yet. Generate leads first.'}</td></tr> : null}
+              {!visibleLeads.length ? <tr><td colSpan={5} className="text-zinc-500">{showEmailWorkflow ? 'No approved lead source is connected yet.' : 'No leads yet. Generate leads first.'}</td></tr> : null}
             </tbody>
           </table>
         </div>

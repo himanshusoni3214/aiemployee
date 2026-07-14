@@ -265,11 +265,11 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
       ) : null}
       {companyId ? (
         <CrudPage
-          title="Campaign Management"
+          title="Create or Manage B2B Sales Campaigns"
           path="/campaigns"
           initialItems={campaigns}
           query={{ company_id: companyId }}
-          createLabel="Create Campaign"
+          createLabel="Create Sales Campaign"
           emptyLabel="No campaigns for selected company"
           displayMaps={{ company_id: Object.fromEntries(companies.map((company) => [company.id, company.name])) }}
           fields={{
@@ -277,7 +277,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             industry: { type: 'text', label: 'Industry / niche *' },
             geographic_area: { type: 'text', label: 'City / region *' },
             target_audience: { type: 'textarea', label: 'Target customer *' },
-            description: { type: 'textarea', label: 'Offer/product, exclusions, tone and notes' },
+            description: { type: 'textarea', label: 'Offer/product, exclusions, tone, channels and notes' },
             lead_source_type: { type: 'select', label: 'Lead source *', options: [
               { value: 'uploaded_seed_csv', label: 'Uploaded seed CSV' },
               { value: 'existing_legacy_file', label: 'Existing legacy file' },
@@ -286,7 +286,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             ] },
             lead_source_file: { type: 'text', label: 'Lead source file (/opt/data/...)' },
             lead_source_url: { type: 'text', label: 'Lead source URL' },
-            lead_source_query: { type: 'text', label: 'Search query / source query' },
+            lead_source_query: { type: 'text', label: 'Lead source query: internet, websites, social pages/groups, or uploaded source notes' },
             daily_lead_goal: { type: 'number', label: 'Lead goal *' },
             daily_email_goal: { type: 'number', label: 'Daily email goal' },
             daily_email_limit: { type: 'number', label: 'Max emails per day' },
@@ -294,8 +294,8 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
             allowed_sending_hours: { type: 'hours', label: 'Allowed sending hours' },
             dry_run_mode: { type: 'boolean', label: 'Email sending disabled *' },
             campaign_type: { type: 'select', label: 'Campaign blueprint', options: [
-              { value: 'sales_outreach', label: 'Sales / Outreach Campaign' },
-              { value: 'lead_generation', label: 'Lead Generation Campaign' },
+              { value: 'sales_outreach', label: 'B2B Sales Campaign - email now, calls/text/social later' },
+              { value: 'lead_generation', label: 'Lead Generation Source Only' },
               { value: 'custom', label: 'Custom Campaign' },
             ] },
             provisioning_state: { type: 'readonly', label: 'Provisioning state', readOnly: true },
