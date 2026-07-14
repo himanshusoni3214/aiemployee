@@ -1,0 +1,1 @@
+export default function MeetingsPage() { return <div className="space-y-4"><div><p className="text-sm text-zinc-500">Future workflow</p><h1 className="text-2xl font-semibold">Meetings</h1></div><div className="card text-sm text-zinc-400"><p>Meeting booking is disabled until Reply Monitor and calendar policy are connected.</p></div></div>; }

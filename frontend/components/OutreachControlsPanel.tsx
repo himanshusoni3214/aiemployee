@@ -62,7 +62,7 @@ export function OutreachControlsPanel({
   reportHref?: string;
 }) {
   const [settings, setSettings] = useState<any>(null);
-  const [review, setReview] = useState<{ items: ReviewItem[]; counts: Record<string, number>; eligible_count: number; source_path?: string } | null>(null);
+  const [review, setReview] = useState<{ items: ReviewItem[]; counts: Record<string, number>; eligible_count: number; source_path?: string; approval_eligible_count?: number } | null>(null);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [sendStatus, setSendStatus] = useState<any>(null);
   const [batchPreview, setBatchPreview] = useState<BatchPreview | null>(null);
@@ -269,6 +269,11 @@ export function OutreachControlsPanel({
   const windowInfo = batchPreview?.window || sendStatus?.batch_preview?.window || {};
   const limits = batchPreview?.limits || sendStatus?.batch_preview?.limits || {};
   const allReviewItems = review?.items || [];
+  const assumedBlocked = allReviewItems.filter((item) => item.computed_state === 'assumed_email' || item.email_confidence === 'assumed').length;
+  const missingEmail = Number(reviewCounts.missing_email || 0);
+  const rejectedLeads = Number(reviewCounts.rejected || 0);
+  const dncLeads = Number(reviewCounts.do_not_contact || 0);
+  const readyToEmailFromPool = Number(review?.eligible_count || 0);
   const visibleLeads = showAllLeads ? allReviewItems : allReviewItems.slice(0, 20);
   const hiddenLeadCount = Math.max(0, allReviewItems.length - visibleLeads.length);
   const visibleDrafts = drafts.filter((draft) => draft.status !== 'draft_rejected' && (!approvedSourceLeadKeys || approvedSourceLeadKeys.has(draft.lead_key))).slice(0, 5);
@@ -323,6 +328,12 @@ export function OutreachControlsPanel({
       </div>
       {showEmailWorkflow ? <div className="rounded border border-amber-900 bg-amber-950/20 p-2 text-xs text-amber-200">Send only to verified or publicly evidenced business inboxes. Assumed emails without source evidence stay blocked from drafts and sending.</div> : null}
       {showEmailWorkflow && !canSend && readyToSend > 0 ? <div className="rounded border border-amber-900 bg-amber-950/20 p-2 text-xs text-amber-200">Send is blocked: {blocker || 'readiness checks are incomplete'}. {windowInfo?.allowed === false ? `Allowed window: ${formatWindow(windowInfo)}. Next allowed send: ${windowInfo.next_allowed_send_at || '-'}.` : null}</div> : null}
+      <div className="rounded border border-zinc-800 p-2 text-xs text-zinc-400" data-voryx-count-diagnostics>
+        <div>Count source: Canonical Lead Pool from current lead review source</div>
+        <div>Latest source file: {review?.source_path || '-'}</div>
+        <div>Rows imported: {allReviewItems.length} / Duplicates skipped: {reviewCounts.duplicate || 0} / Assumed blocked: {assumedBlocked}</div>
+        <div>Rejected: {rejectedLeads} / DNC: {dncLeads} / Missing email: {missingEmail} / Approved: {approvedLeadsForActions} / Ready to email: {readyToEmailFromPool}</div>
+      </div>
 
       <section className="rounded border border-zinc-800 p-3" data-voryx-lead-review>
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">

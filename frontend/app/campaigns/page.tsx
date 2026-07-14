@@ -10,6 +10,7 @@ import { queryString, selectedCompanyId } from '../../lib/companySelection';
 import { ModelPolicyPanel } from '../../components/ModelPolicyPanel';
 import { LocalTime } from '../../components/LocalTime';
 import { SalesCampaignWizard } from '../../components/SalesCampaignWizard';
+import { BibsLeadSourcePanel } from '../../components/BibsLeadSourcePanel';
 
 type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
@@ -127,14 +128,15 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
     <div className="space-y-5">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <p className="text-sm text-zinc-500">Company &gt; Campaign &gt; AI Sales Employee</p>
-          <h1 className="text-2xl font-semibold">AI Sales Employee Control Center</h1>
+          <p className="text-sm text-zinc-500">Company &gt; Sales Workspace &gt; AI Sales Employee OS</p>
+          <h1 className="text-2xl font-semibold">Sales Workspace Control Center</h1>
         </div>
         <div className="text-sm text-zinc-400">{displayCampaigns.length} sales workflows</div>
       </div>
       <CompanySelector companies={companies} selectedCompanyId={companyId} label="Company" />
       {!companyId ? <div className="card text-sm text-amber-300">Select a company to manage campaigns.</div> : null}
       {companyId ? <SalesCampaignWizard companyId={companyId} companies={companies} /> : null}
+      {companyId === 'company-brew-it-by-sash' ? <BibsLeadSourcePanel companyId={companyId} leadCampaignId="campaign-brew-it-by-sash-lead-research" /> : null}
       <div className="grid gap-3 md:grid-cols-4">
         <div className="card"><p className="text-sm text-zinc-400">Active sales employees</p><p className="mt-2 text-3xl font-semibold">{employees.filter((employee) => employee.status !== 'Archived').length}</p></div>
         <div className="card"><p className="text-sm text-zinc-400">Lead research runs</p><p className="mt-2 text-3xl font-semibold">{jobs.filter((job) => job.task_type === 'Generate Leads').length}</p></div>
@@ -228,6 +230,18 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                   <section className="rounded border border-zinc-800 p-3">
                     <h3 className="text-sm font-semibold">Calling</h3>
                     <p className="mt-1 text-xs text-zinc-400">Status: not connected. Required before enabling: voice provider, caller ID, call script, recording/transcript policy, do-not-call controls and daily call limit.</p>
+                  </section>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">SMS/Text</h3>
+                    <p className="mt-1 text-xs text-zinc-400">Status: not connected. Required before enabling: SMS provider, opt-out compliance, phone verification and daily SMS limit.</p>
+                  </section>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">Social Outreach</h3>
+                    <p className="mt-1 text-xs text-zinc-400">Status: not connected. Required before enabling: social account/API, profile finder, DM policy and anti-spam controls.</p>
+                  </section>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <h3 className="text-sm font-semibold">WhatsApp</h3>
+                    <p className="mt-1 text-xs text-zinc-400">Status: not connected. Required before enabling: WhatsApp Business integration, template approval and opt-out handling.</p>
                   </section>
                   {isReporting || leadSourceCampaign ? <section className="rounded border border-zinc-800 p-3">
                     <h3 className="text-sm font-semibold">Daily Report</h3>

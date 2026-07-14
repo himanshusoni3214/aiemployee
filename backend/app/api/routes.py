@@ -1,7 +1,9 @@
 import csv
+import json
 from datetime import datetime, date
 from pathlib import Path
 from urllib.parse import quote
+from typing import Any
 from fastapi import APIRouter, Body, Depends, Form, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
@@ -75,6 +77,8 @@ from app.services.outreach import (
     write_outreach_workspace_config,
     upsert_approval,
     validate_outreach_settings,
+    first_text,
+    normalize_email,
 )
 
 router = APIRouter()
@@ -340,6 +344,129 @@ def _legacy_bibs_files(campaign: Campaign) -> list[Path]:
             unique[path.resolve()] = path
     return list(unique.values())
 
+
+
+BIBS_COMPANY_ID = "company-brew-it-by-sash"
+BIBS_LEAD_CAMPAIGN_ID = "campaign-brew-it-by-sash-lead-research"
+BIBS_SOURCE_CONFIG_CONTAINER_PATH = "/opt/data/home/leads/bibs_real_lead_source_config.json"
+BIBS_SOURCE_TYPES = {"uploaded_seed_csv", "manual_import_csv", "source_urls", "search_queries", "existing_lead_pool"}
+
+
+def _bibs_source_config_path() -> Path:
+    return _hermes_physical_path(BIBS_SOURCE_CONFIG_CONTAINER_PATH)
+
+
+def _clean_source_config(payload: dict[str, Any]) -> dict[str, Any]:
+    source_type = str(payload.get("source_type") or payload.get("type") or "").strip()
+    if source_type not in BIBS_SOURCE_TYPES:
+        raise HTTPException(400, f"source_type must be one of: {', '.join(sorted(BIBS_SOURCE_TYPES))}")
+    source_urls = payload.get("source_urls") or []
+    if isinstance(source_urls, str):
+        source_urls = [line.strip() for line in source_urls.splitlines() if line.strip()]
+    search_queries = payload.get("search_queries") or []
+    if isinstance(search_queries, str):
+        search_queries = [line.strip() for line in search_queries.splitlines() if line.strip()]
+    config = {
+        "source_type": source_type,
+        "uploaded_csv_path": str(payload.get("uploaded_csv_path") or "").strip(),
+        "source_urls": [str(item).strip() for item in source_urls if str(item).strip()],
+        "search_queries": [str(item).strip() for item in search_queries if str(item).strip()],
+        "target_geography": str(payload.get("target_geography") or "Toronto").strip(),
+        "target_customer": str(payload.get("target_customer") or "independent cafe owners").strip(),
+        "exclusions": str(payload.get("exclusions") or "franchises, chains").strip(),
+        "lead_limit": max(1, min(int(payload.get("lead_limit") or 25), 250)),
+        "evidence_required": bool(payload.get("evidence_required", True)),
+        "dedupe_against_previous_bibs": bool(payload.get("dedupe_against_previous_bibs", True)),
+        "email_sending_enabled": False,
+        "prospect_emails_sent": 0,
+        "updated_at": datetime.utcnow().isoformat() + "Z",
+    }
+    return config
+
+
+def _load_bibs_source_config() -> dict[str, Any] | None:
+    path = _bibs_source_config_path()
+    if not path.exists():
+        return None
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise HTTPException(500, f"BIBS source config is not valid JSON: {exc}") from exc
+
+
+def _bibs_source_config_status(config: dict[str, Any] | None) -> dict[str, Any]:
+    path = _bibs_source_config_path()
+    if not config:
+        return {
+            "configured": False,
+            "status": "real_source_not_configured",
+            "message": "Lead generation is active, but no real lead source is configured. Add a source to generate new leads.",
+            "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH,
+            "exists": False,
+        }
+    blockers = []
+    source_type = config.get("source_type")
+    uploaded = str(config.get("uploaded_csv_path") or "").strip()
+    if source_type in {"uploaded_seed_csv", "manual_import_csv"}:
+        if not uploaded:
+            blockers.append("uploaded_csv_path_required")
+        else:
+            try:
+                uploaded_path = _hermes_physical_path(uploaded)
+                if not uploaded_path.exists():
+                    blockers.append("uploaded_csv_path_not_found")
+            except HTTPException:
+                blockers.append("uploaded_csv_path_invalid")
+    if source_type == "source_urls" and not config.get("source_urls"):
+        blockers.append("source_urls_required")
+    if source_type == "search_queries" and not config.get("search_queries"):
+        blockers.append("search_queries_required")
+    if blockers:
+        return {"configured": True, "status": "source_config_incomplete", "message": "Source config saved but incomplete.", "blockers": blockers, "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH, "exists": path.exists(), "config": config}
+    return {"configured": True, "status": "ready", "message": "Source config saved. Run lead generation to import only new unique leads.", "blockers": [], "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH, "exists": path.exists(), "config": config}
+
+
+@router.get('/companies/{company_id}/bibs-lead-source-config')
+def get_bibs_lead_source_config(company_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    if company_id != BIBS_COMPANY_ID:
+        raise HTTPException(404, 'BIBS source config is available only for Brew It By Sash')
+    config = _load_bibs_source_config()
+    return _bibs_source_config_status(config)
+
+
+@router.put('/companies/{company_id}/bibs-lead-source-config')
+def put_bibs_lead_source_config(company_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    if company_id != BIBS_COMPANY_ID:
+        raise HTTPException(404, 'BIBS source config is available only for Brew It By Sash')
+    config = _clean_source_config(payload)
+    path = _bibs_source_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + '.tmp')
+    tmp.write_text(json.dumps(config, indent=2, sort_keys=True) + '\n', encoding='utf-8')
+    tmp.replace(path)
+    log(db, 'BIBS Lead Source Config Saved', 'Company', company_id, company_id, user.id, {'path': BIBS_SOURCE_CONFIG_CONTAINER_PATH, 'source_type': config.get('source_type'), 'prospect_emails_sent': 0})
+    db.commit()
+    return _bibs_source_config_status(config)
+
+
+@router.post('/companies/{company_id}/bibs-lead-source-config/test')
+def test_bibs_lead_source_config(company_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    if company_id != BIBS_COMPANY_ID:
+        raise HTTPException(404, 'BIBS source config is available only for Brew It By Sash')
+    config = _load_bibs_source_config()
+    status = _bibs_source_config_status(config)
+    if status.get('status') != 'ready':
+        return {**status, 'ok': False, 'prospect_emails_sent': 0}
+    rows, source_run_id, source_path = _latest_campaign_csv_rows(db.get(Campaign, BIBS_LEAD_CAMPAIGN_ID), db)
+    existing_emails = {normalize_email(first_text(row, ['email', 'public_email', 'verified_public_email', 'Public Email'])) for row in rows}
+    return {
+        **status,
+        'ok': True,
+        'message': 'Source config is syntactically valid. Lead generation will dedupe against existing BIBS lead pool before passing.',
+        'latest_source_file': source_path,
+        'existing_current_unique_emails': len([email for email in existing_emails if email]),
+        'prospect_emails_sent': 0,
+    }
 
 def _output_record(campaign: Campaign, path: Path) -> dict:
     rows = []

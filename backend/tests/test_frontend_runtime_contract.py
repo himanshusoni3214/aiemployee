@@ -251,7 +251,7 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("Email Marketing Campaign", source)
         self.assertIn("Lead generation + email drafting + reporting", source)
         self.assertIn("Historical review decisions are separate from the current lead pool", source)
-        self.assertIn("Sales Campaigns", layout)
+        self.assertIn("Sales Workspaces", layout)
         self.assertIn("['Leads', '/leads']", layout)
         self.assertNotIn("['Leads', '/campaigns']", layout)
         self.assertNotIn("['Employees', '/employees']", layout)
@@ -262,8 +262,8 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("isReportingEmployee", source)
         self.assertIn("leadSourceCampaignFor", source)
         self.assertIn("leadSourceCampaignId={leadSourceCampaign?.id}", source)
-        self.assertIn("AI Sales Employee Control Center", source)
-        self.assertIn("Company &gt; Campaign &gt; AI Sales Employee", source)
+        self.assertIn("Sales Workspace Control Center", source)
+        self.assertIn("Company &gt; Sales Workspace &gt; AI Sales Employee OS", source)
         self.assertIn("Current blocker:", source)
         self.assertIn("<details", source)
         self.assertIn("Advanced", source)
@@ -328,3 +328,36 @@ class SalesCampaignWizardContractTests(unittest.TestCase):
         self.assertIn("WhatsApp: not connected", source)
         self.assertIn("Advanced: raw campaign records", campaigns)
         self.assertIn("SalesCampaignWizard", campaigns)
+
+
+class AISalesOSMilestoneContractTests(unittest.TestCase):
+    def test_business_navigation_moves_technical_pages_to_advanced(self):
+        layout = read_frontend("app/layout.tsx")
+        for label in ["Sales Workspaces", "Leads", "Outreach", "Replies", "Meetings", "Reports", "Settings", "Advanced"]:
+            self.assertIn(label, layout)
+        self.assertNotIn("['Jobs', '/jobs']", layout)
+        self.assertNotIn("['Logs', '/reports']", layout)
+        self.assertNotIn("['Health', '/system']", layout)
+        advanced = read_frontend("app/advanced/page.tsx")
+        for label in ["Raw Campaign Records", "Raw Employees", "Schedules", "Jobs", "Logs", "Health", "Model Policy", "Data Files", "Hermes Sync"]:
+            self.assertIn(label, advanced)
+
+    def test_bibs_source_config_panel_and_api_contract_exist(self):
+        panel = read_frontend("components/BibsLeadSourcePanel.tsx")
+        campaigns = read_frontend("app/campaigns/page.tsx")
+        routes = (ROOT / "backend" / "app" / "api" / "routes.py").read_text(encoding="utf-8")
+        self.assertIn("data-voryx-bibs-source-config", panel)
+        self.assertIn("Save source config", panel)
+        self.assertIn("Test source config", panel)
+        self.assertIn("Run lead generation now", panel)
+        self.assertIn("BibsLeadSourcePanel", campaigns)
+        self.assertIn("bibs_real_lead_source_config.json", routes)
+        self.assertIn("/companies/{company_id}/bibs-lead-source-config", routes)
+
+    def test_count_diagnostics_and_future_channels_are_visible(self):
+        outreach = read_frontend("components/OutreachControlsPanel.tsx")
+        campaigns = read_frontend("app/campaigns/page.tsx")
+        self.assertIn("data-voryx-count-diagnostics", outreach)
+        self.assertIn("Count source: Canonical Lead Pool", outreach)
+        for label in ["SMS/Text", "Social Outreach", "WhatsApp"]:
+            self.assertIn(label, campaigns)
