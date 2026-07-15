@@ -1,5 +1,6 @@
 import hashlib
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass
@@ -26,6 +27,15 @@ CAMPAIGN_BLUEPRINTS = {"sales_outreach", "lead_generation", "custom"}
 LEGACY_EMPLOYEE_CAMPAIGN_TYPES = {"lead_research", "daily_reporting", "outreach_drafting"}
 TEMPLATE_TYPES = CAMPAIGN_BLUEPRINTS | LEGACY_EMPLOYEE_CAMPAIGN_TYPES
 GENERIC_LEAD_RESEARCH_SCRIPT = "/opt/data/home/leads/voryx_generic_lead_research.py"
+AI_INTERNET_RESEARCH_PROVIDER_ENV = [
+    "VORYX_INTERNET_RESEARCH_PROVIDER",
+    "HERMES_WEB_RESEARCH_PROVIDER",
+    "BRAVE_SEARCH_API_KEY",
+    "SERPAPI_API_KEY",
+    "TAVILY_API_KEY",
+    "BING_SEARCH_API_KEY",
+    "GOOGLE_SEARCH_API_KEY",
+]
 LOCKED_LEAD_FIELDS = [
     "lead_id",
     "created_at",
@@ -183,6 +193,108 @@ def _campaign_workspace(campaign: Campaign) -> str:
     return f"{_company_workspace(campaign.company_id)}/{_slug(campaign.id)}"
 
 
+def internet_research_provider_configured() -> bool:
+    return any(str(os.getenv(name) or "").strip() for name in AI_INTERNET_RESEARCH_PROVIDER_ENV)
+
+
+def generate_ai_internet_source_plan(
+    product_service: str,
+    target_customer: str,
+    geography: str,
+    exclusions: str,
+    lead_goal: int,
+    *,
+    reference_websites: list[str] | None = None,
+    preferred_keywords: str | list[str] | None = None,
+    avoid_keywords: str | list[str] | None = None,
+    known_competitors: str | list[str] | None = None,
+    preferred_source_types: list[str] | None = None,
+) -> dict[str, Any]:
+    product = (product_service or "").strip()
+    target = (target_customer or "").strip()
+    location = (geography or "").strip()
+    exclude = (exclusions or "").strip()
+    goal = max(1, min(int(lead_goal or 25), 250))
+    if not product:
+        raise ValueError("AI Internet Research requires product/service.")
+    if not target:
+        raise ValueError("AI Internet Research requires target customer.")
+    if not location:
+        raise ValueError("AI Internet Research requires geography.")
+
+    def split_values(value: str | list[str] | None) -> list[str]:
+        if isinstance(value, list):
+            return [str(item).strip() for item in value if str(item).strip()]
+        text = str(value or "").strip()
+        if not text:
+            return []
+        return [part.strip() for part in re.split(r"[\n,]+", text) if part.strip()]
+
+    keywords = split_values(preferred_keywords)
+    avoided = split_values(avoid_keywords) + split_values(exclude)
+    competitors = split_values(known_competitors)
+    refs = [str(item).strip() for item in (reference_websites or []) if str(item).strip()]
+    source_types = preferred_source_types or [
+        "business websites",
+        "contact pages",
+        "local business directories",
+        "industry directories",
+        "public social/business profiles",
+    ]
+    base_terms = [product, target, location]
+    search_queries = [
+        f"{location} {target} contact email",
+        f"{location} {target} contact page",
+        f"{location} {product} buyer contact",
+        f"{location} independent {target} business website",
+        f"{location} {target} wholesale partnership contact",
+    ]
+    if keywords:
+        search_queries.extend(f"{location} {keyword} {target} contact" for keyword in keywords[:5])
+    search_queries = list(dict.fromkeys(query for query in search_queries if query.strip()))
+    return {
+        "mode": "ai_internet_research",
+        "product_service": product,
+        "target_customer": target,
+        "geography": location,
+        "exclusions": exclude,
+        "lead_goal": goal,
+        "search_queries": search_queries,
+        "source_types": source_types,
+        "reference_websites": refs,
+        "preferred_keywords": keywords,
+        "avoid_keywords": avoided,
+        "known_competitors": competitors,
+        "evidence_requirements": [
+            "public business name",
+            "public website or profile URL",
+            "public contact page or evidence URL",
+            "public email only when visible or verified",
+        ],
+        "dedupe_rules": [
+            "dedupe by normalized business name and website domain",
+            "dedupe against previous company leads",
+            "dedupe against already contacted businesses",
+        ],
+        "quality_rules": [
+            "do not invent businesses",
+            "do not invent email addresses",
+            "do not mark assumed emails sendable",
+            "exclude franchises and chains when requested",
+            "require evidence URL for every generated lead",
+        ],
+        "provider": {
+            "configured": internet_research_provider_configured(),
+            "status": "connected" if internet_research_provider_configured() else "internet_research_provider_not_configured",
+            "required_action": None if internet_research_provider_configured() else "Connect a search provider or upload a lead CSV.",
+        },
+        "generated_from": {
+            "base_terms": base_terms,
+            "created_at": datetime.utcnow().isoformat() + "Z",
+        },
+    }
+
+
 def _container_to_data_path(container_path: str) -> Path:
     if not settings.hermes_data_path:
         raise ValueError("HERMES_DATA_PATH is required for template provisioning")
@@ -224,6 +336,23 @@ def _lead_research_config(campaign: Campaign, employee: AIEmployee | None = None
     result = campaign.provisioning_result if isinstance(campaign.provisioning_result, dict) else {}
     schema = normalize_lead_schema(result)
     lead_source = result.get("lead_source") if isinstance(result.get("lead_source"), dict) else {}
+    description = campaign.description or ""
+    source_plan = result.get("source_plan") if isinstance(result.get("source_plan"), dict) else None
+    if str(lead_source.get("type") or "").strip() in {"", "real_directory"}:
+        lead_source = {**lead_source, "type": "ai_internet_research"}
+    if lead_source.get("type") == "ai_internet_research" and not source_plan:
+        source_plan = generate_ai_internet_source_plan(
+            industry,
+            target,
+            location,
+            description,
+            limit,
+            reference_websites=lead_source.get("reference_websites") if isinstance(lead_source.get("reference_websites"), list) else [],
+            preferred_keywords=lead_source.get("preferred_keywords"),
+            avoid_keywords=lead_source.get("avoid_keywords"),
+            known_competitors=lead_source.get("known_competitors"),
+            preferred_source_types=lead_source.get("preferred_source_types") if isinstance(lead_source.get("preferred_source_types"), list) else None,
+        )
     return {
         "company_id": campaign.company_id,
         "campaign_id": campaign.id,
@@ -239,11 +368,17 @@ def _lead_research_config(campaign: Campaign, employee: AIEmployee | None = None
         "prospect_outreach": False,
         "lead_schema": schema,
         "lead_source": {
-            "type": str(lead_source.get("type") or "").strip(),
+            "type": str(lead_source.get("type") or "ai_internet_research").strip(),
             "file": str(lead_source.get("file") or "").strip(),
             "url": str(lead_source.get("url") or "").strip(),
             "query": str(lead_source.get("query") or "").strip(),
+            "reference_websites": lead_source.get("reference_websites") if isinstance(lead_source.get("reference_websites"), list) else [],
+            "preferred_keywords": lead_source.get("preferred_keywords") or "",
+            "avoid_keywords": lead_source.get("avoid_keywords") or "",
+            "known_competitors": lead_source.get("known_competitors") or "",
+            "preferred_source_types": lead_source.get("preferred_source_types") if isinstance(lead_source.get("preferred_source_types"), list) else [],
         },
+        "source_plan": source_plan,
     }
 
 
@@ -448,6 +583,28 @@ def validate_campaign_blueprint(campaign: Campaign) -> None:
     result = dict(campaign.provisioning_result or {})
     result.setdefault("campaign_blueprint", campaign.campaign_type)
     result.setdefault("lead_schema", normalize_lead_schema(result))
+    lead_source = result.get("lead_source") if isinstance(result.get("lead_source"), dict) else {}
+    if campaign.campaign_type in {"sales_outreach", "lead_generation"}:
+        lead_source = {
+            "type": str(lead_source.get("type") or "ai_internet_research").strip(),
+            **{key: value for key, value in lead_source.items() if key != "type"},
+        }
+        if lead_source["type"] == "real_directory":
+            lead_source["type"] = "ai_internet_research"
+        result["lead_source"] = lead_source
+        if lead_source["type"] == "ai_internet_research":
+            result["source_plan"] = generate_ai_internet_source_plan(
+                campaign.industry or campaign.name,
+                campaign.target_audience or "",
+                campaign.geographic_area or "",
+                campaign.description or "",
+                int(campaign.daily_lead_goal or 25),
+                reference_websites=lead_source.get("reference_websites") if isinstance(lead_source.get("reference_websites"), list) else [],
+                preferred_keywords=lead_source.get("preferred_keywords"),
+                avoid_keywords=lead_source.get("avoid_keywords"),
+                known_competitors=lead_source.get("known_competitors"),
+                preferred_source_types=lead_source.get("preferred_source_types") if isinstance(lead_source.get("preferred_source_types"), list) else None,
+            )
     result.setdefault("message", "Sales campaign blueprint saved. Default employees are provisioned automatically for supported channels.")
     campaign.provisioning_result = result
     if campaign.provisioning_state in {None, "Provisioned", "Provisioning"}:

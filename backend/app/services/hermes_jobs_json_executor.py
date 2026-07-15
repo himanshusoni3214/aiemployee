@@ -225,13 +225,13 @@ def _execute_lead_research(task_type: str, payload: dict[str, Any]) -> dict[str,
     source_config = LEADS_DIR / BIBS_LEAD_SOURCE_CONFIG
     if not source_config.exists():
         return _failed(
-            "real_source_not_configured: BIBS Lead Research is configured only with the old CSV consolidation helper. Add /opt/data/home/leads/bibs_real_lead_source_config.json with an uploaded_seed_csv, manual_import, or supported source before running lead generation.",
+            "internet_research_provider_not_configured: AI Internet Research is selected, but no web/search provider is connected. Connect a search provider or upload a lead CSV.",
             logs=[
-                "REAL_SOURCE_NOT_CONFIGURED",
+                "INTERNET_RESEARCH_PROVIDER_NOT_CONFIGURED",
                 "Blocked legacy generate_leads.py because it repeats the same 28 BIBS leads.",
                 "No prospect email sent.",
             ],
-            results={"error_code": "real_source_not_configured", "prospect_emails_sent": 0},
+            results={"error_code": "internet_research_provider_not_configured", "next_action": "Connect a search provider or upload a lead CSV.", "prospect_emails_sent": 0},
         )
     script = _container_path(GENERIC_LEAD_RESEARCH_SCRIPT)
     if not script.exists():
@@ -266,9 +266,9 @@ def _execute_lead_research(task_type: str, payload: dict[str, Any]) -> dict[str,
     new_keys = _csv_business_keys(physical_output_path) - before_keys
     if len(new_keys) < 10:
         return _failed(
-            f"real_source_not_configured: BIBS lead run produced only {len(new_keys)} new unique businesses; refusing to mark repeated leads as success.",
+            f"no_new_unique_leads: BIBS lead run produced only {len(new_keys)} new unique businesses; refusing to mark repeated leads as success.",
             logs=logs + [f"NEW_UNIQUE_BUSINESSES={len(new_keys)}", "No prospect email sent."],
-            results={"output_path": str(output_path), "new_unique_businesses": len(new_keys), "prospect_emails_sent": 0},
+            results={"error_code": "no_new_unique_leads", "output_path": str(output_path), "new_unique_businesses": len(new_keys), "prospect_emails_sent": 0},
         )
     output_record = _write_cron_output(
         LEAD_RESEARCH_JOB_ID,

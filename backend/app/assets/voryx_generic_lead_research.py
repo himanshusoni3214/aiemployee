@@ -51,6 +51,15 @@ LOCKED_FIELDS = [
     "source_file",
     "notes",
 ]
+INTERNET_RESEARCH_PROVIDER_ENV = [
+    "VORYX_INTERNET_RESEARCH_PROVIDER",
+    "HERMES_WEB_RESEARCH_PROVIDER",
+    "BRAVE_SEARCH_API_KEY",
+    "SERPAPI_API_KEY",
+    "TAVILY_API_KEY",
+    "BING_SEARCH_API_KEY",
+    "GOOGLE_SEARCH_API_KEY",
+]
 
 
 def load_config(args):
@@ -98,17 +107,21 @@ def first_value(row, keys):
 def source_config(config):
     source = config.get("lead_source") if isinstance(config.get("lead_source"), dict) else {}
     return {
-        "type": clean(source.get("type") or config.get("lead_source_type") or ""),
-        "file": clean(source.get("file") or source.get("path") or config.get("lead_source_file") or config.get("source_file") or ""),
+        "type": clean(source.get("type") or config.get("lead_source_type") or config.get("source_type") or ""),
+        "file": clean(source.get("file") or source.get("path") or config.get("lead_source_file") or config.get("source_file") or config.get("uploaded_csv_path") or ""),
         "url": clean(source.get("url") or config.get("lead_source_url") or ""),
         "query": clean(source.get("query") or config.get("lead_source_query") or ""),
     }
 
 
+def internet_research_provider_configured():
+    return any(clean(os.getenv(name)) for name in INTERNET_RESEARCH_PROVIDER_ENV)
+
+
 def safe_source_path(value):
     raw = str(value or "").strip()
     if not raw.startswith("/opt/data"):
-        raise SystemExit("ERROR real_source_not_configured: source file must be an absolute /opt/data path")
+        raise SystemExit("ERROR source_config_incomplete: upload CSV must be an absolute /opt/data path")
     data_root = Path(os.getenv("HERMES_DATA_ROOT") or os.getenv("HERMES_CONTAINER_DATA_ROOT") or "/opt/data")
     path = data_root if raw == "/opt/data" else data_root / raw.removeprefix("/opt/data/")
     try:
@@ -117,28 +130,34 @@ def safe_source_path(value):
         resolved = path
     allowed = data_root.resolve()
     if allowed != resolved and allowed not in resolved.parents:
-        raise SystemExit("ERROR real_source_not_configured: source file must be under /opt/data")
+        raise SystemExit("ERROR source_config_incomplete: upload CSV must be under /opt/data")
     if not path.exists():
-        raise SystemExit(f"ERROR real_source_not_configured: source file not found: {raw}")
+        raise SystemExit(f"ERROR source_config_incomplete: upload CSV not found: {raw}")
     return path
 
 
 def read_source_rows(config, limit):
     source = source_config(config)
     source_type = source["type"]
+    if source_type == "real_directory":
+        source_type = "ai_internet_research"
     if not source_type:
-        raise SystemExit("ERROR real_source_not_configured: No real lead source configured. Add source before generating leads.")
+        source_type = "ai_internet_research"
+    if source_type == "ai_internet_research":
+        if not internet_research_provider_configured():
+            raise SystemExit("ERROR internet_research_provider_not_configured: AI Internet Research is selected, but no web/search provider is connected. Connect a search provider or upload a lead CSV.")
+        raise SystemExit("ERROR internet_research_provider_not_configured: AI Internet Research provider variable exists, but no Hermes web research adapter is installed for this script yet.")
     if source_type in {"uploaded_seed_csv", "existing_legacy_file", "manual_import"}:
         if not source["file"]:
-            raise SystemExit("ERROR real_source_not_configured: lead source file is required for CSV/manual import sources")
+            raise SystemExit("ERROR source_config_incomplete: upload CSV is required for CSV/manual import sources")
         path = safe_source_path(source["file"])
         with path.open(newline="", encoding="utf-8", errors="replace") as handle:
             rows = list(csv.DictReader(handle))
         real_rows = [row for row in rows if first_value(row, ["business_name", "Business", "business", "Company", "company", "Name", "name"])]
         return real_rows[:limit], source, str(path)
-    if source_type == "real_directory":
-        raise SystemExit("ERROR real_source_not_configured: real_directory adapter is not configured. Add an uploaded_seed_csv, existing_legacy_file, or manual_import source.")
-    raise SystemExit(f"ERROR real_source_not_configured: unsupported lead source type: {source_type}")
+    if source_type in {"source_urls", "search_queries"}:
+        raise SystemExit("ERROR internet_research_provider_not_configured: Manual URLs/search queries still require a connected web/search provider.")
+    raise SystemExit(f"ERROR source_config_incomplete: unsupported lead source type: {source_type}")
 
 
 def normalize_source_row(row, args, columns, source_file, source_row_number, source_run_id):
@@ -195,7 +214,7 @@ def main() -> int:
     fields = schema_columns(config)
     source_rows, source, source_file = read_source_rows(config, limit)
     if not source_rows:
-        raise SystemExit("ERROR real_source_not_configured: configured source did not contain usable business rows")
+        raise SystemExit("ERROR no_new_unique_leads: configured source did not contain usable business rows")
     source_run_id = csv_path.name.replace(".csv", "")
     rows = [normalize_source_row(row, args, fields, source_file, index + 1, source_run_id) for index, row in enumerate(source_rows)]
     with csv_path.open("w", newline="", encoding="utf-8") as handle:
@@ -219,6 +238,7 @@ def main() -> int:
         "columns": fields,
         "config_path": args.config,
         "lead_source": source,
+        "source_plan": config.get("source_plan") if isinstance(config.get("source_plan"), dict) else {},
         "source_file": source_file,
         "email_sending": False,
         "prospect_outreach": False,

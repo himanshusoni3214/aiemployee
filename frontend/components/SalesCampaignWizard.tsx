@@ -20,10 +20,13 @@ export function SalesCampaignWizard({ companyId, companies }: { companyId: strin
     geography: '',
     industry: '',
     exclusions: '',
-    lead_source_type: 'real_directory',
+    lead_source_type: 'ai_internet_research',
     lead_source_file: '',
-    lead_source_url: '',
-    lead_source_query: '',
+    reference_websites: '',
+    preferred_keywords: '',
+    avoid_keywords: '',
+    known_competitors: '',
+    preferred_source_types: '',
     approval_level: 'approve_every_lead_and_draft',
     daily_lead_goal: 25,
     daily_email_limit: 5,
@@ -62,8 +65,11 @@ export function SalesCampaignWizard({ companyId, companies }: { companyId: strin
         lead_source: {
           type: form.lead_source_type,
           file: form.lead_source_file,
-          url: form.lead_source_url,
-          query: form.lead_source_query,
+          reference_websites: form.reference_websites.split('\n').map((item) => item.trim()).filter(Boolean),
+          preferred_keywords: form.preferred_keywords,
+          avoid_keywords: form.avoid_keywords,
+          known_competitors: form.known_competitors,
+          preferred_source_types: form.preferred_source_types.split('\n').map((item) => item.trim()).filter(Boolean),
         },
       };
       const result = await api('/campaigns', {
@@ -86,6 +92,13 @@ export function SalesCampaignWizard({ companyId, companies }: { companyId: strin
           allowed_sending_hours: { start: form.allowed_sending_start, end: form.allowed_sending_end },
           internal_test_recipient: form.internal_test_recipient,
           report_recipient: form.report_recipient,
+          lead_source_type: form.lead_source_type,
+          lead_source_file: form.lead_source_file,
+          reference_websites: form.reference_websites.split('\n').map((item) => item.trim()).filter(Boolean),
+          preferred_keywords: form.preferred_keywords,
+          avoid_keywords: form.avoid_keywords,
+          known_competitors: form.known_competitors,
+          preferred_source_types: form.preferred_source_types.split('\n').map((item) => item.trim()).filter(Boolean),
           dry_run_mode: true,
           status: 'Active',
         }),
@@ -129,17 +142,23 @@ export function SalesCampaignWizard({ companyId, companies }: { companyId: strin
           <legend className="px-1 text-sm font-semibold">2. Lead source</legend>
           <div className="grid gap-2 md:grid-cols-2">
             <select className="input" value={form.lead_source_type} onChange={(e) => update('lead_source_type', e.target.value)}>
-              <option value="real_directory">Generate new leads from configured internet/source-backed research</option>
-              <option value="uploaded_seed_csv">Upload CSV / seed CSV</option>
-              <option value="manual_import">Manual import</option>
+              <option value="ai_internet_research">AI Internet Research - generate leads from internet</option>
+              <option value="uploaded_seed_csv">Upload CSV</option>
               <option value="existing_lead_pool">Use existing company lead pool</option>
               <option value="another_campaign">Use leads from another campaign</option>
+              <option value="source_urls">Manual source URLs</option>
+              <option value="search_queries">Manual search queries</option>
+              <option value="social_media_groups" disabled>Social media/groups - not connected</option>
+              <option value="google_maps_directory" disabled>Google Maps/business directory - not connected</option>
             </select>
-            <input className="input" placeholder="Source file path or import file" value={form.lead_source_file} onChange={(e) => update('lead_source_file', e.target.value)} />
-            <input className="input" placeholder="Source URL" value={form.lead_source_url} onChange={(e) => update('lead_source_url', e.target.value)} />
-            <input className="input" placeholder="Source query / source notes" value={form.lead_source_query} onChange={(e) => update('lead_source_query', e.target.value)} />
+            {form.lead_source_type === 'uploaded_seed_csv' ? <input className="input" placeholder="Optional upload CSV path" value={form.lead_source_file} onChange={(e) => update('lead_source_file', e.target.value)} /> : null}
+            <textarea className="input min-h-20" placeholder="Optional reference URLs, one per line" value={form.reference_websites} onChange={(e) => update('reference_websites', e.target.value)} />
+            <textarea className="input min-h-20" placeholder="Optional preferred keywords" value={form.preferred_keywords} onChange={(e) => update('preferred_keywords', e.target.value)} />
+            <textarea className="input min-h-20" placeholder="Optional avoid keywords" value={form.avoid_keywords} onChange={(e) => update('avoid_keywords', e.target.value)} />
+            <textarea className="input min-h-20" placeholder="Optional known competitors" value={form.known_competitors} onChange={(e) => update('known_competitors', e.target.value)} />
+            <textarea className="input min-h-20" placeholder="Optional preferred source types" value={form.preferred_source_types} onChange={(e) => update('preferred_source_types', e.target.value)} />
           </div>
-          <p className="mt-2 text-xs text-amber-200">If no real source is configured, Lead Research fails clearly with real_source_not_configured instead of generating fake or repeated leads.</p>
+          <p className="mt-2 text-xs text-amber-200">Normal campaigns use AI Internet Research from your product, target customer, geography, exclusions and lead goal. URLs and CSVs are optional advanced references. If no web/search provider is connected, Hermes reports internet_research_provider_not_configured instead of generating fake or repeated leads.</p>
         </fieldset>
         <fieldset className="rounded border border-zinc-800 p-3">
           <legend className="px-1 text-sm font-semibold">3. Outreach channels</legend>

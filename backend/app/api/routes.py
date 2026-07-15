@@ -41,6 +41,8 @@ from app.services.template_provisioning import (
     PROVISIONED_STATES,
     allowed_employee_types_for_campaign,
     create_template_sample_job,
+    generate_ai_internet_source_plan,
+    internet_research_provider_configured,
     mark_provisioning_failed,
     normalize_lead_schema,
     provision_campaign_template,
@@ -191,10 +193,27 @@ def _campaign_source_payload(payload: dict) -> dict:
     source_file = str(payload.pop('lead_source_file', '') or '').strip()
     source_url = str(payload.pop('lead_source_url', '') or '').strip()
     source_query = str(payload.pop('lead_source_query', '') or '').strip()
+    reference_websites = payload.pop('reference_websites', None)
+    preferred_keywords = payload.pop('preferred_keywords', None)
+    avoid_keywords = payload.pop('avoid_keywords', None)
+    known_competitors = payload.pop('known_competitors', None)
+    preferred_source_types = payload.pop('preferred_source_types', None)
     result = payload.get('provisioning_result') if isinstance(payload.get('provisioning_result'), dict) else dict(payload.get('provisioning_result') or {})
-    if source_type or source_file or source_url or source_query:
+    if source_type == 'real_directory':
+        source_type = 'ai_internet_research'
+    if source_type or source_file or source_url or source_query or reference_websites or preferred_keywords or avoid_keywords or known_competitors or preferred_source_types:
         result = dict(result)
-        result['lead_source'] = {'type': source_type, 'file': source_file, 'url': source_url, 'query': source_query}
+        result['lead_source'] = {
+            'type': source_type or 'ai_internet_research',
+            'file': source_file,
+            'url': source_url,
+            'query': source_query,
+            'reference_websites': reference_websites or [],
+            'preferred_keywords': preferred_keywords or '',
+            'avoid_keywords': avoid_keywords or '',
+            'known_competitors': known_competitors or '',
+            'preferred_source_types': preferred_source_types or [],
+        }
         payload['provisioning_result'] = result
     return payload
 
@@ -349,32 +368,87 @@ def _legacy_bibs_files(campaign: Campaign) -> list[Path]:
 BIBS_COMPANY_ID = "company-brew-it-by-sash"
 BIBS_LEAD_CAMPAIGN_ID = "campaign-brew-it-by-sash-lead-research"
 BIBS_SOURCE_CONFIG_CONTAINER_PATH = "/opt/data/home/leads/bibs_real_lead_source_config.json"
-BIBS_SOURCE_TYPES = {"uploaded_seed_csv", "manual_import_csv", "source_urls", "search_queries", "existing_lead_pool"}
+BIBS_SOURCE_TYPES = {
+    "ai_internet_research",
+    "uploaded_seed_csv",
+    "manual_import_csv",
+    "existing_lead_pool",
+    "another_campaign",
+    "source_urls",
+    "search_queries",
+    "social_media_groups",
+    "google_maps_directory",
+}
 
 
 def _bibs_source_config_path() -> Path:
     return _hermes_physical_path(BIBS_SOURCE_CONFIG_CONTAINER_PATH)
 
 
+def _list_payload(value: Any) -> list[str]:
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    if isinstance(value, str):
+        return [line.strip() for line in value.splitlines() if line.strip()]
+    return []
+
+
+def _default_bibs_source_payload() -> dict[str, Any]:
+    return {
+        "source_type": "ai_internet_research",
+        "product_service": "Ethiopian coffee concentrate / cold brew concentrate",
+        "target_customer": "independent cafés, specialty coffee shops, restaurants, boutique grocers",
+        "target_geography": "Toronto/GTA",
+        "exclusions": "franchises, chains, already contacted businesses",
+        "lead_limit": 25,
+        "evidence_required": True,
+        "dedupe_against_previous_bibs": True,
+        "email_sending_enabled": False,
+    }
+
+
 def _clean_source_config(payload: dict[str, Any]) -> dict[str, Any]:
-    source_type = str(payload.get("source_type") or payload.get("type") or "").strip()
+    payload = {**_default_bibs_source_payload(), **(payload or {})}
+    source_type = str(payload.get("source_type") or payload.get("type") or "ai_internet_research").strip()
+    if source_type == "real_directory":
+        source_type = "ai_internet_research"
     if source_type not in BIBS_SOURCE_TYPES:
         raise HTTPException(400, f"source_type must be one of: {', '.join(sorted(BIBS_SOURCE_TYPES))}")
-    source_urls = payload.get("source_urls") or []
-    if isinstance(source_urls, str):
-        source_urls = [line.strip() for line in source_urls.splitlines() if line.strip()]
-    search_queries = payload.get("search_queries") or []
-    if isinstance(search_queries, str):
-        search_queries = [line.strip() for line in search_queries.splitlines() if line.strip()]
+    source_urls = _list_payload(payload.get("source_urls") or payload.get("reference_websites"))
+    search_queries = _list_payload(payload.get("search_queries"))
+    product_service = str(payload.get("product_service") or payload.get("industry") or "").strip()
+    target_geography = str(payload.get("target_geography") or payload.get("geography") or "").strip()
+    target_customer = str(payload.get("target_customer") or "").strip()
+    exclusions = str(payload.get("exclusions") or "").strip()
+    lead_limit = max(1, min(int(payload.get("lead_limit") or payload.get("daily_lead_goal") or 25), 250))
+    source_plan = generate_ai_internet_source_plan(
+        product_service,
+        target_customer,
+        target_geography,
+        exclusions,
+        lead_limit,
+        reference_websites=source_urls,
+        preferred_keywords=payload.get("preferred_keywords"),
+        avoid_keywords=payload.get("avoid_keywords"),
+        known_competitors=payload.get("known_competitors"),
+        preferred_source_types=_list_payload(payload.get("preferred_source_types")) or None,
+    ) if source_type == "ai_internet_research" else None
     config = {
         "source_type": source_type,
+        "product_service": product_service,
         "uploaded_csv_path": str(payload.get("uploaded_csv_path") or "").strip(),
-        "source_urls": [str(item).strip() for item in source_urls if str(item).strip()],
-        "search_queries": [str(item).strip() for item in search_queries if str(item).strip()],
-        "target_geography": str(payload.get("target_geography") or "Toronto").strip(),
-        "target_customer": str(payload.get("target_customer") or "independent cafe owners").strip(),
-        "exclusions": str(payload.get("exclusions") or "franchises, chains").strip(),
-        "lead_limit": max(1, min(int(payload.get("lead_limit") or 25), 250)),
+        "reference_websites": source_urls,
+        "source_urls": source_urls,
+        "search_queries": search_queries or list((source_plan or {}).get("search_queries") or []),
+        "target_geography": target_geography,
+        "target_customer": target_customer,
+        "exclusions": exclusions,
+        "lead_limit": lead_limit,
+        "preferred_keywords": str(payload.get("preferred_keywords") or "").strip(),
+        "avoid_keywords": str(payload.get("avoid_keywords") or "").strip(),
+        "known_competitors": str(payload.get("known_competitors") or "").strip(),
+        "preferred_source_types": _list_payload(payload.get("preferred_source_types")),
+        "source_plan": source_plan,
         "evidence_required": bool(payload.get("evidence_required", True)),
         "dedupe_against_previous_bibs": bool(payload.get("dedupe_against_previous_bibs", True)),
         "email_sending_enabled": False,
@@ -397,15 +471,21 @@ def _load_bibs_source_config() -> dict[str, Any] | None:
 def _bibs_source_config_status(config: dict[str, Any] | None) -> dict[str, Any]:
     path = _bibs_source_config_path()
     if not config:
+        default_config = _clean_source_config({})
         return {
             "configured": False,
-            "status": "real_source_not_configured",
-            "message": "Lead generation is active, but no real lead source is configured. Add a source to generate new leads.",
+            "status": "internet_research_provider_not_configured",
+            "message": "AI Internet Research is selected, but no web/search provider is connected. Connect a search provider or upload a lead CSV.",
             "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH,
             "exists": False,
+            "config": default_config,
+            "source_plan": default_config.get("source_plan"),
+            "next_action": "Connect a search provider or upload a lead CSV.",
         }
     blockers = []
     source_type = config.get("source_type")
+    if source_type == "real_directory":
+        source_type = "ai_internet_research"
     uploaded = str(config.get("uploaded_csv_path") or "").strip()
     if source_type in {"uploaded_seed_csv", "manual_import_csv"}:
         if not uploaded:
@@ -421,9 +501,23 @@ def _bibs_source_config_status(config: dict[str, Any] | None) -> dict[str, Any]:
         blockers.append("source_urls_required")
     if source_type == "search_queries" and not config.get("search_queries"):
         blockers.append("search_queries_required")
+    if source_type in {"social_media_groups", "google_maps_directory"}:
+        blockers.append(f"{source_type}_not_connected")
     if blockers:
-        return {"configured": True, "status": "source_config_incomplete", "message": "Source config saved but incomplete.", "blockers": blockers, "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH, "exists": path.exists(), "config": config}
-    return {"configured": True, "status": "ready", "message": "Source config saved. Run lead generation to import only new unique leads.", "blockers": [], "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH, "exists": path.exists(), "config": config}
+        return {"configured": True, "status": "source_config_incomplete", "message": "Source config saved but incomplete.", "blockers": blockers, "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH, "exists": path.exists(), "config": config, "source_plan": config.get("source_plan")}
+    if source_type == "ai_internet_research" and not internet_research_provider_configured():
+        return {
+            "configured": True,
+            "status": "internet_research_provider_not_configured",
+            "message": "AI Internet Research is selected, but no web/search provider is connected. Connect a search provider or upload a lead CSV.",
+            "blockers": ["internet_research_provider_not_configured"],
+            "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH,
+            "exists": path.exists(),
+            "config": config,
+            "source_plan": config.get("source_plan"),
+            "next_action": "Connect a search provider or upload a lead CSV.",
+        }
+    return {"configured": True, "status": "ready", "message": "Source config saved. Run lead generation to import only new unique leads.", "blockers": [], "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH, "exists": path.exists(), "config": config, "source_plan": config.get("source_plan")}
 
 
 @router.get('/companies/{company_id}/bibs-lead-source-config')
@@ -444,6 +538,23 @@ def put_bibs_lead_source_config(company_id: str, payload: dict=Body(...), db: Se
     tmp = path.with_suffix(path.suffix + '.tmp')
     tmp.write_text(json.dumps(config, indent=2, sort_keys=True) + '\n', encoding='utf-8')
     tmp.replace(path)
+    campaign = db.get(Campaign, BIBS_LEAD_CAMPAIGN_ID)
+    if campaign:
+        result = dict(campaign.provisioning_result or {})
+        result['lead_source'] = {
+            'type': config.get('source_type'),
+            'file': config.get('uploaded_csv_path') or '',
+            'url': '',
+            'query': '\n'.join(config.get('search_queries') or []),
+            'reference_websites': config.get('reference_websites') or [],
+            'preferred_keywords': config.get('preferred_keywords') or '',
+            'avoid_keywords': config.get('avoid_keywords') or '',
+            'known_competitors': config.get('known_competitors') or '',
+            'preferred_source_types': config.get('preferred_source_types') or [],
+        }
+        result['source_plan'] = config.get('source_plan')
+        result['message'] = 'BIBS Lead Research uses AI Internet Research by default. Email sending remains disabled.'
+        campaign.provisioning_result = result
     log(db, 'BIBS Lead Source Config Saved', 'Company', company_id, company_id, user.id, {'path': BIBS_SOURCE_CONFIG_CONTAINER_PATH, 'source_type': config.get('source_type'), 'prospect_emails_sent': 0})
     db.commit()
     return _bibs_source_config_status(config)

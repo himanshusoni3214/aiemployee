@@ -16,14 +16,19 @@ type Status = {
 };
 
 const defaultForm = {
-  source_type: 'uploaded_seed_csv',
+  source_type: 'ai_internet_research',
+  product_service: 'Ethiopian coffee concentrate / cold brew concentrate',
   uploaded_csv_path: '',
-  source_urls: '',
+  reference_websites: '',
   search_queries: '',
-  target_geography: 'Toronto',
-  target_customer: 'independent cafe owners',
-  exclusions: 'franchises, chains',
+  target_geography: 'Toronto/GTA',
+  target_customer: 'independent cafés, specialty coffee shops, restaurants, boutique grocers',
+  exclusions: 'franchises, chains, already contacted businesses',
   lead_limit: 25,
+  preferred_keywords: '',
+  avoid_keywords: '',
+  known_competitors: '',
+  preferred_source_types: '',
   evidence_required: true,
   dedupe_against_previous_bibs: true,
 };
@@ -43,8 +48,9 @@ export function BibsLeadSourcePanel({ companyId, leadCampaignId }: { companyId: 
         setForm({
           ...defaultForm,
           ...data.config,
-          source_urls: Array.isArray(data.config.source_urls) ? data.config.source_urls.join('\n') : (data.config.source_urls || ''),
+          reference_websites: Array.isArray(data.config.reference_websites || data.config.source_urls) ? (data.config.reference_websites || data.config.source_urls).join('\n') : (data.config.reference_websites || data.config.source_urls || ''),
           search_queries: Array.isArray(data.config.search_queries) ? data.config.search_queries.join('\n') : (data.config.search_queries || ''),
+          preferred_source_types: Array.isArray(data.config.preferred_source_types) ? data.config.preferred_source_types.join('\n') : (data.config.preferred_source_types || ''),
         });
       }
       setError('');
@@ -96,7 +102,7 @@ export function BibsLeadSourcePanel({ companyId, leadCampaignId }: { companyId: 
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold text-amber-100">BIBS Lead Source Setup</h3>
-          <p className="text-xs text-amber-200">Lead generation is active, but it needs a real source before Hermes can create new unique leads.</p>
+          <p className="text-xs text-amber-200">Default path: AI Internet Research. Enter the market, then Hermes generates an internal source plan. URLs and CSVs are optional references.</p>
         </div>
         <div className="text-xs text-zinc-400">Hermes path: {status?.path || '/opt/data/home/leads/bibs_real_lead_source_config.json'}</div>
       </div>
@@ -107,26 +113,39 @@ export function BibsLeadSourcePanel({ companyId, leadCampaignId }: { companyId: 
       <div className="mt-3 grid gap-2 md:grid-cols-2">
         <label className="grid gap-1 text-xs text-zinc-300">Source type
           <select className="input" value={form.source_type} onChange={(e) => update('source_type', e.target.value)}>
-            <option value="uploaded_seed_csv">Uploaded seed CSV</option>
+            <option value="ai_internet_research">AI Internet Research - generate leads from internet</option>
+            <option value="uploaded_seed_csv">Upload CSV</option>
+            <option value="existing_lead_pool">Use existing lead pool</option>
+            <option value="another_campaign">Use leads from another campaign</option>
             <option value="manual_import_csv">Manual import CSV</option>
-            <option value="source_urls">Source URLs</option>
-            <option value="search_queries">Search queries</option>
-            <option value="existing_lead_pool">Existing lead pool</option>
+            <option value="source_urls">Manual source URLs</option>
+            <option value="search_queries">Manual search queries</option>
+            <option value="social_media_groups" disabled>Social media/groups - not connected</option>
+            <option value="google_maps_directory" disabled>Google Maps/business directory - not connected</option>
           </select>
         </label>
-        <label className="grid gap-1 text-xs text-zinc-300">Uploaded CSV path
-          <input className="input" value={form.uploaded_csv_path} onChange={(e) => update('uploaded_csv_path', e.target.value)} placeholder="/opt/data/home/leads/source.csv" />
+        <label className="grid gap-1 text-xs text-zinc-300">Product/service
+          <input className="input" value={form.product_service} onChange={(e) => update('product_service', e.target.value)} placeholder="Ethiopian coffee concentrate" />
         </label>
-        <label className="grid gap-1 text-xs text-zinc-300">Source URLs
-          <textarea className="input min-h-24" value={form.source_urls} onChange={(e) => update('source_urls', e.target.value)} placeholder="One URL per line" />
+        {form.source_type === 'uploaded_seed_csv' || form.source_type === 'manual_import_csv' ? (
+          <label className="grid gap-1 text-xs text-zinc-300">Optional upload CSV
+            <input className="input" value={form.uploaded_csv_path} onChange={(e) => update('uploaded_csv_path', e.target.value)} placeholder="/opt/data/home/leads/source.csv" />
+          </label>
+        ) : null}
+        <label className="grid gap-1 text-xs text-zinc-300">Optional reference URLs
+          <textarea className="input min-h-24" value={form.reference_websites} onChange={(e) => update('reference_websites', e.target.value)} placeholder="One URL per line" />
         </label>
-        <label className="grid gap-1 text-xs text-zinc-300">Search queries / source query
-          <textarea className="input min-h-24" value={form.search_queries} onChange={(e) => update('search_queries', e.target.value)} placeholder="Toronto independent cafes contact pages" />
+        <label className="grid gap-1 text-xs text-zinc-300">Generated/internal search queries
+          <textarea className="input min-h-24" value={form.search_queries} onChange={(e) => update('search_queries', e.target.value)} placeholder="Generated automatically from product, target customer and geography" />
         </label>
         <input className="input" value={form.target_geography} onChange={(e) => update('target_geography', e.target.value)} placeholder="Target geography" />
         <input className="input" value={form.target_customer} onChange={(e) => update('target_customer', e.target.value)} placeholder="Target customer" />
         <input className="input" value={form.exclusions} onChange={(e) => update('exclusions', e.target.value)} placeholder="Exclusions" />
         <input className="input" type="number" min="1" max="250" value={form.lead_limit} onChange={(e) => update('lead_limit', Number(e.target.value || 25))} placeholder="Lead limit" />
+        <input className="input" value={form.preferred_keywords} onChange={(e) => update('preferred_keywords', e.target.value)} placeholder="Optional preferred keywords" />
+        <input className="input" value={form.avoid_keywords} onChange={(e) => update('avoid_keywords', e.target.value)} placeholder="Optional avoid keywords" />
+        <input className="input" value={form.known_competitors} onChange={(e) => update('known_competitors', e.target.value)} placeholder="Optional known competitors" />
+        <textarea className="input min-h-20" value={form.preferred_source_types} onChange={(e) => update('preferred_source_types', e.target.value)} placeholder="Optional preferred source types, one per line" />
       </div>
       <div className="mt-3 flex flex-wrap gap-3 text-xs text-zinc-300">
         <label><input type="checkbox" checked={form.evidence_required} onChange={(e) => update('evidence_required', e.target.checked)} /> Evidence required</label>
@@ -135,7 +154,7 @@ export function BibsLeadSourcePanel({ companyId, leadCampaignId }: { companyId: 
       <div className="mt-3 flex flex-wrap gap-2">
         <button className="btn-secondary text-xs" type="button" disabled={busy === 'save'} onClick={save}>Save source config</button>
         <button className="btn-secondary text-xs" type="button" disabled={busy === 'test'} onClick={testConfig}>Test source config</button>
-        <button className="btn text-xs" type="button" disabled={busy === 'run'} onClick={runLeadGeneration}>Run lead generation now</button>
+        <button className="btn text-xs" type="button" disabled={busy === 'run'} onClick={runLeadGeneration}>Generate leads from internet</button>
       </div>
       <div className="mt-2 grid gap-1 text-xs text-zinc-500">
         <div>Latest source file: {status?.latest_source_file || '-'}</div>

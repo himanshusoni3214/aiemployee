@@ -197,7 +197,7 @@ class TemplateProvisioningTests(unittest.TestCase):
             db.close()
 
 
-    def test_generate_sample_without_real_source_fails_without_fake_csv(self):
+    def test_generate_sample_without_internet_provider_fails_without_fake_csv(self):
         db = self.Session()
         try:
             company, user = self.make_base(db)
@@ -208,7 +208,7 @@ class TemplateProvisioningTests(unittest.TestCase):
             result = routes.campaign_template_action(campaign.id, "generate-sample", db=db, user=user)
             db.commit()
             self.assertEqual(result["status"], "failed")
-            self.assertIn("real_source_not_configured", json.dumps(result["result"]))
+            self.assertIn("internet_research_provider_not_configured", json.dumps(result["result"]))
             output_dir = Path(self.tmp.name) / "home" / "voryx_workspaces" / "company-template-qa" / campaign.id / "leads"
             self.assertFalse(list(output_dir.glob("*.csv")))
         finally:
