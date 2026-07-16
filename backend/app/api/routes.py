@@ -42,6 +42,7 @@ from app.services.template_provisioning import (
     allowed_employee_types_for_campaign,
     create_template_sample_job,
     generate_ai_internet_source_plan,
+    hermes_native_browser_status,
     internet_research_provider_configured,
     mark_provisioning_failed,
     normalize_lead_schema,
@@ -506,6 +507,7 @@ def _bibs_source_config_status(config: dict[str, Any] | None) -> dict[str, Any]:
     if blockers:
         return {"configured": True, "status": "source_config_incomplete", "message": "Source config saved but incomplete.", "blockers": blockers, "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH, "exists": path.exists(), "config": config, "source_plan": config.get("source_plan")}
     if source_type == "ai_internet_research" and not internet_research_provider_configured():
+        browser_status = hermes_native_browser_status()
         return {
             "configured": True,
             "status": "internet_research_provider_not_configured",
@@ -515,9 +517,20 @@ def _bibs_source_config_status(config: dict[str, Any] | None) -> dict[str, Any]:
             "exists": path.exists(),
             "config": config,
             "source_plan": config.get("source_plan"),
+            "provider_status": browser_status,
             "next_action": "Connect a search provider or upload a lead CSV.",
         }
-    return {"configured": True, "status": "ready", "message": "Source config saved. Run lead generation to import only new unique leads.", "blockers": [], "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH, "exists": path.exists(), "config": config, "source_plan": config.get("source_plan")}
+    return {
+        "configured": True,
+        "status": "ready",
+        "message": "AI Internet Research provider ready: Hermes Native Browser. Run lead generation to import only new unique leads.",
+        "blockers": [],
+        "path": BIBS_SOURCE_CONFIG_CONTAINER_PATH,
+        "exists": path.exists(),
+        "config": config,
+        "source_plan": config.get("source_plan"),
+        "provider_status": hermes_native_browser_status(),
+    }
 
 
 @router.get('/companies/{company_id}/bibs-lead-source-config')

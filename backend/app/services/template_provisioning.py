@@ -27,6 +27,8 @@ CAMPAIGN_BLUEPRINTS = {"sales_outreach", "lead_generation", "custom"}
 LEGACY_EMPLOYEE_CAMPAIGN_TYPES = {"lead_research", "daily_reporting", "outreach_drafting"}
 TEMPLATE_TYPES = CAMPAIGN_BLUEPRINTS | LEGACY_EMPLOYEE_CAMPAIGN_TYPES
 GENERIC_LEAD_RESEARCH_SCRIPT = "/opt/data/home/leads/voryx_generic_lead_research.py"
+HERMES_NATIVE_BROWSER_SCRIPT = "/opt/data/home/leads/hermes_native_browser_research.py"
+HERMES_NATIVE_BROWSER_STATUS = "/opt/data/home/leads/hermes_native_browser_provider_status.json"
 AI_INTERNET_RESEARCH_PROVIDER_ENV = [
     "VORYX_INTERNET_RESEARCH_PROVIDER",
     "HERMES_WEB_RESEARCH_PROVIDER",
@@ -194,7 +196,21 @@ def _campaign_workspace(campaign: Campaign) -> str:
 
 
 def internet_research_provider_configured() -> bool:
+    status = hermes_native_browser_status()
+    if status.get("ok") and status.get("provider") == "hermes_native_browser":
+        return True
     return any(str(os.getenv(name) or "").strip() for name in AI_INTERNET_RESEARCH_PROVIDER_ENV)
+
+
+def hermes_native_browser_status() -> dict[str, Any]:
+    try:
+        path = _container_to_data_path(HERMES_NATIVE_BROWSER_STATUS)
+        if not path.exists():
+            return {"provider": "hermes_native_browser", "ok": False, "status": "not_tested"}
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {"provider": "hermes_native_browser", "ok": False, "status": "invalid_status"}
+    except Exception as exc:
+        return {"provider": "hermes_native_browser", "ok": False, "status": "status_error", "provider_error": str(exc)}
 
 
 def generate_ai_internet_source_plan(
@@ -285,8 +301,10 @@ def generate_ai_internet_source_plan(
         ],
         "provider": {
             "configured": internet_research_provider_configured(),
+            "name": "Hermes Native Browser" if hermes_native_browser_status().get("ok") else "",
             "status": "connected" if internet_research_provider_configured() else "internet_research_provider_not_configured",
-            "required_action": None if internet_research_provider_configured() else "Connect a search provider or upload a lead CSV.",
+            "required_action": None if internet_research_provider_configured() else "Run the Hermes Native Browser provider test or upload a lead CSV.",
+            "browser_status": hermes_native_browser_status(),
         },
         "generated_from": {
             "base_terms": base_terms,
@@ -316,6 +334,12 @@ def _ensure_generic_lead_script() -> None:
     if not destination.exists() or destination.read_text(encoding="utf-8") != source.read_text(encoding="utf-8"):
         shutil.copy2(source, destination)
     destination.chmod(0o755)
+    browser_source = _asset_path("hermes_native_browser_research.py")
+    browser_destination = _container_to_data_path(HERMES_NATIVE_BROWSER_SCRIPT)
+    if browser_source.exists() and (not browser_destination.exists() or browser_destination.read_text(encoding="utf-8") != browser_source.read_text(encoding="utf-8")):
+        shutil.copy2(browser_source, browser_destination)
+    if browser_destination.exists():
+        browser_destination.chmod(0o755)
 
 
 def _lead_research_config(campaign: Campaign, employee: AIEmployee | None = None, hermes_job_id: str | None = None) -> dict[str, Any]:

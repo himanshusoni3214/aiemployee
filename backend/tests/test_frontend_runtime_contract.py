@@ -363,6 +363,11 @@ class AISalesOSMilestoneContractTests(unittest.TestCase):
         self.assertIn("/companies/{company_id}/bibs-lead-source-config", routes)
         self.assertIn("generate_ai_internet_source_plan", routes)
         self.assertIn("internet_research_provider_not_configured", routes)
+        self.assertIn("hermes_native_browser_status", routes)
+        self.assertIn("AI Internet Research provider:", panel)
+        self.assertIn("Hermes Native Browser", panel)
+        self.assertIn("Browser launch:", panel)
+        self.assertIn("Internet access:", panel)
         self.assertNotIn("real_source_not_configured", panel)
 
     def test_count_diagnostics_and_future_channels_are_visible(self):

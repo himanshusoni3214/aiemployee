@@ -13,6 +13,7 @@ type Status = {
   latest_source_file?: string;
   existing_current_unique_emails?: number;
   prospect_emails_sent?: number;
+  provider_status?: Record<string, any>;
 };
 
 const defaultForm = {
@@ -157,6 +158,14 @@ export function BibsLeadSourcePanel({ companyId, leadCampaignId }: { companyId: 
         <button className="btn text-xs" type="button" disabled={busy === 'run'} onClick={runLeadGeneration}>Generate leads from internet</button>
       </div>
       <div className="mt-2 grid gap-1 text-xs text-zinc-500">
+        <div>AI Internet Research provider: {status?.provider_status?.ok ? 'Hermes Native Browser' : 'Not connected'}</div>
+        <div>Browser binary: {status?.provider_status?.browser_binary_detected ? 'detected' : 'not verified'} {status?.provider_status?.browser_binary ? `(${status.provider_status.browser_binary})` : ''}</div>
+        <div>Browser launch: {status?.provider_status?.browser_launch ? 'pass' : 'not verified'}</div>
+        <div>Internet access: {status?.provider_status?.internet_access ? 'pass' : 'not verified'}</div>
+        <div>Last provider test: {status?.provider_status?.tested_at || '-'}</div>
+        <div>Last query: {status?.provider_status?.safe_test_query || '-'}</div>
+        <div>Results found: {status?.provider_status?.results_found ?? '-'}</div>
+        <div>Provider error: {status?.provider_status?.provider_error || '-'}</div>
         <div>Latest source file: {status?.latest_source_file || '-'}</div>
         <div>Existing current unique emails: {status?.existing_current_unique_emails ?? '-'}</div>
         <div>Prospect emails sent by this panel: {status?.prospect_emails_sent ?? 0}</div>

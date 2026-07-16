@@ -161,5 +161,37 @@ class HermesJobsJsonExecutorTests(unittest.TestCase):
         self.assertIn("internet_research_provider_not_configured", result.get("error", ""))
         self.assertEqual(result.get("results", {}).get("error_code"), "internet_research_provider_not_configured")
 
+    def test_bibs_ai_internet_research_routes_to_native_browser_provider(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            leads = root / "home" / "leads"
+            leads.mkdir(parents=True)
+            script = leads / "hermes_native_browser_research.py"
+            script.write_text("print('ok')\n", encoding="utf-8")
+            config = leads / "bibs_real_lead_source_config.json"
+            config.write_text(json.dumps({"source_type": "ai_internet_research", "lead_limit": 10}), encoding="utf-8")
+            output = leads / "leads_brew_it_browser_20260715T000000Z.csv"
+            rows = ["Business Name,Website,Source URL,Evidence URL"]
+            for index in range(10):
+                rows.append(f"Browser Cafe {index},https://browser-cafe-{index}.example,https://browser-cafe-{index}.example/contact,https://browser-cafe-{index}.example/contact")
+            output.write_text("\n".join(rows) + "\n", encoding="utf-8")
+
+            def fake_run(args, *, cwd):
+                self.assertIn("hermes_native_browser_research.py", args[1])
+                self.assertIn("--no-email", args)
+                self.assertIn("--min-success", args)
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout=f"HERMES_NATIVE_BROWSER_OUTPUT path={output}\nNEW_UNIQUE_BUSINESSES=10\nPROSPECT_EMAILS_SENT=0\n", stderr="")
+
+            with patch.object(executor, "DATA_ROOT", root), \
+                patch.object(executor, "LEADS_DIR", leads), \
+                patch.object(executor, "CRON_OUTPUT_DIR", root / "cron" / "output"), \
+                patch.object(executor, "_run", side_effect=fake_run):
+                result = executor.execute_scheduled_jobs_json_task("Generate Leads", {"hermes_job_id": executor.LEAD_RESEARCH_JOB_ID})
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["results"]["provider"], "hermes_native_browser")
+            self.assertEqual(result["results"]["new_unique_businesses"], 10)
+            self.assertEqual(result["results"]["prospect_emails_sent"], 0)
+
 if __name__ == "__main__":
     unittest.main()

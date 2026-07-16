@@ -20,6 +20,7 @@ OUTREACH_FOLLOWUP_JOB_ID = "b03a2d0f1149"
 APPROVED_JOB_IDS = {LEAD_RESEARCH_JOB_ID, DAILY_REPORT_JOB_ID}
 BLOCKED_JOB_IDS = {OUTREACH_DRAFT_JOB_ID, OUTREACH_FOLLOWUP_JOB_ID}
 GENERIC_LEAD_RESEARCH_SCRIPT = "/opt/data/home/leads/voryx_generic_lead_research.py"
+HERMES_NATIVE_BROWSER_SCRIPT = "/opt/data/home/leads/hermes_native_browser_research.py"
 BIBS_LEAD_SOURCE_CONFIG = "bibs_real_lead_source_config.json"
 BIBS_CAMPAIGN_ID = "campaign-brew-it-by-sash-lead-research"
 BIBS_COMPANY_ID = "company-brew-it-by-sash"
@@ -233,6 +234,12 @@ def _execute_lead_research(task_type: str, payload: dict[str, Any]) -> dict[str,
             ],
             results={"error_code": "internet_research_provider_not_configured", "next_action": "Connect a search provider or upload a lead CSV.", "prospect_emails_sent": 0},
         )
+    try:
+        config_payload = json.loads(source_config.read_text(encoding="utf-8"))
+    except Exception:
+        config_payload = {}
+    if str(config_payload.get("source_type") or "").strip() in {"ai_internet_research", "real_directory"}:
+        return _execute_bibs_native_browser_research(task_type, payload, source_config, config_payload)
     script = _container_path(GENERIC_LEAD_RESEARCH_SCRIPT)
     if not script.exists():
         return _failed(f"Generic Lead Research script not found: {GENERIC_LEAD_RESEARCH_SCRIPT}")
@@ -288,6 +295,73 @@ def _execute_lead_research(task_type: str, payload: dict[str, Any]) -> dict[str,
             "new_unique_businesses": len(new_keys),
             "sent_count": 0,
             "prospect_emails_sent": 0,
+        },
+    }
+
+
+def _execute_bibs_native_browser_research(task_type: str, payload: dict[str, Any], source_config: Path, config_payload: dict[str, Any]) -> dict[str, Any]:
+    script = _container_path(HERMES_NATIVE_BROWSER_SCRIPT)
+    if not script.exists():
+        return _failed(f"Hermes Native Browser provider script not found: {HERMES_NATIVE_BROWSER_SCRIPT}")
+    args = [
+        "python3",
+        str(script),
+        "--company-id", BIBS_COMPANY_ID,
+        "--campaign-id", BIBS_CAMPAIGN_ID,
+        "--industry", str(config_payload.get("product_service") or "Ethiopian coffee concentrate / cold brew concentrate"),
+        "--product-service", str(config_payload.get("product_service") or "Ethiopian coffee concentrate / cold brew concentrate"),
+        "--target-customer", str(config_payload.get("target_customer") or "independent cafés, specialty coffee shops, restaurants, boutique grocers"),
+        "--geography", str(config_payload.get("target_geography") or "Toronto/GTA"),
+        "--exclusions", str(config_payload.get("exclusions") or "franchises, chains, already contacted businesses"),
+        "--limit", str(int(payload.get("limit") or config_payload.get("lead_limit") or 25)),
+        "--min-success", "10",
+        "--output-dir", str(LEADS_DIR),
+        "--config", str(source_config),
+        "--no-email",
+    ]
+    result = _run(args, cwd=LEADS_DIR)
+    logs = _logs_from_completed_process(result)
+    output_path = _native_browser_output_from_stdout(result.stdout)
+    if result.returncode != 0:
+        error_text = _first_error_line(logs) or "Hermes Native Browser research failed"
+        results = {"returncode": result.returncode, "prospect_emails_sent": 0}
+        if "no_new_unique_leads" in error_text:
+            results["error_code"] = "no_new_unique_leads"
+        elif "hermes_native_browser_unavailable" in error_text:
+            results["error_code"] = "hermes_native_browser_unavailable"
+        else:
+            results["error_code"] = "browser_research_failed"
+        return _failed(error_text, logs=logs, results=results)
+    physical_output_path = _container_path(str(output_path)) if output_path else None
+    if physical_output_path is None or not physical_output_path.exists():
+        return _failed("Hermes Native Browser research completed without an output CSV", logs=logs)
+    new_keys = _csv_business_keys(physical_output_path)
+    if len(new_keys) < 10:
+        return _failed(
+            f"no_new_unique_leads: Hermes Native Browser produced only {len(new_keys)} new unique businesses; refusing to mark run successful.",
+            logs=logs + [f"NEW_UNIQUE_BUSINESSES={len(new_keys)}", "No prospect email sent."],
+            results={"error_code": "no_new_unique_leads", "output_path": str(output_path), "new_unique_businesses": len(new_keys), "prospect_emails_sent": 0},
+        )
+    output_record = _write_cron_output(
+        LEAD_RESEARCH_JOB_ID,
+        "BIBS Hermes Native Browser Lead Research",
+        task_type,
+        payload,
+        logs,
+        {"provider": "hermes_native_browser", "output_path": str(output_path), "new_unique_businesses": len(new_keys), "sent_count": 0, "prospect_emails_sent": 0},
+    )
+    return {
+        "status": "ok",
+        "logs": logs + [f"NEW_UNIQUE_BUSINESSES={len(new_keys)}", f"HERMES_OUTPUT_WRITTEN path={output_record}"],
+        "results": {
+            "provider": "hermes_native_browser",
+            "hermes_job_id": LEAD_RESEARCH_JOB_ID,
+            "output_path": str(output_path),
+            "hermes_output_path": str(output_record),
+            "new_unique_businesses": len(new_keys),
+            "sent_count": 0,
+            "prospect_emails_sent": 0,
+            "email_sending": False,
         },
     }
 
@@ -541,6 +615,13 @@ def _lead_output_from_stdout(stdout: str) -> Path | None:
 
 def _generic_output_from_stdout(stdout: str) -> Path | None:
     match = re.search(r"GENERIC_LEAD_RESEARCH_OUTPUT\s+path=(.+)", stdout or "")
+    if not match:
+        return None
+    return Path(match.group(1).strip())
+
+
+def _native_browser_output_from_stdout(stdout: str) -> Path | None:
+    match = re.search(r"HERMES_NATIVE_BROWSER_OUTPUT\s+path=(.+)", stdout or "")
     if not match:
         return None
     return Path(match.group(1).strip())
