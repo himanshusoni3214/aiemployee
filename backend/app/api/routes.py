@@ -1,6 +1,6 @@
 import csv
 import json
-from datetime import datetime, date
+from datetime import datetime, date, timedelta
 from pathlib import Path
 from urllib.parse import quote
 from typing import Any
@@ -1941,12 +1941,20 @@ async def system_health(company_id: str|None=None, db: Session=Depends(get_db), 
         for status in JobStatus
     }
     failed_jobs = job_counts.get(JobStatus.failed, 0)
+    recent_failed_jobs = db.scalar(
+        select(func.count()).select_from(
+            _filtered_job_stmt(company_id)
+            .where(Job.status == JobStatus.failed, Job.created_at >= datetime.utcnow() - timedelta(hours=2))
+            .subquery()
+        )
+    ) or 0
     checks['jobs'] = {
-        'status': 'degraded' if failed_jobs else 'ok',
+        'status': 'degraded' if recent_failed_jobs else 'ok',
         'scope': company_id or 'global',
         'queued': job_counts.get(JobStatus.queued, 0),
         'running': job_counts.get(JobStatus.running, 0),
         'failed': failed_jobs,
+        'recent_failed': recent_failed_jobs,
         'blocked': job_counts.get(JobStatus.blocked, 0),
         'cancelled': job_counts.get(JobStatus.cancelled, 0),
         'skipped': job_counts.get(JobStatus.skipped, 0),

@@ -117,6 +117,45 @@ class HermesScheduledSafetyTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_template_lead_job_with_missing_campaign_id_does_not_collide_with_bibs_campaign(self):
+        service = HermesImportService()
+        service.monitor = FakeMonitor([
+            hermes_job(
+                "voryx-template-qa-lead-researcher",
+                "voryx-qa-internet-sales-campaign-lead-researcher",
+                enabled=False,
+                state="paused",
+                source="voryx_employee_template",
+                company_id="company-template-qa",
+                campaign_id="campaign-template-qa",
+                employee_id="employee-template-qa",
+            )
+        ])
+        db = self.Session()
+        try:
+            db.add_all([
+                Company(id="company-brew-it-by-sash", name="Brew It By Sash", status=Status.active),
+                Campaign(
+                    id="campaign-brew-it-by-sash-lead-research",
+                    company_id="company-brew-it-by-sash",
+                    name="Brew It By Sash Lead Research",
+                    industry="Cold Brew Coffee B2B Outreach",
+                    status=Status.active,
+                ),
+                Company(id="company-template-qa", name="Template QA", status=Status.active),
+            ])
+            db.flush()
+
+            result = service.sync(db, "qa-admin")
+
+            self.assertEqual(result["status"], "ok")
+            self.assertIsNotNone(db.get(Campaign, "campaign-template-qa"))
+            self.assertEqual(db.get(AIEmployee, "employee-template-qa").campaign_id, "campaign-template-qa")
+            self.assertEqual(db.get(AIEmployee, "employee-template-qa").company_id, "company-template-qa")
+            self.assertEqual(db.get(Campaign, "campaign-brew-it-by-sash-lead-research").company_id, "company-brew-it-by-sash")
+        finally:
+            db.close()
+
     def write_jobs_file(self, root: str, jobs: list[dict]):
         cron = Path(root) / "cron"
         cron.mkdir(parents=True)

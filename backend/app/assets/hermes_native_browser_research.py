@@ -350,6 +350,30 @@ def osm_evidence_url(item):
     return ""
 
 
+def normalized_public_website(value):
+    value = clean_text(value)
+    if not value:
+        return ""
+    if value.startswith("//"):
+        value = "https:" + value
+    if not urlparse(value).scheme:
+        value = "https://" + value
+    parsed = urlparse(value)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return ""
+    if is_social_or_map_url(value):
+        return ""
+    return f"{parsed.scheme}://{domain(value)}"
+
+
+def first_public_email(*values):
+    for value in values:
+        emails = visible_emails(clean_text(value))
+        if emails:
+            return emails[0]
+    return ""
+
+
 def rows_from_nominatim(chrome, args, limit=20):
     rows = []
     skipped = []
@@ -379,19 +403,33 @@ def rows_from_nominatim(chrome, args, limit=20):
             if any(term and term in haystack for term in excluded if term not in {"already contacted businesses", "already-contacted businesses"}):
                 skipped.append({"url": url, "business": name, "reason": "nominatim_item_excluded"})
                 continue
+            extratags = item.get("extratags") if isinstance(item.get("extratags"), dict) else {}
             evidence_url = osm_evidence_url(item) or url
+            email = first_public_email(extratags.get("email"), extratags.get("contact:email"))
+            phone = clean_text(extratags.get("phone") or extratags.get("contact:phone"))
+            website = normalized_public_website(extratags.get("website") or extratags.get("contact:website") or extratags.get("url"))
+            email_evidence = evidence_url if email else ""
+            if website:
+                lead, error = extract_business(chrome, website, args)
+                if lead:
+                    email = email or lead.get("Public Email", "")
+                    phone = phone or lead.get("Phone", "")
+                    email_evidence = email_evidence or lead.get("Email Evidence", "")
+                    evidence_url = lead.get("Evidence URL") or evidence_url
+                elif error:
+                    skipped.append({"url": website, "business": name, "reason": error})
             rows.append({
                 "Business Name": name,
                 "Category": "AI Internet Research / Cafe or hospitality lead",
-                "Website": "",
-                "Public Email": "",
-                "Phone": "",
+                "Website": website,
+                "Public Email": email,
+                "Phone": phone,
                 "Address": display_name,
                 "Source URL": url,
                 "Evidence URL": evidence_url,
                 "Why this is a fit for Brew It by Sash": "Public OpenStreetMap/Nominatim evidence for a Toronto cafe, coffee shop, or espresso bar lead.",
-                "Email Evidence": "",
-                "Lead Status": "Generated - email_missing_or_not_visible",
+                "Email Evidence": email_evidence,
+                "Lead Status": "Generated" if email else "Generated - email_missing_or_not_visible",
             })
             if len(rows) >= limit:
                 return rows, skipped
@@ -404,7 +442,9 @@ def visible_emails(text):
         lower = email.lower()
         if lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
             continue
-        if any(bad in lower for bad in ["example.com", "test.com", "noreply", "no-reply"]):
+        if any(bad in lower for bad in ["example.com", "test.com", "domain.com", "noreply", "no-reply"]):
+            continue
+        if lower in {"user@domain.com", "name@domain.com", "email@domain.com"}:
             continue
         if lower not in emails:
             emails.append(lower)

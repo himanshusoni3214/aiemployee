@@ -132,7 +132,10 @@ class HermesLiveMonitor:
             return {"status": "error", "error": str(exc)}
 
         enabled_jobs = [job for job in jobs if job.get("enabled")]
-        failing_jobs = [job for job in jobs if job.get("last_status") == "error"]
+        failing_jobs = [
+            job for job in jobs
+            if job.get("enabled") and job.get("last_status") in {"error", "failed"}
+        ]
         key_limit_failures = [
             job for job in failing_jobs
             if "key limit exceeded" in (job.get("last_error") or "").lower()

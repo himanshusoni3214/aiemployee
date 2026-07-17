@@ -235,26 +235,39 @@ class HermesImportService:
 
     def _campaign(self, db: Session, company: Company, hermes_job: dict[str, Any]) -> tuple[Campaign, bool, bool]:
         campaign_id = str(hermes_job.get("campaign_id") or "").strip()
+        status = _campaign_status(hermes_job)
         if campaign_id:
             campaign = db.get(Campaign, campaign_id)
             if campaign:
                 if campaign.status == Status.archived:
                     return campaign, False, False
-                status = _campaign_status(hermes_job)
                 if campaign.status == Status.active and status == Status.inactive:
                     status = campaign.status
                 changed = _assign(campaign, status=status)
                 return campaign, False, changed
-        name = _campaign_name(hermes_job.get("name") or "")
+            name = _human_name(hermes_job.get("name") or campaign_id)
+            generated_id = campaign_id
+        else:
+            is_template_job = str(hermes_job.get("source") or "").lower() == "voryx_employee_template"
+            has_explicit_company = bool(str(hermes_job.get("company_id") or "").strip())
+            name = _human_name(hermes_job.get("name") or "") if is_template_job or has_explicit_company else _campaign_name(hermes_job.get("name") or "")
+            generated_id = f"campaign-{_slug(name)}"
+        campaign = db.get(Campaign, generated_id)
+        if campaign:
+            if campaign.status == Status.archived:
+                return campaign, False, False
+            if campaign.status == Status.active and status == Status.inactive:
+                status = campaign.status
+            changed = _assign(campaign, status=status)
+            return campaign, False, changed
         campaign = db.scalar(select(Campaign).where(Campaign.company_id == company.id, func.lower(Campaign.name) == name.lower()))
-        status = _campaign_status(hermes_job)
         if campaign and campaign.status == Status.active and status == Status.inactive:
             status = campaign.status
         if campaign:
             changed = _assign(campaign, industry="Cold Brew Coffee B2B Outreach", daily_lead_goal=25, daily_email_goal=25, status=status)
             return campaign, False, changed
         campaign = Campaign(
-            id=f"campaign-{_slug(name)}",
+            id=generated_id,
             company_id=company.id,
             name=name,
             industry="Cold Brew Coffee B2B Outreach",
@@ -301,7 +314,7 @@ class HermesImportService:
             fields["status"] = EmployeeStatus.archived
         if employee:
             return employee, False, _assign(employee, **fields)
-        employee = AIEmployee(id=f"employee-hermes-{hermes_id}", **fields)
+        employee = AIEmployee(id=employee_id or f"employee-hermes-{hermes_id}", **fields)
         db.add(employee)
         db.flush()
         return employee, True, False
@@ -393,6 +406,8 @@ class HermesImportService:
         updated = 0
         company = self._company_for_job(db, company, hermes_job)
         campaign, was_created, was_updated = self._campaign(db, company, hermes_job)
+        if campaign.company_id != company.id:
+            company = db.get(Company, campaign.company_id) or company
         created += int(was_created)
         updated += int(was_updated)
         employee, was_created, was_updated = self._employee(db, company, campaign, hermes_job)
