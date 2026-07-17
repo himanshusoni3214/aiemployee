@@ -88,6 +88,25 @@ def _domain_from_url(value: str | None) -> str:
     return text
 
 
+def _normalized_identity_text(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"https?://", "", text)
+    text = re.sub(r"\b(unit|suite|ste|floor|fl|#)\b\.?", " ", text)
+    text = re.sub(r"[^a-z0-9@.]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _first_domain_from_row(row: dict[str, Any]) -> str:
+    for key_group in (
+        ["website", "Website", "domain", "url"],
+        ["source_url", "Source URL", "source", "evidence_url", "contact_page"],
+    ):
+        domain = _domain_from_url(first_text(row, key_group))
+        if domain:
+            return domain
+    return ""
+
+
 def lead_quality_for(row: dict[str, Any], email: str, domain: str) -> dict[str, Any]:
     website = first_text(row, ["website", "Website", "domain", "url"])
     source_url = first_text(row, ["source_url", "Source URL", "source", "evidence_url", "contact_page"])
@@ -119,17 +138,27 @@ def lead_quality_for(row: dict[str, Any], email: str, domain: str) -> dict[str, 
     return {"email_confidence": confidence, "lead_quality": quality, "quality_reasons": reasons, "evidence_url": source_url, "website": website}
 
 def lead_key_for(campaign_id: str, row: dict[str, Any], source_run_id: str, index: int) -> str:
-    explicit = first_text(row, ["lead_id", "id"])
+    explicit = first_text(row, ["canonical_lead_id", "stable_id", "source_platform_id", "osm_id", "place_id"])
     email = normalize_email(first_text(row, ["email", "public_email", "verified_public_email"]))
-    business = first_text(row, ["business_name", "business", "company", "name"]).strip().lower()
-    website = _domain_from_url(first_text(row, ["website", "Website", "domain", "url"]))
-    source_url = _domain_from_url(first_text(row, ["source_url", "Source URL", "source", "evidence_url", "contact_page"]))
+    business = _normalized_identity_text(first_text(row, ["business_name", "business", "company", "name"]))
+    website = _first_domain_from_row(row)
+    address = _normalized_identity_text(first_text(row, ["address", "Address", "street_address", "location", "formatted_address"]))
+    phone = _normalized_identity_text(first_text(row, ["phone", "Phone", "telephone", "phone_number"]))
+    source_url = _normalized_identity_text(first_text(row, ["source_url", "Source URL", "source", "evidence_url", "contact_page"]))
     if explicit:
         seed = f"{campaign_id}:explicit:{explicit}"
     elif email:
         seed = f"{campaign_id}:email:{email}"
+    elif website:
+        seed = f"{campaign_id}:domain:{website}"
+    elif business and address:
+        seed = f"{campaign_id}:business-address:{business}:{address}"
+    elif business and phone:
+        seed = f"{campaign_id}:business-phone:{business}:{phone}"
+    elif source_url:
+        seed = f"{campaign_id}:source:{source_url}"
     else:
-        seed = f"{campaign_id}:business:{business}:{website or source_url}:{index}"
+        seed = f"{campaign_id}:business:{business}"
     return hashlib.sha1(seed.encode("utf-8")).hexdigest()[:24]
 
 
@@ -434,10 +463,15 @@ def generate_draft_for_item(db: Session, campaign: Campaign, company: Company, i
     business = item.get("business") or "there"
     subject = f"Quick idea for {business}"
     unsubscribe = required_unsubscribe_text(db, campaign.company_id)
+    company_name = (company.name or "our team").strip()
+    industry = (campaign.industry or "your market").strip()
+    location = first_text(item.get("raw") or {}, ["city", "City", "location", "Location", "address", "Address"])
+    context = f" in {location}" if location else ""
     body = (
         f"Hi {business},\n\n"
-        f"I am reaching out from {company.name}. {offer}\n\n"
-        f"If this is relevant, I can send a short overview.\n\n"
+        f"I am reaching out from {company_name}. We are looking for a few {industry} partners{context} who may want to review a simple wholesale/sample option.\n\n"
+        f"{offer}\n\n"
+        f"If this is relevant, reply here and I can send the short details. If it is not a fit, no problem.\n\n"
         f"{unsubscribe}"
     )
     if existing:
@@ -972,10 +1006,12 @@ def send_blockers(db: Session, campaign: Campaign, draft: OutreachDraft | None =
     return list(dict.fromkeys(blockers))
 
 
-def create_internal_test_event(db: Session, campaign: Campaign, draft: OutreachDraft, user_id: str) -> OutreachEvent:
+def create_internal_test_event(db: Session, campaign: Campaign, draft: OutreachDraft, user_id: str, *, process_now: bool = False) -> OutreachEvent:
     blockers = send_blockers(db, campaign, draft, internal_test=True)
     if blockers:
         raise ValueError("Internal test blocked: " + ", ".join(blockers))
+    settings_row = db.scalar(select(CompanyOutreachSettings).where(CompanyOutreachSettings.company_id == campaign.company_id))
+    settings_data = settings_payload(settings_row, campaign.company_id)
     now = utc_now()
     event = OutreachEvent(
         event_id=f"internal-test-{campaign.id}-{draft.id}-{int(now.timestamp())}",
@@ -994,4 +1030,48 @@ def create_internal_test_event(db: Session, campaign: Campaign, draft: OutreachD
         raw={"draft_id": draft.id, "requested_by": user_id, "prospect_emails_sent": 0, "message": "Internal test prepared only; no prospect email sent."},
     )
     db.add(event)
+    db.flush()
+    if not process_now:
+        return event
+    batch_id = f"internal-test-{campaign.id}-{int(now.timestamp())}"
+    body = body_with_unsubscribe(
+        f"Internal test copy for {draft.business or draft.lead_email or draft.lead_key}.\n\n{draft.body}",
+        settings_data.get("unsubscribe_text"),
+    )
+    job, queued = enqueue_controlled_outreach_delivery(
+        db,
+        campaign_id=campaign.id,
+        company_id=campaign.company_id,
+        employee_id=draft.employee_id,
+        lead_key=draft.lead_key,
+        draft_id=draft.id,
+        recipient=APPROVED_INTERNAL_RECIPIENT,
+        business=f"Internal test: {draft.business or draft.lead_email or draft.lead_key}",
+        subject=event.subject or f"[INTERNAL TEST] {draft.subject}",
+        body=body,
+        sender_email=normalize_email(settings_data.get("sender_email")) or "voryxio@gmail.com",
+        reply_to_email=normalize_email(settings_data.get("reply_to_email")) or "voryxio@gmail.com",
+        unsubscribe_text=str(settings_data.get("unsubscribe_text") or "").strip(),
+        requested_by=user_id,
+        batch_id=batch_id,
+        event_id=event.event_id,
+        internal_test=True,
+    )
+    event.status = "internal_test_queued"
+    event.raw = {**(event.raw or {}), "mail_queue_job_id": job.id, "request_path": queued.get("request_path")}
+    process_result = process_one_mail_request()
+    ingest_internal_mail_receipts(db)
+    db.flush()
+    db.refresh(event)
+    if event.status != "internal_test_sent" or not event.message_id:
+        event.status = "internal_test_failed"
+        event.raw = {
+            **(event.raw or {}),
+            "process_result": {
+                "returncode": process_result.returncode,
+                "stdout": process_result.stdout[-1000:],
+                "stderr": process_result.stderr[-1000:],
+            },
+        }
+        raise ValueError("Internal test failed: provider receipt/message_id was not recorded")
     return event

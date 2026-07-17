@@ -368,6 +368,7 @@ def _legacy_bibs_files(campaign: Campaign) -> list[Path]:
 
 BIBS_COMPANY_ID = "company-brew-it-by-sash"
 BIBS_LEAD_CAMPAIGN_ID = "campaign-brew-it-by-sash-lead-research"
+BIBS_LEAD_RESEARCH_JOB_ID = "0d0c20e25f55"
 BIBS_SOURCE_CONFIG_CONTAINER_PATH = "/opt/data/home/leads/bibs_real_lead_source_config.json"
 BIBS_SOURCE_TYPES = {
     "ai_internet_research",
@@ -905,6 +906,7 @@ def _lead_status_from_review_item(item: dict) -> LeadStatus:
 def _sync_canonical_lead_pool(db: Session, campaign: Campaign, items: list[dict], source_path: str | None = None) -> dict[str, int]:
     created = 0
     updated = 0
+    processed_lead_ids: set[str] = set()
     for item in items:
         email = str(item.get("email") or "").strip().lower() or None
         business = str(item.get("business") or "").strip() or None
@@ -918,8 +920,13 @@ def _sync_canonical_lead_pool(db: Session, campaign: Campaign, items: list[dict]
         if not lead:
             lead = Lead(company_id=campaign.company_id, campaign_id=campaign.id, business=business, email=email, phone=phone, website=website, status=_lead_status_from_review_item(item))
             db.add(lead)
+            db.flush()
+            processed_lead_ids.add(str(lead.id))
             created += 1
         else:
+            if str(lead.id) in processed_lead_ids:
+                continue
+            processed_lead_ids.add(str(lead.id))
             changed = False
             for field, value in {"campaign_id": campaign.id, "business": business, "email": email, "phone": phone, "website": website}.items():
                 if value and getattr(lead, field) != value:
@@ -1219,12 +1226,12 @@ def _prepare_internal_test(db: Session, draft_id: str, user: User) -> dict:
     campaign = db.get(Campaign, draft.campaign_id)
     if not campaign: raise HTTPException(404, 'Campaign not found')
     try:
-        event = create_internal_test_event(db, campaign, draft, user.id)
+        event = create_internal_test_event(db, campaign, draft, user.id, process_now=True)
     except ValueError as exc:
         raise HTTPException(400, str(exc)) from exc
-    log(db, 'Outreach Internal Test Prepared', 'OutreachEvent', event.event_id, campaign.company_id, user.id, {'recipient': OUTREACH_INTERNAL_RECIPIENT, 'prospect_emails_sent': 0})
+    log(db, 'Outreach Internal Test Sent', 'OutreachEvent', event.event_id, campaign.company_id, user.id, {'recipient': OUTREACH_INTERNAL_RECIPIENT, 'message_id': event.message_id, 'prospect_emails_sent': 0})
     db.commit(); db.refresh(event)
-    return {'ok': True, 'status': event.status, 'recipient': event.recipient, 'event_id': event.event_id, 'prospect_emails_sent': 0, 'message': 'Internal test prepared for approved recipient only; no prospect email sent.'}
+    return {'ok': True, 'status': event.status, 'recipient': event.recipient, 'event_id': event.event_id, 'message_id': event.message_id, 'prospect_emails_sent': 0, 'message': 'Internal test sent to approved internal recipient with provider receipt. No prospect email sent.'}
 
 @router.post('/outreach-drafts/{draft_id}/{action}')
 def outreach_draft_action(draft_id: str, action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
@@ -1274,16 +1281,28 @@ def preview_controlled_outreach_batch(campaign_id: str, limit: int|None=None, db
 def sales_employee_find_leads(campaign_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
     campaign = db.get(Campaign, campaign_id)
     if not campaign: raise HTTPException(404, 'Campaign not found')
-    employee = db.scalar(
-        select(AIEmployee)
-        .where(
-            AIEmployee.campaign_id == campaign.id,
-            AIEmployee.status != EmployeeStatus.archived,
-            AIEmployee.employee_type.in_(['Lead Researcher', 'Lead Research', 'Lead Generator']),
-            AIEmployee.hermes_job_id.is_not(None),
+    employee = None
+    if campaign.id == BIBS_LEAD_CAMPAIGN_ID:
+        employee = db.scalar(
+            select(AIEmployee)
+            .where(
+                AIEmployee.company_id == campaign.company_id,
+                AIEmployee.hermes_job_id == BIBS_LEAD_RESEARCH_JOB_ID,
+                AIEmployee.status != EmployeeStatus.archived,
+            )
+            .order_by(AIEmployee.name)
         )
-        .order_by(AIEmployee.name)
-    )
+    if not employee:
+        employee = db.scalar(
+            select(AIEmployee)
+            .where(
+                AIEmployee.campaign_id == campaign.id,
+                AIEmployee.status != EmployeeStatus.archived,
+                AIEmployee.employee_type.in_(['Lead Researcher', 'Lead Research', 'Lead Generator']),
+                AIEmployee.hermes_job_id.is_not(None),
+            )
+            .order_by(AIEmployee.name)
+        )
     if not employee:
         employee = db.scalar(
             select(AIEmployee)
@@ -1335,9 +1354,21 @@ def sales_employee_find_leads(campaign_id: str, db: Session=Depends(get_db), use
         job.status = JobStatus.failed
         job.error_message = result.get('error') or 'Lead research execution failed'
         job.verification_reason = 'lead_research_failed'
+    review_summary = {'source_path': None, 'items': 0, 'counts': {}, 'canonical_lead_pool': {'created': 0, 'updated': 0, 'total': 0}}
+    if job.status == JobStatus.completed:
+        items, source_path = _campaign_review_items(db, campaign)
+        counts: dict[str, int] = {}
+        for item in items:
+            counts[item['state']] = counts.get(item['state'], 0) + 1
+        review_summary = {
+            'source_path': source_path,
+            'items': len(items),
+            'counts': counts,
+            'canonical_lead_pool': _sync_canonical_lead_pool(db, campaign, items, source_path),
+        }
     log(db, 'AI Sales Employee Find Leads', 'Campaign', campaign.id, campaign.company_id, user.id, {'job_id': job.id, 'hermes_job_id': employee.hermes_job_id, 'status': job.status.value, 'prospect_emails_sent': 0})
     db.commit(); db.refresh(job)
-    return {'ok': job.status == JobStatus.completed, 'job_id': job.id, 'status': job.status.value, 'message': job.error_message or 'Lead research completed with Hermes evidence.', 'result': job.result, 'prospect_emails_sent': 0}
+    return {'ok': job.status == JobStatus.completed, 'job_id': job.id, 'status': job.status.value, 'message': job.error_message or 'Lead research completed with Hermes evidence.', 'result': job.result, 'review': review_summary, 'prospect_emails_sent': 0}
 
 
 @router.post('/campaigns/{campaign_id}/outreach/schedule-next-window')

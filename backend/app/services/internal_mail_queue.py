@@ -226,6 +226,7 @@ def enqueue_controlled_outreach_delivery(
     requested_by: str,
     batch_id: str,
     event_id: str,
+    internal_test: bool = False,
     data_path: str | None = None,
 ) -> tuple[Job, dict[str, Any]]:
     now = _utc_now()
@@ -249,6 +250,7 @@ def enqueue_controlled_outreach_delivery(
         "draft_id": draft_id,
         "event_id": event_id,
         "batch_id": batch_id,
+        "internal_test": bool(internal_test),
         "requested_by": requested_by,
         "created_at": now.isoformat().replace("+00:00", "Z"),
         "processor_path": str(HERMES_DATA_ROOT / QUEUE_RELATIVE_ROOT / PROCESSOR_SCRIPT_NAME),
@@ -268,6 +270,7 @@ def enqueue_controlled_outreach_delivery(
             "lead_key": lead_key,
             "draft_id": draft_id,
             "batch_id": batch_id,
+            "internal_test": bool(internal_test),
         },
         result={"request": {**request, "job_id": None}},
         logs=["Controlled outreach queued for Hermes/Himalaya mail processor"],
@@ -401,21 +404,23 @@ def ingest_internal_mail_receipts(
             if payload.get("kind") == "controlled_outreach" and payload.get("event_id"):
                 event = db.get(OutreachEvent, str(payload["event_id"]))
                 if event:
-                    event.status = "sent"
+                    is_internal_test = bool(payload.get("internal_test"))
+                    event.status = "internal_test_sent" if is_internal_test else "sent"
                     event.message_id = job.provider_message_id
                     event.sent_at = job.sent_at
                     event.provider = "himalaya"
-                    event.dry_run = False
+                    event.dry_run = is_internal_test is True
                     event.raw = {**(event.raw or {}), "receipt": receipt}
-                    approval = db.scalar(
-                        select(LeadApproval).where(
-                            LeadApproval.campaign_id == event.campaign_id,
-                            LeadApproval.lead_key == payload.get("lead_key"),
+                    if not is_internal_test:
+                        approval = db.scalar(
+                            select(LeadApproval).where(
+                                LeadApproval.campaign_id == event.campaign_id,
+                                LeadApproval.lead_key == payload.get("lead_key"),
+                            )
                         )
-                    )
-                    if approval:
-                        approval.state = "sent"
-                        approval.updated_at = _utc_now().replace(tzinfo=None)
+                        if approval:
+                            approval.state = "sent"
+                            approval.updated_at = _utc_now().replace(tzinfo=None)
             completed += 1
         else:
             job.status = JobStatus.failed

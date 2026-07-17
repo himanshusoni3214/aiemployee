@@ -12,7 +12,9 @@ from app.models.entities import (
     Company,
     CompanyOutreachSettings,
     Job,
+    LeadStatus,
     LeadApproval,
+    Lead,
     OutreachDraft,
     OutreachEvent,
     Role,
@@ -28,6 +30,7 @@ from app.services.outreach import (
     create_internal_test_event,
     default_outreach_settings,
     generate_draft_for_item,
+    lead_key_for,
     review_items_from_rows,
     send_blockers,
     upsert_approval,
@@ -103,6 +106,29 @@ class OutreachControlsTests(unittest.TestCase):
             refreshed = review_items_from_rows(db, campaign, [row], 'leads_2026_07_14')[0]
             self.assertEqual(refreshed['state'], 'approved_for_outreach')
             self.assertTrue(refreshed['can_send'])
+        finally:
+            db.close()
+
+    def test_no_email_lead_key_does_not_depend_on_row_position_or_source_file(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            stable = {
+                'Business Name': 'No Email Cafe',
+                'Website': 'https://no-email-cafe.example',
+                'Address': '10 King Street West, Toronto',
+                'Phone': '416-555-0100',
+            }
+            first = lead_key_for(campaign.id, stable, 'leads_2026_07_12', 1)
+            reordered = lead_key_for(campaign.id, stable, 'leads_2026_07_13', 42)
+            self.assertEqual(first, reordered)
+
+            item = review_items_from_rows(db, campaign, [stable], 'leads_2026_07_12')[0]
+            upsert_approval(db, campaign, item, 'rejected', user.id, 'not a fit')
+            db.flush()
+            refreshed = review_items_from_rows(db, campaign, [stable], 'leads_2026_07_14')[0]
+            self.assertEqual(refreshed['lead_key'], first)
+            self.assertEqual(refreshed['state'], 'rejected')
         finally:
             db.close()
 
@@ -589,6 +615,52 @@ class OutreachControlsTests(unittest.TestCase):
             self.assertEqual(draft.status, 'draft_needs_review')
         finally:
             routes._campaign_review_items = original_reader
+            db.close()
+
+    def test_canonical_lead_sync_does_not_toggle_duplicate_email_business_names(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            lead = Lead(
+                company_id=company.id,
+                campaign_id=campaign.id,
+                business='Mos',
+                email='contactus@mosmoscoffee.com',
+                website='https://mosmoscoffee.com',
+                status=LeadStatus.generated,
+            )
+            db.add(lead)
+            items = [
+                {
+                    'lead_key': 'lead-a',
+                    'business': 'Mos Mos Coffee',
+                    'email': 'contactus@mosmoscoffee.com',
+                    'website': 'https://mosmoscoffee.com',
+                    'raw': {},
+                    'state': 'duplicate',
+                    'computed_state': 'duplicate',
+                    'can_send': False,
+                    'email_confidence': 'public_unverified',
+                },
+                {
+                    'lead_key': 'lead-b',
+                    'business': 'Mos',
+                    'email': 'contactus@mosmoscoffee.com',
+                    'website': 'https://mosmoscoffee.com',
+                    'raw': {},
+                    'state': 'duplicate',
+                    'computed_state': 'duplicate',
+                    'can_send': False,
+                    'email_confidence': 'public_unverified',
+                },
+            ]
+            first = routes._sync_canonical_lead_pool(db, campaign, items, '/source.csv')
+            second = routes._sync_canonical_lead_pool(db, campaign, items, '/source.csv')
+
+            self.assertEqual(first['updated'], 1)
+            self.assertEqual(second['updated'], 0)
+            self.assertEqual(lead.business, 'Mos Mos Coffee')
+        finally:
             db.close()
 
     def test_lead_review_action_auto_mirrors_to_same_company_email_outreach_campaign(self):

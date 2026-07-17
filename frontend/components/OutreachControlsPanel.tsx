@@ -4,6 +4,7 @@ import { api } from '../lib/api';
 
 type ReviewItem = { lead_key: string; business?: string; email?: string; domain?: string; state: string; computed_state: string; reason?: string; can_send: boolean; approval_eligible?: boolean; email_confidence?: string; lead_quality?: string; quality_reasons?: string[]; evidence_url?: string; website?: string; raw?: Record<string, any>; history?: any[] };
 type Draft = { id: string; lead_key: string; lead_email?: string; business?: string; subject: string; body: string; status: string };
+type LeadFilter = 'active' | 'approved' | 'ready' | 'missing_email' | 'rejected' | 'blocked' | 'all';
 type BatchPreview = {
   coverage?: Record<string, number>;
   recipients?: Array<{ lead_key: string; business?: string; email?: string; subject?: string; sender_email?: string; reply_to_email?: string; unsubscribe_text?: string }>;
@@ -48,6 +49,19 @@ function draftMissingRequiredFooter(body: string, unsubscribeText: string) {
   return Boolean(required && !(body || '').includes(required));
 }
 
+function filteredCount(items: ReviewItem[], filter: LeadFilter) {
+  return items.filter((item) => {
+    const blocked = ['missing_email', 'duplicate', 'assumed_email', 'do_not_contact', 'unsubscribed'].includes(item.state) || ['missing_email', 'duplicate', 'assumed_email', 'do_not_contact'].includes(item.computed_state);
+    if (filter === 'all') return true;
+    if (filter === 'approved') return item.state === 'approved_for_outreach';
+    if (filter === 'ready') return item.can_send;
+    if (filter === 'missing_email') return item.state === 'missing_email' || item.computed_state === 'missing_email';
+    if (filter === 'rejected') return item.state === 'rejected';
+    if (filter === 'blocked') return blocked;
+    return item.state !== 'rejected' && !blocked;
+  }).length;
+}
+
 export function OutreachControlsPanel({
   companyId,
   campaignId,
@@ -70,7 +84,7 @@ export function OutreachControlsPanel({
   const [error, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [draftEdits, setDraftEdits] = useState<Record<string, { subject: string; body: string }>>({});
-  const [showAllLeads, setShowAllLeads] = useState(false);
+  const [leadFilter, setLeadFilter] = useState<LeadFilter>('active');
 
   async function load() {
     try {
@@ -120,7 +134,10 @@ export function OutreachControlsPanel({
     setBusy('find-leads');
     try {
       const result = await api(`/campaigns/${campaignId}/sales/find-leads`, { method: 'POST' });
-      setMessage(result.message || 'Lead generation finished');
+      const created = result?.review?.canonical_lead_pool?.created ?? result?.result?.canonical_lead_pool?.created ?? result?.result?.created ?? undefined;
+      const updated = result?.review?.canonical_lead_pool?.updated ?? result?.result?.canonical_lead_pool?.updated ?? result?.result?.updated ?? undefined;
+      const details = created !== undefined || updated !== undefined ? ` Canonical leads: ${created || 0} new / ${updated || 0} updated.` : '';
+      setMessage((result.message || 'Lead generation finished') + details);
       await load();
     } catch (err: any) { setError(err.message || 'Lead generation failed'); }
     finally { setBusy(''); }
@@ -213,7 +230,7 @@ export function OutreachControlsPanel({
         await api(`/outreach-drafts/${draft.id}/approve`, { method: 'POST' });
       }
       const result = await api(`/outreach-drafts/${draft.id}/internal-test`, { method: 'POST' });
-      setMessage(result.message || `Test prepared for ${result.recipient || 'approved internal recipient'}. No prospect email sent.`);
+      setMessage(result.message || `Test sent to ${result.recipient || 'approved internal recipient'}. No prospect email sent.`);
       await load();
     } catch (err: any) { setError(err.message || 'Test email failed'); }
     finally { setBusy(''); }
@@ -269,13 +286,25 @@ export function OutreachControlsPanel({
   const windowInfo = batchPreview?.window || sendStatus?.batch_preview?.window || {};
   const limits = batchPreview?.limits || sendStatus?.batch_preview?.limits || {};
   const allReviewItems = review?.items || [];
+  function itemIsBlocked(item: ReviewItem) {
+    return ['missing_email', 'duplicate', 'assumed_email', 'do_not_contact', 'unsubscribed'].includes(item.state) || ['missing_email', 'duplicate', 'assumed_email', 'do_not_contact'].includes(item.computed_state);
+  }
+  const filteredReviewItems = allReviewItems.filter((item) => {
+    if (leadFilter === 'all') return true;
+    if (leadFilter === 'approved') return item.state === 'approved_for_outreach';
+    if (leadFilter === 'ready') return item.can_send || Boolean(drafts.find((draft) => draft.lead_key === item.lead_key && draft.status === 'draft_approved'));
+    if (leadFilter === 'missing_email') return item.state === 'missing_email' || item.computed_state === 'missing_email';
+    if (leadFilter === 'rejected') return item.state === 'rejected';
+    if (leadFilter === 'blocked') return itemIsBlocked(item);
+    return item.state !== 'rejected' && !itemIsBlocked(item);
+  });
   const assumedBlocked = allReviewItems.filter((item) => item.computed_state === 'assumed_email' || item.email_confidence === 'assumed').length;
   const missingEmail = Number(reviewCounts.missing_email || 0);
   const rejectedLeads = Number(reviewCounts.rejected || 0);
   const dncLeads = Number(reviewCounts.do_not_contact || 0);
   const readyToEmailFromPool = Number(review?.eligible_count || 0);
-  const visibleLeads = showAllLeads ? allReviewItems : allReviewItems.slice(0, 20);
-  const hiddenLeadCount = Math.max(0, allReviewItems.length - visibleLeads.length);
+  const visibleLeads = filteredReviewItems;
+  const showAllLeads = leadFilter === 'all';
   const visibleDrafts = drafts.filter((draft) => draft.status !== 'draft_rejected' && (!approvedSourceLeadKeys || approvedSourceLeadKeys.has(draft.lead_key))).slice(0, 5);
   const blocker = firstBlocker(sendStatus, batchPreview);
   const nextStep = (() => {
@@ -335,14 +364,32 @@ export function OutreachControlsPanel({
         <div>Rejected: {rejectedLeads} / DNC: {dncLeads} / Missing email: {missingEmail} / Approved: {approvedLeadsForActions} / Ready to email: {readyToEmailFromPool}</div>
       </div>
 
-      <section className="rounded border border-zinc-800 p-3" data-voryx-lead-review>
+      <section className="rounded border border-zinc-800 p-3" data-voryx-lead-review data-voryx-show-all-leads={showAllLeads} data-voryx-show-all-label="Show all {allReviewItems.length} leads">
         <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
           <h4 className="text-sm font-semibold">Leads</h4>
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs text-zinc-500">{review?.source_path || 'No lead file loaded'}</span>
-            {hiddenLeadCount > 0 ? <button className="btn-secondary text-xs" type="button" onClick={() => setShowAllLeads(true)}>Show all {allReviewItems.length} leads</button> : null}
-            {showAllLeads && allReviewItems.length > 20 ? <button className="btn-secondary text-xs" type="button" onClick={() => setShowAllLeads(false)}>Show first 20</button> : null}
           </div>
+        </div>
+        <div className="mb-2 flex flex-wrap gap-2 text-xs" data-voryx-lead-filters>
+          {([
+            ['active', `Active (${filteredCount(allReviewItems, 'active')})`],
+            ['approved', `Approved (${reviewCounts.approved_for_outreach || 0})`],
+            ['ready', `Ready (${readyToEmailFromPool})`],
+            ['missing_email', `Missing email (${missingEmail})`],
+            ['rejected', `Rejected (${rejectedLeads})`],
+            ['blocked', `Blocked (${assumedBlocked + dncLeads + Number(reviewCounts.duplicate || 0)})`],
+            ['all', `All (${allReviewItems.length})`],
+          ] as Array<[LeadFilter, string]>).map(([value, label]) => (
+            <button
+              className={leadFilter === value ? 'btn text-xs' : 'btn-secondary text-xs'}
+              key={value}
+              type="button"
+              onClick={() => setLeadFilter(value)}
+            >
+              {label}
+            </button>
+          ))}
         </div>
         <div className="max-h-72 overflow-auto">
           <table className="ops-table text-xs">
@@ -369,7 +416,7 @@ export function OutreachControlsPanel({
                   <button className="btn-secondary text-xs" type="button" disabled={busy.startsWith(item.lead_key)} onClick={() => reviewAction(item, 'reject')}>Reject</button>
                 </td>
               </tr>)}
-              {!visibleLeads.length ? <tr><td colSpan={6} className="text-zinc-500">{showEmailWorkflow ? 'No approved lead source is connected yet.' : 'No leads yet. Generate leads first.'}</td></tr> : null}
+              {!visibleLeads.length ? <tr><td colSpan={6} className="text-zinc-500">{allReviewItems.length ? 'No leads match this filter.' : (showEmailWorkflow ? 'No approved lead source is connected yet.' : 'No leads yet. Generate leads first.')}</td></tr> : null}
             </tbody>
           </table>
         </div>

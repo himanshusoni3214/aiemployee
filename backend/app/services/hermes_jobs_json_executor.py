@@ -314,7 +314,7 @@ def _execute_bibs_native_browser_research(task_type: str, payload: dict[str, Any
         "--geography", str(config_payload.get("target_geography") or "Toronto/GTA"),
         "--exclusions", str(config_payload.get("exclusions") or "franchises, chains, already contacted businesses"),
         "--limit", str(int(payload.get("limit") or config_payload.get("lead_limit") or 25)),
-        "--min-success", "10",
+        "--min-success", "1",
         "--output-dir", str(LEADS_DIR),
         "--config", str(source_config),
         "--no-email",
@@ -336,29 +336,33 @@ def _execute_bibs_native_browser_research(task_type: str, payload: dict[str, Any
     if physical_output_path is None or not physical_output_path.exists():
         return _failed("Hermes Native Browser research completed without an output CSV", logs=logs)
     new_keys = _csv_business_keys(physical_output_path)
-    if len(new_keys) < 10:
+    if len(new_keys) < 1:
         return _failed(
-            f"no_new_unique_leads: Hermes Native Browser produced only {len(new_keys)} new unique businesses; refusing to mark run successful.",
+            "no_new_unique_leads: Hermes Native Browser did not find any new unique businesses.",
             logs=logs + [f"NEW_UNIQUE_BUSINESSES={len(new_keys)}", "No prospect email sent."],
             results={"error_code": "no_new_unique_leads", "output_path": str(output_path), "new_unique_businesses": len(new_keys), "prospect_emails_sent": 0},
         )
+    warning_logs = []
+    if len(new_keys) < 10:
+        warning_logs.append(f"LOW_NEW_UNIQUE_BUSINESSES={len(new_keys)}; completed because positive, source-backed new leads were found.")
     output_record = _write_cron_output(
         LEAD_RESEARCH_JOB_ID,
         "BIBS Hermes Native Browser Lead Research",
         task_type,
         payload,
-        logs,
-        {"provider": "hermes_native_browser", "output_path": str(output_path), "new_unique_businesses": len(new_keys), "sent_count": 0, "prospect_emails_sent": 0},
+        logs + warning_logs,
+        {"provider": "hermes_native_browser", "output_path": str(output_path), "new_unique_businesses": len(new_keys), "sent_count": 0, "prospect_emails_sent": 0, "warning": warning_logs[0] if warning_logs else None},
     )
     return {
         "status": "ok",
-        "logs": logs + [f"NEW_UNIQUE_BUSINESSES={len(new_keys)}", f"HERMES_OUTPUT_WRITTEN path={output_record}"],
+        "logs": logs + warning_logs + [f"NEW_UNIQUE_BUSINESSES={len(new_keys)}", f"HERMES_OUTPUT_WRITTEN path={output_record}"],
         "results": {
             "provider": "hermes_native_browser",
             "hermes_job_id": LEAD_RESEARCH_JOB_ID,
             "output_path": str(output_path),
             "hermes_output_path": str(output_record),
             "new_unique_businesses": len(new_keys),
+            "warning": warning_logs[0] if warning_logs else None,
             "sent_count": 0,
             "prospect_emails_sent": 0,
             "email_sending": False,
