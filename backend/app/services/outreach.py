@@ -40,6 +40,10 @@ LEAD_STATES = {
     "missing_email",
     "duplicate",
     "assumed_email",
+    "phone_ready",
+    "enrichment_needed",
+    "unreachable",
+    "invalid",
     "sent",
     "replied",
     "bounced",
@@ -107,35 +111,67 @@ def _first_domain_from_row(row: dict[str, Any]) -> str:
     return ""
 
 
+def _phone_digits(value: str | None) -> str:
+    digits = re.sub(r"\D+", "", str(value or ""))
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else ""
+
+
+def _lead_category_from_row(row: dict[str, Any], email: str) -> tuple[str, str]:
+    explicit = first_text(row, ["lead_category", "Lead Category"]).lower()
+    explicit_map = {
+        "email_ready", "phone_ready", "enrichment_needed", "unreachable", "invalid",
+        "duplicate", "previously_rejected", "do_not_contact", "previously_sent",
+    }
+    if explicit in explicit_map:
+        return explicit, first_text(row, ["lead_quality_reason", "Lead Quality Reason"]) or explicit
+    business = first_text(row, ["business_name", "Business Name", "business", "company", "name"])
+    website = first_text(row, ["website", "Website", "domain", "url"])
+    source_url = first_text(row, ["source_url", "Source URL", "source", "evidence_url", "contact_page", "Evidence URL"])
+    email_evidence = first_text(row, ["email_evidence", "Email Evidence"])
+    phone = _phone_digits(first_text(row, ["phone", "Phone", "telephone", "phone_number"]))
+    if not business:
+        return "invalid", "missing_business_name"
+    if email and email_evidence:
+        return "email_ready", "public_email_with_source_evidence"
+    if email and not email_evidence:
+        return "enrichment_needed", "email_missing_public_evidence"
+    if phone:
+        return "phone_ready", "public_phone_no_usable_email"
+    if website or source_url:
+        return "enrichment_needed", "identity_has_source_but_missing_email_and_phone"
+    return "unreachable", "identity_without_contact_or_usable_source"
+
+
 def lead_quality_for(row: dict[str, Any], email: str, domain: str) -> dict[str, Any]:
     website = first_text(row, ["website", "Website", "domain", "url"])
-    source_url = first_text(row, ["source_url", "Source URL", "source", "evidence_url", "contact_page"])
+    source_url = first_text(row, ["source_url", "Source URL", "source", "evidence_url", "contact_page", "Evidence URL"])
+    email_evidence = first_text(row, ["email_evidence", "Email Evidence"])
     verified = first_text(row, ["verified_at", "email_verified_at", "verification_status", "email_verification", "verified_public_email"])
     status = first_text(row, ["lead_status", "status", "email_status"]).lower()
     website_domain = _domain_from_url(website)
-    source_domain = _domain_from_url(source_url)
+    evidence_domain = _domain_from_url(email_evidence or source_url)
     reasons: list[str] = []
     if not email:
         return {"email_confidence": "missing", "lead_quality": "missing_email", "quality_reasons": ["missing_email"], "evidence_url": source_url, "website": website}
+    if not email_evidence:
+        return {"email_confidence": "assumed", "lead_quality": "assumed_email_no_public_source", "quality_reasons": ["missing_email_evidence_url"], "evidence_url": source_url, "website": website}
     if verified or "verified" in status:
         confidence = "verified"
         quality = "verified_public_email"
         reasons.append("verification_metadata_present")
-    elif source_url and domain and (domain == website_domain or domain == source_domain or source_domain.endswith(domain) or domain.endswith(source_domain)):
+    elif domain and (domain == website_domain or domain == evidence_domain or evidence_domain.endswith(domain) or domain.endswith(evidence_domain)):
         confidence = "public_unverified"
         quality = "public_source_domain_match"
-        reasons.append("source_url_matches_email_domain")
-    elif source_url:
+        reasons.append("email_evidence_domain_matches_email_domain")
+    else:
         confidence = "public_unverified"
         quality = "public_source_needs_review"
-        reasons.append("source_url_present_domain_not_matched")
-    else:
-        confidence = "assumed"
-        quality = "assumed_email_no_public_source"
-        reasons.append("no_public_source_url")
+        reasons.append("email_evidence_present_domain_not_matched")
     if not website:
         reasons.append("missing_website")
-    return {"email_confidence": confidence, "lead_quality": quality, "quality_reasons": reasons, "evidence_url": source_url, "website": website}
+    return {"email_confidence": confidence, "lead_quality": quality, "quality_reasons": reasons, "evidence_url": email_evidence or source_url, "website": website}
 
 def lead_key_for(campaign_id: str, row: dict[str, Any], source_run_id: str, index: int) -> str:
     explicit = first_text(row, ["canonical_lead_id", "stable_id", "source_platform_id", "osm_id", "place_id"])
@@ -376,37 +412,52 @@ def review_items_from_rows(db: Session, campaign: Campaign, rows: list[dict[str,
     approval_rows = db.scalars(select(LeadApproval).where(LeadApproval.campaign_id == campaign.id).order_by(LeadApproval.updated_at)).all()
     approvals = {item.lead_key: item for item in approval_rows}
     approvals_by_email = {normalize_email(item.email): item for item in approval_rows if item.email}
+    approvals_by_domain = {normalize_email(item.domain): item for item in approval_rows if item.domain}
     suppressed_emails, suppressed_domains = suppression_sets(db, campaign.company_id)
     email_counts: dict[str, int] = {}
     domain_counts: dict[str, int] = {}
+    phone_counts: dict[str, int] = {}
+    business_address_counts: dict[str, int] = {}
     normalized = []
     for index, row in enumerate(rows, start=1):
         email = normalize_email(first_text(row, ["email", "public_email", "verified_public_email", "Public Email"]))
-        domain = domain_from_email(email)
+        domain = domain_from_email(email) or _first_domain_from_row(row)
+        phone = _phone_digits(first_text(row, ["phone", "Phone", "telephone", "phone_number"]))
+        business_address = f"{_normalized_identity_text(first_text(row, ['business_name', 'Business Name', 'business', 'company', 'name']))}|{_normalized_identity_text(first_text(row, ['address', 'Address', 'street_address', 'location', 'formatted_address']))}"
         email_counts[email] = email_counts.get(email, 0) + (1 if email else 0)
         domain_counts[domain] = domain_counts.get(domain, 0) + (1 if domain else 0)
-        normalized.append((index, row, email, domain))
+        phone_counts[phone] = phone_counts.get(phone, 0) + (1 if phone else 0)
+        business_address_counts[business_address] = business_address_counts.get(business_address, 0) + (1 if business_address.strip('|') else 0)
+        normalized.append((index, row, email, domain, phone, business_address))
     items = []
-    for index, row, email, domain in normalized:
+    for index, row, email, domain, phone, business_address in normalized:
         business = first_text(row, ["business_name", "Business Name", "business", "company", "name"])
         key = lead_key_for(campaign.id, row, source_run_id, index)
-        computed = "new"
+        category, category_reason = _lead_category_from_row(row, email)
+        computed = "new" if category == "email_ready" else category
         reason = ""
-        if not email:
-            computed = "missing_email"; reason = "Missing email"
-        elif email in suppressed_emails or domain in suppressed_domains:
-            computed = "do_not_contact"; reason = "Suppression list match"
-        elif email_counts.get(email, 0) > 1 or domain_counts.get(domain, 0) > 1:
-            computed = "duplicate"; reason = "Duplicate email or domain in campaign source"
-        approval = approvals.get(key) or (approvals_by_email.get(email) if email else None)
-        quality = lead_quality_for(row, email, domain)
+        if email in suppressed_emails or domain in suppressed_domains:
+            category = "do_not_contact"; computed = "do_not_contact"; reason = "Suppression list match"
+        elif (email and email_counts.get(email, 0) > 1) or (domain and domain_counts.get(domain, 0) > 1) or (phone and phone_counts.get(phone, 0) > 1) or (business_address.strip('|') and business_address_counts.get(business_address, 0) > 1):
+            category = "duplicate"; computed = "duplicate"; reason = "Duplicate identity in campaign source"
+        elif computed != "new":
+            reason = category_reason.replace("_", " ")
+        approval = approvals.get(key) or (approvals_by_email.get(email) if email else None) or (approvals_by_domain.get(domain) if domain else None)
+        quality = lead_quality_for(row, email, domain_from_email(email))
         if computed == "new" and quality["email_confidence"] == "assumed":
+            category = "enrichment_needed"
             computed = "assumed_email"
             reason = "Email has no public source evidence"
         state = approval.state if approval else computed
-        if computed in {"missing_email", "duplicate", "do_not_contact", "assumed_email"} and state in {"new", "approved_for_outreach"}:
+        if approval and approval.state == "rejected":
+            category = "previously_rejected"
+        elif approval and approval.state == "do_not_contact":
+            category = "do_not_contact"
+        elif approval and approval.state in {"sent", "contacted"}:
+            category = "previously_sent"
+        if computed in {"missing_email", "duplicate", "do_not_contact", "assumed_email", "phone_ready", "enrichment_needed", "unreachable", "invalid"} and state in {"new", "approved_for_outreach"}:
             state = computed
-        can_send = state == "approved_for_outreach" and computed == "new" and quality["email_confidence"] in {"verified", "public_unverified"}
+        can_send = state == "approved_for_outreach" and computed == "new" and category == "email_ready" and quality["email_confidence"] in {"verified", "public_unverified"}
         items.append({
             "lead_key": key,
             "source_run_id": source_run_id,
@@ -415,10 +466,12 @@ def review_items_from_rows(db: Session, campaign: Campaign, rows: list[dict[str,
             "domain": domain,
             "state": state,
             "computed_state": computed,
+            "lead_category": category,
+            "identity_needs_review": str(first_text(row, ["identity_needs_review", "Identity Needs Review"]) or "").lower() == "true",
             "reason": approval.reason if approval else reason,
             "raw": row,
             "can_send": can_send,
-            "approval_eligible": computed == "new" and quality["email_confidence"] in {"verified", "public_unverified"},
+            "approval_eligible": computed == "new" and category == "email_ready" and quality["email_confidence"] in {"verified", "public_unverified"},
             "email_confidence": quality["email_confidence"],
             "lead_quality": quality["lead_quality"],
             "quality_reasons": quality["quality_reasons"],
@@ -428,11 +481,10 @@ def review_items_from_rows(db: Session, campaign: Campaign, rows: list[dict[str,
         })
     return items
 
-
 def upsert_approval(db: Session, campaign: Campaign, item: dict[str, Any], state: str, user_id: str, reason: str = "") -> LeadApproval:
     if state not in LEAD_STATES:
         raise ValueError(f"Unsupported lead state: {state}")
-    if item["computed_state"] in {"missing_email", "duplicate", "do_not_contact", "assumed_email"} and state == "approved_for_outreach":
+    if item["computed_state"] in {"missing_email", "duplicate", "do_not_contact", "assumed_email", "phone_ready", "enrichment_needed", "unreachable", "invalid"} and state == "approved_for_outreach":
         raise ValueError(f"Lead cannot be approved while computed state is {item['computed_state']}")
     if state == "approved_for_outreach" and item.get("email_confidence") not in {"verified", "public_unverified"}:
         raise ValueError("Lead cannot be approved until it has public or verified email evidence")

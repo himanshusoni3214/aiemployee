@@ -224,6 +224,10 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("data-voryx-approved-sending-window", source)
         for label in ["Generate leads", "Approve all eligible leads", "Generate email draft", "Approve all drafts", "Send test", "Send approved emails", "Report"]:
             self.assertIn(label, source)
+        for label in ["Email ready", "Phone ready", "Enrichment needed", "Missing all contact data", "DNC", "Duplicates", "Previously contacted"]:
+            self.assertIn(label, source)
+        self.assertIn("lead_category", source)
+        self.assertIn("identity_needs_review", source)
         for label in ["Approved sending window", "Start time", "End time", "Start date", "End date", "Timezone", "Hourly limit"]:
             self.assertIn(label, source)
         self.assertIn("allowed_sending_days", source)

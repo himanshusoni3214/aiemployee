@@ -155,6 +155,53 @@ class OutreachControlsTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_email_campaign_categories_require_public_email_evidence(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            rows = [
+                {'Business Name': 'Email Ready Cafe', 'Website': 'https://email-ready.example', 'Public Email': 'hello@email-ready.example', 'Email Evidence': 'https://email-ready.example/contact', 'Source URL': 'https://email-ready.example/contact'},
+                {'Business Name': 'Phone Cafe', 'Website': 'https://phone-cafe.example', 'Phone': '(416) 555-0100', 'Source URL': 'https://phone-cafe.example'},
+                {'Business Name': 'Needs Enrichment Cafe', 'Website': 'https://needs-enrichment.example', 'Source URL': 'https://needs-enrichment.example'},
+                {'Business Name': 'Assumed Cafe', 'Public Email': 'owner@assumed-cafe.example'},
+            ]
+            items = review_items_from_rows(db, campaign, rows, 'source')
+            by_name = {item['business']: item for item in items}
+            self.assertEqual(by_name['Email Ready Cafe']['lead_category'], 'email_ready')
+            self.assertTrue(by_name['Email Ready Cafe']['approval_eligible'])
+            self.assertEqual(by_name['Phone Cafe']['lead_category'], 'phone_ready')
+            self.assertFalse(by_name['Phone Cafe']['approval_eligible'])
+            self.assertEqual(by_name['Needs Enrichment Cafe']['lead_category'], 'enrichment_needed')
+            self.assertFalse(by_name['Needs Enrichment Cafe']['approval_eligible'])
+            self.assertEqual(by_name['Assumed Cafe']['lead_category'], 'enrichment_needed')
+            self.assertEqual(by_name['Assumed Cafe']['computed_state'], 'assumed_email')
+            self.assertFalse(by_name['Assumed Cafe']['approval_eligible'])
+            with self.assertRaises(ValueError):
+                upsert_approval(db, campaign, by_name['Phone Cafe'], 'approved_for_outreach', user.id)
+        finally:
+            db.close()
+
+    def test_rejected_and_sent_leads_do_not_return_as_new(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            rejected_row = {'Business Name': 'Rejected Cafe', 'Website': 'https://rejected.example', 'Public Email': 'hello@rejected.example', 'Email Evidence': 'https://rejected.example/contact'}
+            sent_row = {'Business Name': 'Sent Cafe', 'Website': 'https://sent.example', 'Public Email': 'hello@sent.example', 'Email Evidence': 'https://sent.example/contact'}
+            first_items = review_items_from_rows(db, campaign, [rejected_row, sent_row], 'source-a')
+            upsert_approval(db, campaign, first_items[0], 'rejected', user.id, 'bad fit')
+            sent = upsert_approval(db, campaign, first_items[1], 'approved_for_outreach', user.id, 'sent later')
+            sent.state = 'sent'
+            db.flush()
+            refreshed = review_items_from_rows(db, campaign, [rejected_row, sent_row], 'source-b')
+            by_name = {item['business']: item for item in refreshed}
+            self.assertEqual(by_name['Rejected Cafe']['state'], 'rejected')
+            self.assertEqual(by_name['Rejected Cafe']['lead_category'], 'previously_rejected')
+            self.assertEqual(by_name['Sent Cafe']['state'], 'sent')
+            self.assertEqual(by_name['Sent Cafe']['lead_category'], 'previously_sent')
+            self.assertFalse(by_name['Sent Cafe']['approval_eligible'])
+        finally:
+            db.close()
+
     def test_draft_generation_and_send_blockers_are_company_scoped(self):
         db = self.Session()
         try:

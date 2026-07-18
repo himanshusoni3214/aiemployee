@@ -53,7 +53,14 @@ FIELDNAMES = [
     "Why this is a fit for Brew It by Sash",
     "Email Evidence",
     "Lead Status",
+    "Lead Category",
+    "Identity Needs Review",
+    "Lead Quality Reason",
+    "Email Ready",
+    "Phone Ready",
+    "Source Platform ID",
 ]
+BUSINESS_SUFFIX_RE = re.compile(r"\b(inc|incorporated|ltd|limited|llc|corp|corporation|company|co|cafe|coffee|restaurant|bar)\b\.?", re.I)
 
 
 class LinkParser(HTMLParser):
@@ -107,11 +114,110 @@ def domain(url):
     return host
 
 
-def business_key(row):
-    name = clean_text(row.get("Business Name") or row.get("business_name") or row.get("business") or row.get("company")).lower()
-    website = domain(row.get("Website") or row.get("website") or row.get("url") or "")
-    return f"{name}|{website}" if name or website else ""
+def normalize_email_value(value):
+    email = clean_text(value).lower()
+    return email if re.match(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", email) else ""
 
+
+def normalize_phone_value(value):
+    digits = re.sub(r"\D+", "", str(value or ""))
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else ""
+
+
+def normalize_domain_value(value):
+    text = clean_text(value).lower()
+    if not text:
+        return ""
+    if not urlparse(text).scheme:
+        text = "https://" + text
+    host = urlparse(text).netloc.lower()
+    if host.startswith("www."):
+        host = host[4:]
+    return host.split(":", 1)[0]
+
+
+def normalize_business_value(value):
+    text = clean_text(value).lower()
+    text = BUSINESS_SUFFIX_RE.sub(" ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def source_platform_id(row):
+    for key in ("Source Platform ID", "source_platform_id", "osm_id", "place_id", "canonical_lead_id", "stable_id"):
+        value = clean_text(row.get(key))
+        if value:
+            return value
+    return ""
+
+
+def lead_identity_keys(row):
+    keys = set()
+    email = normalize_email_value(row.get("Public Email") or row.get("email") or row.get("public_email") or row.get("verified_public_email"))
+    website = normalize_domain_value(row.get("Website") or row.get("website") or row.get("domain") or row.get("url"))
+    phone = normalize_phone_value(row.get("Phone") or row.get("phone") or row.get("telephone"))
+    business = normalize_business_value(row.get("Business Name") or row.get("business_name") or row.get("business") or row.get("company") or row.get("name"))
+    address = normalize_business_value(row.get("Address") or row.get("address") or row.get("location") or row.get("formatted_address"))
+    platform_id = source_platform_id(row)
+    if platform_id:
+        keys.add(f"source:{platform_id}")
+    if email:
+        keys.add(f"email:{email}")
+    if website:
+        keys.add(f"domain:{website}")
+    if phone:
+        keys.add(f"phone:{phone}")
+    if business and address:
+        keys.add(f"business-address:{business}:{address}")
+    elif business and website:
+        keys.add(f"business-domain:{business}:{website}")
+    elif business and phone:
+        keys.add(f"business-phone:{business}:{phone}")
+    elif business:
+        keys.add(f"business:{business}")
+    return keys
+
+
+def business_key(row):
+    keys = sorted(lead_identity_keys(row))
+    return keys[0] if keys else ""
+
+
+def lead_category(row):
+    business = clean_text(row.get("Business Name") or row.get("business_name") or row.get("business") or row.get("company") or row.get("name"))
+    email = normalize_email_value(row.get("Public Email") or row.get("email") or row.get("public_email") or row.get("verified_public_email"))
+    email_evidence = clean_text(row.get("Email Evidence") or row.get("email_evidence") or "")
+    phone = normalize_phone_value(row.get("Phone") or row.get("phone") or row.get("telephone"))
+    website = normalize_domain_value(row.get("Website") or row.get("website") or row.get("domain") or row.get("url"))
+    evidence = clean_text(row.get("Evidence URL") or row.get("Source URL") or row.get("evidence_url") or row.get("source_url") or "")
+    if not business:
+        return "invalid", "missing_business_name"
+    if email and email_evidence:
+        return "email_ready", "public_email_with_source_evidence"
+    if email and not email_evidence:
+        return "enrichment_needed", "email_missing_public_evidence"
+    if phone:
+        return "phone_ready", "public_phone_no_usable_email"
+    if website or evidence:
+        return "enrichment_needed", "identity_has_source_but_missing_email_and_phone"
+    return "unreachable", "identity_without_contact_or_usable_source"
+
+
+def finalize_lead(row):
+    category, reason = lead_category(row)
+    row["Lead Category"] = category
+    row["Lead Quality Reason"] = reason
+    row["Email Ready"] = "true" if category == "email_ready" else "false"
+    row["Phone Ready"] = "true" if category == "phone_ready" else "false"
+    if "Identity Needs Review" not in row:
+        row["Identity Needs Review"] = "false"
+    if not row.get("Lead Status") or str(row.get("Lead Status")).lower().startswith("generated"):
+        row["Lead Status"] = category
+    for field in FIELDNAMES:
+        row.setdefault(field, "")
+    return row
 
 def find_chrome():
     for candidate in DEFAULT_CHROME_CANDIDATES:
@@ -474,8 +580,10 @@ def business_name_from(title, url):
     title = clean_text(title)
     if title:
         title = re.split(r"\s[-|–]\s| - | \\| ", title)[0].strip()
-    return title or domain(url).split(".")[0].replace("-", " ").title()
-
+        if title:
+            return title, False
+    fallback = domain(url).split(".")[0].replace("-", " ").title()
+    return fallback, True
 
 def fit_reason(args, url, text):
     parts = [args.target_customer or "target customer", args.product_service or args.industry, args.geography]
@@ -502,9 +610,13 @@ def extract_business(chrome, url, args):
     email = ""
     phone = visible_phone(text)
     email_evidence = ""
+    pages_checked = 0
     for current_url in [url] + contact_urls:
+        if pages_checked >= max(1, int(getattr(args, "max_enrichment_pages_per_lead", 5) or 5)):
+            break
         try:
             current_source = source if current_url == url else chrome_dom(chrome, current_url)
+            pages_checked += 1
             current_parser = parse_html(current_source)
             current_text = clean_text(" ".join(current_parser.text_parts))
             emails = visible_emails(current_text)
@@ -518,23 +630,24 @@ def extract_business(chrome, url, args):
                 break
         except Exception:
             continue
-    name = business_name_from(parser.title, url)
+    name, identity_needs_review = business_name_from(parser.title, url)
     if not name or not domain(url):
         return None, "missing_business_identity"
-    return {
+    row = {
         "Business Name": name,
         "Category": "AI Internet Research / Cafe or hospitality lead",
         "Website": f"{urlparse(url).scheme}://{domain(url)}",
         "Public Email": email,
         "Phone": phone,
         "Address": "",
-        "Source URL": evidence_url,
+        "Source URL": url,
         "Evidence URL": evidence_url,
         "Why this is a fit for Brew It by Sash": fit_reason(args, url, text),
         "Email Evidence": email_evidence,
         "Lead Status": "Generated" if email else "Generated - email_missing_or_not_visible",
-    }, ""
-
+        "Identity Needs Review": "true" if identity_needs_review else "false",
+    }
+    return finalize_lead(row), ""
 
 def load_existing_keys(leads_dir):
     keys = set()
@@ -617,115 +730,178 @@ def provider_test(args):
 
 
 def research(args):
+    started_at = time.monotonic()
     config = load_config(args.config)
     chrome = find_chrome()
     leads_dir = Path(args.output_dir)
     existing = load_existing_keys(leads_dir)
+    seen_in_run = set()
     queries = queries_from_config(config)
-    candidates = []
-    for query in queries:
-        for url in search_urls(chrome, query, max_results=max(args.limit * 3, 30)):
-            if url not in candidates:
-                candidates.append(url)
-        if len(candidates) >= max(args.limit * 3, 30):
-            break
     rows = []
     duplicates = 0
     skipped = []
+    invalid = 0
+    queries_attempted = 0
+    pages_opened = 0
+    no_new_unique_queries = 0
+    stop_reason = "sources_exhausted"
+
+    target_type = clean_text(getattr(args, "target_type", "email_ready") or "email_ready")
+    target = int(args.limit or 25)
+    max_pages = int(getattr(args, "max_pages", 150) or 150)
+    max_runtime_seconds = int(getattr(args, "max_runtime_seconds", 900) or 900)
+    no_new_threshold = int(getattr(args, "max_consecutive_no_new_queries", 3) or 3)
+
+    def counts():
+        result = {key: 0 for key in ["email_ready", "phone_ready", "enrichment_needed", "unreachable", "invalid"]}
+        for row in rows:
+            category = row.get("Lead Category") or lead_category(row)[0]
+            result[category] = result.get(category, 0) + 1
+        result["invalid"] += invalid
+        return result
+
+    def target_count():
+        if target_type == "email_ready":
+            return counts().get("email_ready", 0)
+        return len(rows)
+
+    def should_stop():
+        nonlocal stop_reason
+        if target_count() >= target:
+            stop_reason = "target_achieved"
+            return True
+        if pages_opened >= max_pages:
+            stop_reason = "max_pages_reached"
+            return True
+        if time.monotonic() - started_at >= max_runtime_seconds:
+            stop_reason = "max_runtime_reached"
+            return True
+        if no_new_unique_queries >= no_new_threshold:
+            stop_reason = "no_new_unique_leads"
+            return True
+        return False
+
+    def add_lead(lead, source_label):
+        nonlocal duplicates, invalid
+        if not lead:
+            return False
+        lead = finalize_lead(lead)
+        category = lead.get("Lead Category") or "invalid"
+        if category == "invalid":
+            invalid += 1
+            skipped.append({"url": lead.get("Source URL", ""), "business": lead.get("Business Name", ""), "reason": lead.get("Lead Quality Reason", "invalid")})
+            return False
+        keys = lead_identity_keys(lead)
+        if not keys:
+            invalid += 1
+            skipped.append({"url": lead.get("Source URL", ""), "business": lead.get("Business Name", ""), "reason": "missing_stable_identity"})
+            return False
+        if keys.intersection(existing) or keys.intersection(seen_in_run):
+            duplicates += 1
+            return False
+        rows.append(lead)
+        seen_in_run.update(keys)
+        return True
+
     for directory_url in PUBLIC_DIRECTORY_URLS:
+        if should_stop():
+            break
         try:
             directory_source = chrome_dom(chrome, directory_url)
+            pages_opened += 1
             directory_rows, directory_skipped = directory_rows_from_jsonld(chrome, directory_url, directory_source, args)
             skipped.extend(directory_skipped)
             for lead in directory_rows:
-                key = business_key(lead)
-                if not key:
-                    skipped.append({"url": directory_url, "business": lead.get("Business Name", ""), "reason": "missing_key"})
-                    continue
-                if key in existing or key in {business_key(row) for row in rows}:
-                    duplicates += 1
-                    continue
-                rows.append(lead)
-                if len(rows) >= args.limit:
+                add_lead(lead, "directory")
+                if should_stop():
                     break
         except Exception as exc:
             skipped.append({"url": directory_url, "reason": f"directory_jsonld_failed: {exc}"})
-        if len(rows) >= args.limit:
-            break
-    if len(rows) < args.limit:
-        nominatim_rows, nominatim_skipped = rows_from_nominatim(chrome, args, limit=max(args.limit * 2, 25))
+
+    if not should_stop():
+        nominatim_rows, nominatim_skipped = rows_from_nominatim(chrome, args, limit=max(target * 2, 25))
         skipped.extend(nominatim_skipped)
         for lead in nominatim_rows:
-            key = business_key(lead)
-            if not key:
-                skipped.append({"url": lead.get("Source URL", ""), "business": lead.get("Business Name", ""), "reason": "missing_key"})
-                continue
-            if key in existing or key in {business_key(row) for row in rows}:
-                duplicates += 1
-                continue
-            rows.append(lead)
-            if len(rows) >= args.limit:
+            add_lead(lead, "nominatim")
+            if should_stop():
                 break
-    for url in candidates:
-        if len(rows) >= args.limit:
+
+    for query in queries:
+        if should_stop():
             break
-        lead, error = extract_business(chrome, url, args)
-        if not lead:
-            skipped.append({"url": url, "reason": error})
-            continue
-        key = business_key(lead)
-        if not key:
-            skipped.append({"url": url, "reason": "missing_key"})
-            continue
-        if key in existing or key in {business_key(row) for row in rows}:
-            duplicates += 1
-            continue
-        rows.append(lead)
-        if len(rows) >= args.limit:
-            break
+        queries_attempted += 1
+        before = len(rows)
+        candidates = search_urls(chrome, query, max_results=max(target * 4, 40))
+        for url in candidates:
+            if should_stop():
+                break
+            pages_opened += 1
+            lead, error = extract_business(chrome, url, args)
+            if not lead:
+                skipped.append({"url": url, "reason": error})
+                continue
+            add_lead(lead, "search")
+        if len(rows) == before:
+            no_new_unique_queries += 1
+        else:
+            no_new_unique_queries = 0
+
+    if stop_reason == "sources_exhausted" and target_count() >= target:
+        stop_reason = "target_achieved"
+    category_counts = counts()
+    target_achieved = target_count() >= target
+    if target_achieved:
+        status = "completed_target_achieved"
+    elif rows:
+        status = "completed_partial"
+    elif stop_reason == "no_new_unique_leads":
+        status = "no_new_unique_leads"
+    else:
+        status = "completed_partial" if rows else "no_new_unique_leads"
+
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
-    if len(rows) >= args.min_success:
-        output = leads_dir / f"leads_brew_it_browser_{stamp}.csv"
-        write_csv(output, rows)
-        metadata = {
-            "provider": "hermes_native_browser",
-            "output_path": str(output),
-            "lead_count": len(rows),
-            "new_unique_businesses": len(rows),
-            "duplicates_skipped": duplicates,
-            "candidate_urls": len(candidates),
-            "skipped": skipped[:40],
-            "queries": queries,
-            "email_sending": False,
-            "prospect_emails_sent": 0,
-            "generated_at": datetime.now(timezone.utc).isoformat(),
-        }
-        meta_path = output.with_suffix(".metadata.json")
-        meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
-        print(f"HERMES_NATIVE_BROWSER_OUTPUT path={output}")
-        print(f"HERMES_NATIVE_BROWSER_METADATA path={meta_path}")
-        print(f"NEW_UNIQUE_BUSINESSES={len(rows)}")
-        print(f"DUPLICATES_SKIPPED={duplicates}")
-        print("PROSPECT_EMAILS_SENT=0")
-        return 0
-    partial = leads_dir / "partial" / f"partial_bibs_browser_{stamp}.csv"
-    write_csv(partial, rows)
-    partial.with_suffix(".metadata.json").write_text(json.dumps({
+    output_dir = leads_dir if rows else leads_dir / "partial"
+    filename_prefix = "leads_brew_it_browser" if rows else "partial_bibs_browser"
+    output = output_dir / f"{filename_prefix}_{stamp}.csv"
+    write_csv(output, rows)
+    metadata = {
         "provider": "hermes_native_browser",
-        "partial_path": str(partial),
+        "output_path": str(output),
+        "target": target,
+        "target_type": target_type,
+        "target_achieved": target_achieved,
+        "status": status,
+        "stop_reason": stop_reason,
+        "total_discovered": len(rows) + duplicates + invalid,
         "new_unique_businesses": len(rows),
+        "email_ready": category_counts.get("email_ready", 0),
+        "phone_ready": category_counts.get("phone_ready", 0),
+        "enrichment_needed": category_counts.get("enrichment_needed", 0),
+        "unreachable": category_counts.get("unreachable", 0),
+        "invalid": category_counts.get("invalid", 0),
         "duplicates_skipped": duplicates,
-        "candidate_urls": len(candidates),
+        "rejected_skipped": 0,
+        "DNC_skipped": 0,
+        "previously_sent_skipped": 0,
+        "queries_attempted": queries_attempted,
+        "pages_opened": pages_opened,
         "skipped": skipped[:80],
         "queries": queries,
         "email_sending": False,
         "prospect_emails_sent": 0,
-        "error_code": "no_new_unique_leads",
-    }, indent=2, sort_keys=True), encoding="utf-8")
-    print(f"ERROR no_new_unique_leads: found {len(rows)} new unique businesses, minimum required is {args.min_success}. Partial preserved at {partial}", file=sys.stderr)
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+    }
+    meta_path = output.with_suffix(".metadata.json")
+    meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+    print(f"HERMES_NATIVE_BROWSER_OUTPUT path={output}")
+    print(f"HERMES_NATIVE_BROWSER_METADATA path={meta_path}")
+    for key in ["target", "target_type", "target_achieved", "total_discovered", "new_unique_businesses", "email_ready", "phone_ready", "enrichment_needed", "unreachable", "invalid", "duplicates_skipped", "rejected_skipped", "DNC_skipped", "previously_sent_skipped", "queries_attempted", "pages_opened", "stop_reason", "status"]:
+        print(f"{key.upper()}={metadata[key]}")
     print("PROSPECT_EMAILS_SENT=0")
+    if rows:
+        return 0
+    print(f"ERROR no_new_unique_leads: no new unique businesses found. Partial preserved at {output}", file=sys.stderr)
     return 3
-
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Hermes Native Browser Internet Research provider")
@@ -740,6 +916,11 @@ def parse_args():
     parser.add_argument("--exclusions", default="")
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--min-success", type=int, default=10)
+    parser.add_argument("--target-type", default="email_ready")
+    parser.add_argument("--max-runtime-seconds", type=int, default=900)
+    parser.add_argument("--max-pages", type=int, default=150)
+    parser.add_argument("--max-consecutive-no-new-queries", type=int, default=3)
+    parser.add_argument("--max-enrichment-pages-per-lead", type=int, default=5)
     parser.add_argument("--output-dir", default="/opt/data/home/leads")
     parser.add_argument("--config", default="/opt/data/home/leads/bibs_real_lead_source_config.json")
     parser.add_argument("--status-path", default=STATUS_PATH)
@@ -749,8 +930,11 @@ def parse_args():
 
 def main():
     args = parse_args()
-    args.limit = max(1, min(int(args.limit or 25), 50))
+    args.limit = max(1, min(int(args.limit or 25), 100))
     args.min_success = max(1, min(int(args.min_success or 10), args.limit))
+    args.max_runtime_seconds = max(30, min(int(args.max_runtime_seconds or 900), 3600))
+    args.max_pages = max(1, min(int(args.max_pages or 150), 500))
+    args.max_consecutive_no_new_queries = max(1, min(int(args.max_consecutive_no_new_queries or 3), 10))
     if args.provider_test:
         return provider_test(args)
     return research(args)

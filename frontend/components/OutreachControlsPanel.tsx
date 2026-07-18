@@ -2,9 +2,9 @@
 import { useEffect, useState } from 'react';
 import { api } from '../lib/api';
 
-type ReviewItem = { lead_key: string; business?: string; email?: string; domain?: string; state: string; computed_state: string; reason?: string; can_send: boolean; approval_eligible?: boolean; email_confidence?: string; lead_quality?: string; quality_reasons?: string[]; evidence_url?: string; website?: string; raw?: Record<string, any>; history?: any[] };
+type ReviewItem = { lead_key: string; business?: string; email?: string; domain?: string; state: string; computed_state: string; lead_category?: string; identity_needs_review?: boolean; reason?: string; can_send: boolean; approval_eligible?: boolean; email_confidence?: string; lead_quality?: string; quality_reasons?: string[]; evidence_url?: string; website?: string; raw?: Record<string, any>; history?: any[] };
 type Draft = { id: string; lead_key: string; lead_email?: string; business?: string; subject: string; body: string; status: string };
-type LeadFilter = 'active' | 'approved' | 'ready' | 'missing_email' | 'rejected' | 'blocked' | 'all';
+type LeadFilter = 'active' | 'email_ready' | 'approved' | 'phone_ready' | 'enrichment_needed' | 'unreachable' | 'rejected' | 'do_not_contact' | 'duplicate' | 'previously_sent' | 'all';
 type BatchPreview = {
   coverage?: Record<string, number>;
   recipients?: Array<{ lead_key: string; business?: string; email?: string; subject?: string; sender_email?: string; reply_to_email?: string; unsubscribe_text?: string }>;
@@ -49,16 +49,24 @@ function draftMissingRequiredFooter(body: string, unsubscribeText: string) {
   return Boolean(required && !(body || '').includes(required));
 }
 
+function leadCategory(item: ReviewItem) {
+  return item.lead_category || item.computed_state || item.state || '';
+}
+
+function isDefaultEmailLead(item: ReviewItem) {
+  const category = leadCategory(item);
+  return item.state === 'approved_for_outreach' || category === 'email_ready' || (item.approval_eligible && item.email_confidence !== 'assumed');
+}
+
 function filteredCount(items: ReviewItem[], filter: LeadFilter) {
   return items.filter((item) => {
-    const blocked = ['missing_email', 'duplicate', 'assumed_email', 'do_not_contact', 'unsubscribed'].includes(item.state) || ['missing_email', 'duplicate', 'assumed_email', 'do_not_contact'].includes(item.computed_state);
+    const category = leadCategory(item);
     if (filter === 'all') return true;
+    if (filter === 'active') return isDefaultEmailLead(item);
     if (filter === 'approved') return item.state === 'approved_for_outreach';
-    if (filter === 'ready') return item.can_send;
-    if (filter === 'missing_email') return item.state === 'missing_email' || item.computed_state === 'missing_email';
-    if (filter === 'rejected') return item.state === 'rejected';
-    if (filter === 'blocked') return blocked;
-    return item.state !== 'rejected' && !blocked;
+    if (filter === 'email_ready') return category === 'email_ready' || item.can_send || item.approval_eligible;
+    if (filter === 'rejected') return item.state === 'rejected' || category === 'previously_rejected';
+    return category === filter || item.state === filter || item.computed_state === filter;
   }).length;
 }
 
@@ -287,21 +295,27 @@ export function OutreachControlsPanel({
   const limits = batchPreview?.limits || sendStatus?.batch_preview?.limits || {};
   const allReviewItems = review?.items || [];
   function itemIsBlocked(item: ReviewItem) {
-    return ['missing_email', 'duplicate', 'assumed_email', 'do_not_contact', 'unsubscribed'].includes(item.state) || ['missing_email', 'duplicate', 'assumed_email', 'do_not_contact'].includes(item.computed_state);
+    const category = leadCategory(item);
+    return ['duplicate', 'do_not_contact', 'previously_sent', 'previously_rejected', 'unreachable', 'invalid', 'assumed_email'].includes(category) || ['duplicate', 'do_not_contact', 'sent', 'rejected', 'unreachable', 'invalid', 'assumed_email'].includes(item.state);
   }
   const filteredReviewItems = allReviewItems.filter((item) => {
+    const category = leadCategory(item);
     if (leadFilter === 'all') return true;
+    if (leadFilter === 'active') return isDefaultEmailLead(item);
     if (leadFilter === 'approved') return item.state === 'approved_for_outreach';
-    if (leadFilter === 'ready') return item.can_send || Boolean(drafts.find((draft) => draft.lead_key === item.lead_key && draft.status === 'draft_approved'));
-    if (leadFilter === 'missing_email') return item.state === 'missing_email' || item.computed_state === 'missing_email';
-    if (leadFilter === 'rejected') return item.state === 'rejected';
-    if (leadFilter === 'blocked') return itemIsBlocked(item);
-    return item.state !== 'rejected' && !itemIsBlocked(item);
+    if (leadFilter === 'email_ready') return category === 'email_ready' || item.can_send || item.approval_eligible;
+    if (leadFilter === 'rejected') return item.state === 'rejected' || category === 'previously_rejected';
+    return category === leadFilter || item.state === leadFilter || item.computed_state === leadFilter;
   });
   const assumedBlocked = allReviewItems.filter((item) => item.computed_state === 'assumed_email' || item.email_confidence === 'assumed').length;
-  const missingEmail = Number(reviewCounts.missing_email || 0);
-  const rejectedLeads = Number(reviewCounts.rejected || 0);
-  const dncLeads = Number(reviewCounts.do_not_contact || 0);
+  const emailReadyLeads = filteredCount(allReviewItems, 'email_ready');
+  const phoneReadyLeads = filteredCount(allReviewItems, 'phone_ready');
+  const enrichmentNeeded = filteredCount(allReviewItems, 'enrichment_needed');
+  const unreachableLeads = filteredCount(allReviewItems, 'unreachable');
+  const rejectedLeads = filteredCount(allReviewItems, 'rejected');
+  const dncLeads = filteredCount(allReviewItems, 'do_not_contact');
+  const duplicateLeads = filteredCount(allReviewItems, 'duplicate');
+  const previouslySentLeads = filteredCount(allReviewItems, 'previously_sent');
   const readyToEmailFromPool = Number(review?.eligible_count || 0);
   const visibleLeads = filteredReviewItems;
   const showAllLeads = leadFilter === 'all';
@@ -361,7 +375,7 @@ export function OutreachControlsPanel({
         <div>Count source: Canonical Lead Pool from current lead review source</div>
         <div>Latest source file: {review?.source_path || '-'}</div>
         <div>Rows imported: {allReviewItems.length} / Duplicates skipped: {reviewCounts.duplicate || 0} / Assumed blocked: {assumedBlocked}</div>
-        <div>Rejected: {rejectedLeads} / DNC: {dncLeads} / Missing email: {missingEmail} / Approved: {approvedLeadsForActions} / Ready to email: {readyToEmailFromPool}</div>
+        <div>Email ready: {emailReadyLeads} / Phone ready: {phoneReadyLeads} / Enrichment needed: {enrichmentNeeded} / Rejected: {rejectedLeads} / DNC: {dncLeads} / Duplicates: {duplicateLeads} / Approved: {approvedLeadsForActions} / Ready to email: {readyToEmailFromPool}</div>
       </div>
 
       <section className="rounded border border-zinc-800 p-3" data-voryx-lead-review data-voryx-show-all-leads={showAllLeads} data-voryx-show-all-label="Show all {allReviewItems.length} leads">
@@ -373,12 +387,16 @@ export function OutreachControlsPanel({
         </div>
         <div className="mb-2 flex flex-wrap gap-2 text-xs" data-voryx-lead-filters>
           {([
-            ['active', `Active (${filteredCount(allReviewItems, 'active')})`],
+            ['active', `Default (${filteredCount(allReviewItems, 'active')})`],
+            ['email_ready', `Email ready (${emailReadyLeads})`],
             ['approved', `Approved (${reviewCounts.approved_for_outreach || 0})`],
-            ['ready', `Ready (${readyToEmailFromPool})`],
-            ['missing_email', `Missing email (${missingEmail})`],
+            ['phone_ready', `Phone ready (${phoneReadyLeads})`],
+            ['enrichment_needed', `Enrichment needed (${enrichmentNeeded})`],
+            ['unreachable', `Missing all contact data (${unreachableLeads})`],
             ['rejected', `Rejected (${rejectedLeads})`],
-            ['blocked', `Blocked (${assumedBlocked + dncLeads + Number(reviewCounts.duplicate || 0)})`],
+            ['do_not_contact', `DNC (${dncLeads})`],
+            ['duplicate', `Duplicates (${duplicateLeads})`],
+            ['previously_sent', `Previously contacted (${previouslySentLeads})`],
             ['all', `All (${allReviewItems.length})`],
           ] as Array<[LeadFilter, string]>).map(([value, label]) => (
             <button
@@ -409,6 +427,7 @@ export function OutreachControlsPanel({
                 </td>
                 <td>
                   <div>{item.state}{item.reason ? ` / ${item.reason}` : ''}</div>
+                  <div className="text-zinc-500">Category: {leadCategory(item)}{item.identity_needs_review ? ' / identity needs review' : ''}</div>
                   <div className="text-zinc-500">History: {item.history?.length || 0}</div>
                 </td>
                 <td className="space-x-1">

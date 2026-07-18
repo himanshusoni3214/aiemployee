@@ -193,6 +193,49 @@ class HermesJobsJsonExecutorTests(unittest.TestCase):
             self.assertEqual(result["results"]["new_unique_businesses"], 10)
             self.assertEqual(result["results"]["prospect_emails_sent"], 0)
 
+    def test_bibs_native_browser_reports_email_ready_partial_from_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            leads = root / "home" / "leads"
+            leads.mkdir(parents=True)
+            script = leads / "hermes_native_browser_research.py"
+            script.write_text("print('ok')\n", encoding="utf-8")
+            config = leads / "bibs_real_lead_source_config.json"
+            config.write_text(json.dumps({"source_type": "ai_internet_research", "lead_limit": 25}), encoding="utf-8")
+            output = leads / "leads_brew_it_browser_20260718T000000Z.csv"
+            output.write_text("Business Name,Website,Public Email,Email Evidence,Lead Category\nPhone Cafe,https://phone.example,,,phone_ready\nEmail Cafe,https://email.example,hello@email.example,https://email.example/contact,email_ready\n", encoding="utf-8")
+            output.with_suffix('.metadata.json').write_text(json.dumps({
+                "provider": "hermes_native_browser",
+                "output_path": str(output),
+                "target": 25,
+                "target_type": "email_ready",
+                "target_achieved": False,
+                "status": "completed_partial",
+                "stop_reason": "sources_exhausted",
+                "new_unique_businesses": 2,
+                "email_ready": 1,
+                "phone_ready": 1,
+                "enrichment_needed": 0,
+                "unreachable": 0,
+                "invalid": 0,
+                "duplicates_skipped": 0,
+                "prospect_emails_sent": 0,
+            }), encoding="utf-8")
+
+            def fake_run(args, *, cwd):
+                self.assertIn("--target-type", args)
+                self.assertEqual(args[args.index("--target-type") + 1], "email_ready")
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout=f"HERMES_NATIVE_BROWSER_OUTPUT path={output}\nPROSPECT_EMAILS_SENT=0\n", stderr="")
+
+            with patch.object(executor, "DATA_ROOT", root),                 patch.object(executor, "LEADS_DIR", leads),                 patch.object(executor, "CRON_OUTPUT_DIR", root / "cron" / "output"),                 patch.object(executor, "_run", side_effect=fake_run):
+                result = executor.execute_scheduled_jobs_json_task("Generate Leads", {"hermes_job_id": executor.LEAD_RESEARCH_JOB_ID})
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["results"]["status"], "completed_partial")
+            self.assertFalse(result["results"]["target_achieved"])
+            self.assertEqual(result["results"]["email_ready"], 1)
+            self.assertIn("EMAIL_READY_TARGET_PARTIAL=1/25", "\n".join(result["logs"]))
+
     def test_bibs_native_browser_accepts_low_positive_new_unique_count(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

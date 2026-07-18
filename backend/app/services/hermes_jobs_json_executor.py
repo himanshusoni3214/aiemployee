@@ -178,10 +178,58 @@ def _container_path(path: str) -> Path:
 
 
 
+def _normalized_business(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"\b(inc|incorporated|ltd|limited|llc|corp|corporation|company|co|cafe|coffee|restaurant|bar)\b\.?", " ", text)
+    text = re.sub(r"[^a-z0-9]+", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _normalized_domain(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    if not text:
+        return ""
+    text = text.removeprefix("https://").removeprefix("http://").removeprefix("www.")
+    return text.split("/", 1)[0].split(":", 1)[0]
+
+
+def _normalized_phone(value: str | None) -> str:
+    digits = re.sub(r"\D+", "", str(value or ""))
+    if len(digits) == 11 and digits.startswith("1"):
+        digits = digits[1:]
+    return digits if len(digits) == 10 else ""
+
+
+def _business_keys(row: dict[str, str]) -> set[str]:
+    keys: set[str] = set()
+    email = str(row.get("Public Email") or row.get("email") or row.get("public_email") or "").strip().lower()
+    business = _normalized_business(row.get("Business Name") or row.get("business_name") or row.get("business") or row.get("company") or "")
+    website = _normalized_domain(row.get("Website") or row.get("website") or row.get("domain") or "")
+    phone = _normalized_phone(row.get("Phone") or row.get("phone") or "")
+    address = _normalized_business(row.get("Address") or row.get("address") or row.get("location") or "")
+    source_id = str(row.get("Source Platform ID") or row.get("source_platform_id") or row.get("osm_id") or row.get("place_id") or "").strip()
+    if source_id:
+        keys.add(f"source:{source_id}")
+    if email and "@" in email:
+        keys.add(f"email:{email}")
+    if website:
+        keys.add(f"domain:{website}")
+    if phone:
+        keys.add(f"phone:{phone}")
+    if business and address:
+        keys.add(f"business-address:{business}:{address}")
+    elif business and website:
+        keys.add(f"business-domain:{business}:{website}")
+    elif business and phone:
+        keys.add(f"business-phone:{business}:{phone}")
+    elif business:
+        keys.add(f"business:{business}")
+    return keys
+
+
 def _business_key(row: dict[str, str]) -> str:
-    business = str(row.get("Business Name") or row.get("business_name") or row.get("business") or row.get("company") or "").strip().lower()
-    website = str(row.get("Website") or row.get("website") or row.get("domain") or "").strip().lower().removeprefix("https://").removeprefix("http://").removeprefix("www.").split("/", 1)[0]
-    return f"{business}|{website}" if business or website else ""
+    keys = sorted(_business_keys(row))
+    return keys[0] if keys else ""
 
 
 def _existing_bibs_business_keys(exclude: Path | None = None) -> set[str]:
@@ -193,9 +241,9 @@ def _existing_bibs_business_keys(exclude: Path | None = None) -> set[str]:
             import csv
             with path.open(newline="", encoding="utf-8", errors="replace") as handle:
                 for row in csv.DictReader(handle):
-                    key = _business_key(row)
-                    if key:
-                        keys.add(key)
+                    row_keys = _business_keys(row)
+                    if row_keys:
+                        keys.update(row_keys)
         except Exception:
             continue
     return keys
@@ -207,9 +255,9 @@ def _csv_business_keys(path: Path) -> set[str]:
         import csv
         with path.open(newline="", encoding="utf-8", errors="replace") as handle:
             for row in csv.DictReader(handle):
-                key = _business_key(row)
-                if key:
-                    keys.add(key)
+                row_keys = _business_keys(row)
+                if row_keys:
+                    keys.update(row_keys)
     except Exception:
         return set()
     return keys
@@ -315,6 +363,10 @@ def _execute_bibs_native_browser_research(task_type: str, payload: dict[str, Any
         "--exclusions", str(config_payload.get("exclusions") or "franchises, chains, already contacted businesses"),
         "--limit", str(int(payload.get("limit") or config_payload.get("lead_limit") or 25)),
         "--min-success", "1",
+        "--target-type", "email_ready",
+        "--max-runtime-seconds", str(int(config_payload.get("max_runtime_seconds") or 900)),
+        "--max-pages", str(int(config_payload.get("max_pages") or 150)),
+        "--max-consecutive-no-new-queries", str(int(config_payload.get("max_consecutive_no_new_queries") or 3)),
         "--output-dir", str(LEADS_DIR),
         "--config", str(source_config),
         "--no-email",
@@ -322,9 +374,10 @@ def _execute_bibs_native_browser_research(task_type: str, payload: dict[str, Any
     result = _run(args, cwd=LEADS_DIR)
     logs = _logs_from_completed_process(result)
     output_path = _native_browser_output_from_stdout(result.stdout)
+    metadata = _native_browser_metadata_from_output(output_path)
     if result.returncode != 0:
         error_text = _first_error_line(logs) or "Hermes Native Browser research failed"
-        results = {"returncode": result.returncode, "prospect_emails_sent": 0}
+        results = {"returncode": result.returncode, "prospect_emails_sent": 0, **metadata}
         if "no_new_unique_leads" in error_text:
             results["error_code"] = "no_new_unique_leads"
         elif "hermes_native_browser_unavailable" in error_text:
@@ -336,39 +389,49 @@ def _execute_bibs_native_browser_research(task_type: str, payload: dict[str, Any
     if physical_output_path is None or not physical_output_path.exists():
         return _failed("Hermes Native Browser research completed without an output CSV", logs=logs)
     new_keys = _csv_business_keys(physical_output_path)
-    if len(new_keys) < 1:
+    new_unique_businesses = int(metadata.get("new_unique_businesses") or len(new_keys))
+    if new_unique_businesses < 1:
         return _failed(
             "no_new_unique_leads: Hermes Native Browser did not find any new unique businesses.",
-            logs=logs + [f"NEW_UNIQUE_BUSINESSES={len(new_keys)}", "No prospect email sent."],
-            results={"error_code": "no_new_unique_leads", "output_path": str(output_path), "new_unique_businesses": len(new_keys), "prospect_emails_sent": 0},
+            logs=logs + [f"NEW_UNIQUE_BUSINESSES={new_unique_businesses}", "No prospect email sent."],
+            results={"error_code": "no_new_unique_leads", "output_path": str(output_path), "new_unique_businesses": new_unique_businesses, "prospect_emails_sent": 0, **metadata},
         )
     warning_logs = []
-    if len(new_keys) < 10:
-        warning_logs.append(f"LOW_NEW_UNIQUE_BUSINESSES={len(new_keys)}; completed because positive, source-backed new leads were found.")
+    if not metadata.get("target_achieved"):
+        warning_logs.append(f"EMAIL_READY_TARGET_PARTIAL={metadata.get('email_ready', 0)}/{metadata.get('target', '?')}; stop_reason={metadata.get('stop_reason', 'unknown')}")
+    output_results = {
+        "provider": "hermes_native_browser",
+        "output_path": str(output_path),
+        "new_unique_businesses": new_unique_businesses,
+        "sent_count": 0,
+        "prospect_emails_sent": 0,
+        "warning": warning_logs[0] if warning_logs else None,
+        **metadata,
+    }
     output_record = _write_cron_output(
         LEAD_RESEARCH_JOB_ID,
         "BIBS Hermes Native Browser Lead Research",
         task_type,
         payload,
         logs + warning_logs,
-        {"provider": "hermes_native_browser", "output_path": str(output_path), "new_unique_businesses": len(new_keys), "sent_count": 0, "prospect_emails_sent": 0, "warning": warning_logs[0] if warning_logs else None},
+        output_results,
     )
     return {
         "status": "ok",
-        "logs": logs + warning_logs + [f"NEW_UNIQUE_BUSINESSES={len(new_keys)}", f"HERMES_OUTPUT_WRITTEN path={output_record}"],
+        "logs": logs + warning_logs + [f"NEW_UNIQUE_BUSINESSES={new_unique_businesses}", f"EMAIL_READY={output_results.get('email_ready', 0)}", f"HERMES_OUTPUT_WRITTEN path={output_record}"],
         "results": {
             "provider": "hermes_native_browser",
             "hermes_job_id": LEAD_RESEARCH_JOB_ID,
             "output_path": str(output_path),
             "hermes_output_path": str(output_record),
-            "new_unique_businesses": len(new_keys),
+            "new_unique_businesses": new_unique_businesses,
             "warning": warning_logs[0] if warning_logs else None,
             "sent_count": 0,
             "prospect_emails_sent": 0,
             "email_sending": False,
+            **metadata,
         },
     }
-
 
 def _execute_generic_lead_research(hermes_job_id: str, task_type: str, payload: dict[str, Any]) -> dict[str, Any]:
     job = _jobs_json_entry(hermes_job_id)
@@ -629,6 +692,20 @@ def _native_browser_output_from_stdout(stdout: str) -> Path | None:
     if not match:
         return None
     return Path(match.group(1).strip())
+
+
+def _native_browser_metadata_from_output(output_path: Path | None) -> dict[str, Any]:
+    if not output_path:
+        return {}
+    physical_output_path = _container_path(str(output_path))
+    metadata_path = physical_output_path.with_suffix(".metadata.json")
+    if not metadata_path.exists():
+        return {}
+    try:
+        payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+        return payload if isinstance(payload, dict) else {}
+    except Exception:
+        return {}
 
 
 def _arg_value(args: list[str], name: str) -> str:

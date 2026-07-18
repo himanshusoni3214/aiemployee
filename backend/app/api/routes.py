@@ -883,14 +883,31 @@ def campaign_lead_outputs(
 
 
 def _latest_campaign_csv_rows(campaign: Campaign, db: Session) -> tuple[list[dict], str, str | None]:
-    outputs = _latest_lead_outputs(campaign, db, limit=20)
-    csv_output = next((item for item in outputs if item.get('kind') == 'csv'), None)
-    if not csv_output:
+    outputs = [item for item in _latest_lead_outputs(campaign, db, limit=50) if item.get('kind') == 'csv']
+    if not outputs:
         return [], 'none', None
-    path = _hermes_physical_path(csv_output['path'])
-    with path.open(newline='', encoding='utf-8', errors='replace') as handle:
-        rows = list(csv.DictReader(handle))
-    return rows, Path(csv_output['path']).stem, csv_output['path']
+    rows: list[dict] = []
+    seen_keys: set[str] = set()
+    source_paths: list[str] = []
+    for output in outputs:
+        path = _hermes_physical_path(output['path'])
+        if not path.exists():
+            continue
+        source_paths.append(output['path'])
+        source_run_id = Path(output['path']).stem
+        with path.open(newline='', encoding='utf-8', errors='replace') as handle:
+            for index, row in enumerate(csv.DictReader(handle), start=1):
+                key = lead_key_for(campaign.id, row, source_run_id, index)
+                if key in seen_keys:
+                    continue
+                seen_keys.add(key)
+                row = dict(row)
+                row.setdefault('Source File', output['path'])
+                rows.append(row)
+    if not rows:
+        return [], 'none', None
+    latest_path = source_paths[0] if source_paths else None
+    return rows, f"combined_latest_{len(source_paths)}_files", latest_path
 
 
 
