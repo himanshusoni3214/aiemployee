@@ -129,14 +129,14 @@ def _lead_category_from_row(row: dict[str, Any], email: str) -> tuple[str, str]:
     business = first_text(row, ["business_name", "Business Name", "business", "company", "name"])
     website = first_text(row, ["website", "Website", "domain", "url"])
     source_url = first_text(row, ["source_url", "Source URL", "source", "evidence_url", "contact_page", "Evidence URL"])
-    email_evidence = first_text(row, ["email_evidence", "Email Evidence"])
+    email_evidence = first_text(row, ["email_evidence", "Email Evidence"]) or source_url
     phone = _phone_digits(first_text(row, ["phone", "Phone", "telephone", "phone_number"]))
     if not business:
         return "invalid", "missing_business_name"
     if email and email_evidence:
         return "email_ready", "public_email_with_source_evidence"
     if email and not email_evidence:
-        return "enrichment_needed", "email_missing_public_evidence"
+        return "assumed_email", "email_missing_public_evidence"
     if phone:
         return "phone_ready", "public_phone_no_usable_email"
     if website or source_url:
@@ -147,7 +147,7 @@ def _lead_category_from_row(row: dict[str, Any], email: str) -> tuple[str, str]:
 def lead_quality_for(row: dict[str, Any], email: str, domain: str) -> dict[str, Any]:
     website = first_text(row, ["website", "Website", "domain", "url"])
     source_url = first_text(row, ["source_url", "Source URL", "source", "evidence_url", "contact_page", "Evidence URL"])
-    email_evidence = first_text(row, ["email_evidence", "Email Evidence"])
+    email_evidence = first_text(row, ["email_evidence", "Email Evidence"]) or source_url
     verified = first_text(row, ["verified_at", "email_verified_at", "verification_status", "email_verification", "verified_public_email"])
     status = first_text(row, ["lead_status", "status", "email_status"]).lower()
     website_domain = _domain_from_url(website)
@@ -444,7 +444,7 @@ def review_items_from_rows(db: Session, campaign: Campaign, rows: list[dict[str,
             reason = category_reason.replace("_", " ")
         approval = approvals.get(key) or (approvals_by_email.get(email) if email else None) or (approvals_by_domain.get(domain) if domain else None)
         quality = lead_quality_for(row, email, domain_from_email(email))
-        if computed == "new" and quality["email_confidence"] == "assumed":
+        if computed == "assumed_email" or (computed == "new" and quality["email_confidence"] == "assumed"):
             category = "enrichment_needed"
             computed = "assumed_email"
             reason = "Email has no public source evidence"

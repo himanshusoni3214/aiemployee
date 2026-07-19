@@ -219,6 +219,12 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("lead[-_ ]research|lead[-_ ]generation", campaigns)
         self.assertIn("leadSourceCampaignId={leadSourceCampaign?.id}", campaigns)
         self.assertIn("Use approved Lead Research leads or connect this workflow to a lead source", source)
+        self.assertIn("data-voryx-research-status", source)
+        for label in ["Email-ready target", "Email-ready currently available", "Remaining needed", "Existing leads enriched", "Unchanged duplicates", "Enrichment exhausted", "Stop reason", "Last enrichment", "Pages checked"]:
+            self.assertIn(label, source)
+        self.assertIn("research_status", source)
+        self.assertIn("remaining_to_target", source)
+        self.assertIn("existing_enriched", source)
         self.assertIn("data-voryx-email-advanced", source)
         self.assertIn("data-voryx-sender-verification", source)
         self.assertIn("data-voryx-approved-sending-window", source)

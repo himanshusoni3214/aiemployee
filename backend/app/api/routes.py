@@ -910,6 +910,75 @@ def _latest_campaign_csv_rows(campaign: Campaign, db: Session) -> tuple[list[dic
     return rows, f"combined_latest_{len(source_paths)}_files", latest_path
 
 
+def _latest_research_metadata(campaign: Campaign, db: Session) -> dict:
+    candidates: list[Path] = []
+    outputs = [item for item in _latest_lead_outputs(campaign, db, limit=10) if item.get('kind') == 'csv']
+    for output in outputs:
+        metadata_path = output.get('metadata_path')
+        if not metadata_path:
+            continue
+        physical = _hermes_physical_path(metadata_path)
+        if physical.exists():
+            candidates.append(physical)
+    if campaign.id == BIBS_LEAD_CAMPAIGN_ID:
+        partial_dir = _hermes_physical_path('/opt/data/home/leads/partial')
+        if partial_dir.exists():
+            candidates.extend(partial_dir.glob('partial_bibs_browser_*.metadata.json'))
+    for physical in sorted(set(candidates), key=lambda item: item.stat().st_mtime if item.exists() else 0, reverse=True):
+        try:
+            payload = json.loads(physical.read_text(encoding='utf-8'))
+            if isinstance(payload, dict):
+                return payload
+        except Exception:
+            continue
+    return {}
+
+
+def _research_status_with_review(campaign: Campaign, db: Session, items: list[dict], counts: dict[str, int]) -> dict:
+    status = dict(_latest_research_metadata(campaign, db) or {})
+    approved_unsent = sum(1 for item in items if item.get('state') == 'approved_for_outreach' and item.get('can_send'))
+    draft_ready_unsent = db.scalar(
+        select(func.count())
+        .select_from(OutreachDraft)
+        .where(OutreachDraft.campaign_id == campaign.id, OutreachDraft.status.in_(['draft_approved', 'draft_needs_review', 'draft_created']))
+    ) or 0
+    sent_events = db.scalar(
+        select(func.count())
+        .select_from(OutreachEvent)
+        .where(OutreachEvent.campaign_id == campaign.id, OutreachEvent.status.in_(['sent', 'delivered']))
+    ) or 0
+    status.update({
+        'approved_unsent': int(approved_unsent),
+        'draft_ready_unsent': int(draft_ready_unsent),
+        'review_rejected': int(counts.get('rejected', 0) + counts.get('previously_rejected', 0)),
+        'review_do_not_contact': int(counts.get('do_not_contact', 0)),
+        'review_sent': int(sent_events + counts.get('previously_sent', 0)),
+        'previously_sent_skipped': int(sent_events + counts.get('previously_sent', 0)),
+        'DNC_skipped': int(counts.get('do_not_contact', 0)),
+        'rejected_skipped': int(counts.get('rejected', 0) + counts.get('previously_rejected', 0)),
+    })
+    return status
+
+
+def _review_counts(items: list[dict]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    category_counts: dict[str, int] = {}
+    for item in items:
+        counts[item['state']] = counts.get(item['state'], 0) + 1
+        category = str(item.get('lead_category') or item.get('computed_state') or item.get('state') or '')
+        if category:
+            category_counts[category] = category_counts.get(category, 0) + 1
+    counts['email_ready'] = category_counts.get('email_ready', 0)
+    counts['phone_ready'] = category_counts.get('phone_ready', 0)
+    counts['enrichment_needed'] = category_counts.get('enrichment_needed', 0)
+    counts['enrichment_exhausted'] = category_counts.get('enrichment_exhausted', 0)
+    counts['unchanged_duplicate'] = category_counts.get('duplicate', 0)
+    counts['previously_rejected'] = category_counts.get('previously_rejected', 0)
+    counts['previously_sent'] = category_counts.get('previously_sent', 0)
+    counts['do_not_contact'] = category_counts.get('do_not_contact', 0)
+    return counts
+
+
 
 def _lead_status_from_review_item(item: dict) -> LeadStatus:
     state = str(item.get("state") or "").lower()
@@ -1126,12 +1195,11 @@ def campaign_lead_review(campaign_id: str, db: Session=Depends(get_db), user: Us
     campaign = db.get(Campaign, campaign_id)
     if not campaign: raise HTTPException(404, 'Campaign not found')
     items, source_path = _campaign_review_items(db, campaign)
-    counts: dict[str, int] = {}
-    for item in items:
-        counts[item['state']] = counts.get(item['state'], 0) + 1
+    counts = _review_counts(items)
+    research_status = _research_status_with_review(campaign, db, items, counts)
     lead_pool = _sync_canonical_lead_pool(db, campaign, items, source_path)
     db.commit()
-    return {'campaign_id': campaign.id, 'company_id': campaign.company_id, 'source_path': source_path, 'items': items, 'counts': counts, 'eligible_count': sum(1 for item in items if item.get('can_send')), 'approval_eligible_count': sum(1 for item in items if item.get('approval_eligible')), 'canonical_lead_pool': lead_pool}
+    return {'campaign_id': campaign.id, 'company_id': campaign.company_id, 'source_path': source_path, 'items': items, 'counts': counts, 'research_status': research_status, 'eligible_count': sum(1 for item in items if item.get('can_send')), 'approval_eligible_count': sum(1 for item in items if item.get('approval_eligible')), 'canonical_lead_pool': lead_pool}
 
 
 @router.post('/campaigns/{campaign_id}/lead-review/{lead_key}/{action}')
@@ -1374,13 +1442,12 @@ def sales_employee_find_leads(campaign_id: str, db: Session=Depends(get_db), use
     review_summary = {'source_path': None, 'items': 0, 'counts': {}, 'canonical_lead_pool': {'created': 0, 'updated': 0, 'total': 0}}
     if job.status == JobStatus.completed:
         items, source_path = _campaign_review_items(db, campaign)
-        counts: dict[str, int] = {}
-        for item in items:
-            counts[item['state']] = counts.get(item['state'], 0) + 1
+        counts = _review_counts(items)
         review_summary = {
             'source_path': source_path,
             'items': len(items),
             'counts': counts,
+            'research_status': _research_status_with_review(campaign, db, items, counts),
             'canonical_lead_pool': _sync_canonical_lead_pool(db, campaign, items, source_path),
         }
     log(db, 'AI Sales Employee Find Leads', 'Campaign', campaign.id, campaign.company_id, user.id, {'job_id': job.id, 'hermes_job_id': employee.hermes_job_id, 'status': job.status.value, 'prospect_emails_sent': 0})

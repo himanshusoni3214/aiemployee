@@ -84,7 +84,7 @@ export function OutreachControlsPanel({
   reportHref?: string;
 }) {
   const [settings, setSettings] = useState<any>(null);
-  const [review, setReview] = useState<{ items: ReviewItem[]; counts: Record<string, number>; eligible_count: number; source_path?: string; approval_eligible_count?: number } | null>(null);
+  const [review, setReview] = useState<{ items: ReviewItem[]; counts: Record<string, number>; eligible_count: number; source_path?: string; approval_eligible_count?: number; research_status?: Record<string, any> } | null>(null);
   const [drafts, setDrafts] = useState<Draft[]>([]);
   const [sendStatus, setSendStatus] = useState<any>(null);
   const [batchPreview, setBatchPreview] = useState<BatchPreview | null>(null);
@@ -294,6 +294,7 @@ export function OutreachControlsPanel({
   const windowInfo = batchPreview?.window || sendStatus?.batch_preview?.window || {};
   const limits = batchPreview?.limits || sendStatus?.batch_preview?.limits || {};
   const allReviewItems = review?.items || [];
+  const researchStatus = review?.research_status || {};
   function itemIsBlocked(item: ReviewItem) {
     const category = leadCategory(item);
     return ['duplicate', 'do_not_contact', 'previously_sent', 'previously_rejected', 'unreachable', 'invalid', 'assumed_email'].includes(category) || ['duplicate', 'do_not_contact', 'sent', 'rejected', 'unreachable', 'invalid', 'assumed_email'].includes(item.state);
@@ -371,11 +372,14 @@ export function OutreachControlsPanel({
       </div>
       {showEmailWorkflow ? <div className="rounded border border-amber-900 bg-amber-950/20 p-2 text-xs text-amber-200">Send only to verified or publicly evidenced business inboxes. Assumed emails without source evidence stay blocked from drafts and sending.</div> : null}
       {showEmailWorkflow && !canSend && readyToSend > 0 ? <div className="rounded border border-amber-900 bg-amber-950/20 p-2 text-xs text-amber-200">Send is blocked: {blocker || 'readiness checks are incomplete'}. {windowInfo?.allowed === false ? `Allowed window: ${formatWindow(windowInfo)}. Next allowed send: ${windowInfo.next_allowed_send_at || '-'}.` : null}</div> : null}
-      <div className="rounded border border-zinc-800 p-2 text-xs text-zinc-400" data-voryx-count-diagnostics>
+      <div className="rounded border border-zinc-800 p-2 text-xs text-zinc-400" data-voryx-count-diagnostics data-voryx-research-status>
         <div>Count source: Canonical Lead Pool from current lead review source</div>
         <div>Latest source file: {review?.source_path || '-'}</div>
-        <div>Rows imported: {allReviewItems.length} / Duplicates skipped: {reviewCounts.duplicate || 0} / Assumed blocked: {assumedBlocked}</div>
-        <div>Email ready: {emailReadyLeads} / Phone ready: {phoneReadyLeads} / Enrichment needed: {enrichmentNeeded} / Rejected: {rejectedLeads} / DNC: {dncLeads} / Duplicates: {duplicateLeads} / Approved: {approvedLeadsForActions} / Ready to email: {readyToEmailFromPool}</div>
+        <div>Email-ready target: {researchStatus.target ?? 25} / Email-ready currently available: {researchStatus.email_ready_after ?? emailReadyLeads} / Remaining needed: {researchStatus.remaining_to_target ?? Math.max(0, Number(researchStatus.target ?? 25) - emailReadyLeads)}</div>
+        <div>New businesses this run: {researchStatus.new_unique_created ?? researchStatus.new_unique_businesses ?? 0} / Existing leads enriched: {researchStatus.existing_enriched ?? 0} / Unchanged duplicates: {researchStatus.unchanged_duplicates ?? reviewCounts.duplicate ?? 0}</div>
+        <div>Phone-ready: {phoneReadyLeads} / Enrichment needed: {enrichmentNeeded} / Enrichment exhausted: {researchStatus.enrichment_exhausted ?? 0} / Rejected/DNC/sent skipped: {Number(researchStatus.rejected_skipped || 0) + Number(researchStatus.DNC_skipped || 0) + Number(researchStatus.previously_sent_skipped || 0)}</div>
+        <div>Stop reason: {researchStatus.stop_reason || '-'} / Next recommended action: {nextStep}</div>
+        <div>Rows imported: {allReviewItems.length} / Assumed blocked: {assumedBlocked} / Approved: {approvedLeadsForActions} / Ready to email: {readyToEmailFromPool}</div>
       </div>
 
       <section className="rounded border border-zinc-800 p-3" data-voryx-lead-review data-voryx-show-all-leads={showAllLeads} data-voryx-show-all-label="Show all {allReviewItems.length} leads">
@@ -428,6 +432,7 @@ export function OutreachControlsPanel({
                 <td>
                   <div>{item.state}{item.reason ? ` / ${item.reason}` : ''}</div>
                   <div className="text-zinc-500">Category: {leadCategory(item)}{item.identity_needs_review ? ' / identity needs review' : ''}</div>
+                  {leadCategory(item) === 'enrichment_needed' ? <div className="text-zinc-500">Missing: {item.raw?.['Missing Fields'] || 'public_email'} / Last enrichment: {item.raw?.['Last Enrichment Attempt'] || '-'} / Pages checked: {item.raw?.['Pages Checked'] || '0'} / Last error: {item.raw?.['Last Error'] || '-'}</div> : null}
                   <div className="text-zinc-500">History: {item.history?.length || 0}</div>
                 </td>
                 <td className="space-x-1">

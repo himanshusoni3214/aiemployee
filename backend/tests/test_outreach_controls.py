@@ -81,7 +81,7 @@ class OutreachControlsTests(unittest.TestCase):
             items = review_items_from_rows(db, campaign, rows, 'source')
             states = {item['business']: item['state'] for item in items}
             self.assertEqual(states['A Cafe'], 'new')
-            self.assertEqual(states['Missing Cafe'], 'missing_email')
+            self.assertEqual(states['Missing Cafe'], 'unreachable')
             self.assertEqual(states['Dup One'], 'duplicate')
             self.assertEqual(states['Blocked'], 'do_not_contact')
             approved = upsert_approval(db, campaign, items[0], 'approved_for_outreach', user.id, 'approved')

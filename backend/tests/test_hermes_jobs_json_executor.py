@@ -2,12 +2,98 @@ import tempfile
 import unittest
 import json
 import subprocess
+import importlib.util
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from app.services import hermes_jobs_json_executor as executor
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT
 
+
+
+
+def load_native_browser_module():
+    path = Path(__file__).resolve().parents[1] / 'app' / 'assets' / 'hermes_native_browser_research.py'
+    spec = importlib.util.spec_from_file_location('hermes_native_browser_research_test', path)
+    module = importlib.util.module_from_spec(spec)
+    assert spec and spec.loader
+    spec.loader.exec_module(module)
+    return module
+
+
+class HermesNativeBrowserTopUpTests(unittest.TestCase):
+    def test_merge_lead_upgrades_existing_missing_email_to_email_ready(self):
+        module = load_native_browser_module()
+        existing = {
+            'Business Name': 'Cafe Enrich',
+            'Website': 'https://cafe-enrich.example',
+            'Public Email': '',
+            'Phone': '',
+            'Source URL': 'https://directory.example/cafe-enrich',
+            'Evidence URL': 'https://directory.example/cafe-enrich',
+            'Lead Category': 'enrichment_needed',
+        }
+        incoming = {
+            'Business Name': 'Cafe Enrich',
+            'Website': 'https://cafe-enrich.example',
+            'Public Email': 'hello@cafe-enrich.example',
+            'Email Evidence': 'https://cafe-enrich.example/contact',
+            'Phone': '416-555-0100',
+            'Source URL': 'https://cafe-enrich.example/contact',
+            'Evidence URL': 'https://cafe-enrich.example/contact',
+        }
+        merged, improved, fields = module.merge_lead(existing, incoming, 'unit-test')
+        self.assertTrue(improved)
+        self.assertIn('Public Email', fields)
+        self.assertEqual(merged['Lead Category'], 'email_ready')
+        self.assertEqual(merged['Public Email'], 'hello@cafe-enrich.example')
+        self.assertEqual(merged['Email Evidence'], 'https://cafe-enrich.example/contact')
+        self.assertIn('unit-test', merged['Evidence History'])
+
+    def test_active_email_ready_count_excludes_blocked_rows(self):
+        module = load_native_browser_module()
+        rows = [
+            {'Business Name': 'Ready', 'Public Email': 'hello@ready.example', 'Email Evidence': 'https://ready.example/contact', 'Lead Category': 'email_ready'},
+            {'Business Name': 'Rejected', 'Public Email': 'no@rejected.example', 'Email Evidence': 'https://rejected.example/contact', 'Lead Category': 'email_ready', 'Lead Status': 'rejected'},
+            {'Business Name': 'Sent', 'Public Email': 'sent@sent.example', 'Email Evidence': 'https://sent.example/contact', 'Lead Category': 'email_ready', 'Lead Status': 'sent'},
+        ]
+        self.assertEqual(module.active_email_ready_count(rows), 1)
+
+    def test_research_returns_success_when_email_ready_target_already_met(self):
+        module = load_native_browser_module()
+        with tempfile.TemporaryDirectory() as tmp:
+            leads_dir = Path(tmp)
+            rows = ["Business Name,Website,Public Email,Email Evidence,Lead Category"]
+            for index in range(25):
+                rows.append(
+                    f"Ready Cafe {index},https://ready-{index}.example,hello{index}@ready.example,https://ready-{index}.example/contact,email_ready"
+                )
+            (leads_dir / "leads_brew_it_browser_existing.csv").write_text("\n".join(rows) + "\n", encoding="utf-8")
+            args = SimpleNamespace(
+                config="",
+                output_dir=str(leads_dir),
+                limit=25,
+                target_type="email_ready",
+                max_pages=10,
+                max_runtime_seconds=30,
+                max_consecutive_no_new_queries=1,
+                max_enrichment_pages_per_lead=5,
+                exclusions="",
+                product_service="coffee",
+                industry="coffee",
+                target_customer="cafes",
+                geography="Toronto",
+            )
+            with patch.object(module, "find_chrome", return_value="/bin/true"):
+                code = module.research(args)
+            self.assertEqual(code, 0)
+            metadata_path = next((leads_dir / "partial").glob("partial_bibs_browser_*.metadata.json"))
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertTrue(metadata["target_achieved"])
+            self.assertEqual(metadata["email_ready_before"], 25)
+            self.assertEqual(metadata["email_ready_added"], 0)
+            self.assertEqual(metadata["prospect_emails_sent"], 0)
 
 class HermesJobsJsonExecutorTests(unittest.TestCase):
     def setUp(self):
@@ -236,6 +322,47 @@ class HermesJobsJsonExecutorTests(unittest.TestCase):
             self.assertEqual(result["results"]["email_ready"], 1)
             self.assertIn("EMAIL_READY_TARGET_PARTIAL=1/25", "\n".join(result["logs"]))
 
+    def test_bibs_native_browser_zero_new_is_ok_when_target_already_achieved(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            leads = root / "home" / "leads"
+            leads.mkdir(parents=True)
+            script = leads / "hermes_native_browser_research.py"
+            script.write_text("print('ok')\n", encoding="utf-8")
+            config = leads / "bibs_real_lead_source_config.json"
+            config.write_text(json.dumps({"source_type": "ai_internet_research", "lead_limit": 25}), encoding="utf-8")
+            output = leads / "partial" / "partial_bibs_browser_20260719T000000Z.csv"
+            output.parent.mkdir()
+            output.write_text("Business Name,Website,Public Email,Email Evidence,Lead Category\n", encoding="utf-8")
+            output.with_suffix('.metadata.json').write_text(json.dumps({
+                "provider": "hermes_native_browser",
+                "output_path": str(output),
+                "target": 25,
+                "target_type": "email_ready",
+                "target_achieved": True,
+                "status": "completed_target_achieved",
+                "stop_reason": "target_achieved",
+                "new_unique_businesses": 0,
+                "email_ready_before": 25,
+                "email_ready_added": 0,
+                "email_ready_after": 25,
+                "prospect_emails_sent": 0,
+            }), encoding="utf-8")
+
+            def fake_run(args, *, cwd):
+                return subprocess.CompletedProcess(args=args, returncode=0, stdout=f"HERMES_NATIVE_BROWSER_OUTPUT path={output}\nPROSPECT_EMAILS_SENT=0\n", stderr="")
+
+            with patch.object(executor, "DATA_ROOT", root), \
+                patch.object(executor, "LEADS_DIR", leads), \
+                patch.object(executor, "CRON_OUTPUT_DIR", root / "cron" / "output"), \
+                patch.object(executor, "_run", side_effect=fake_run):
+                result = executor.execute_scheduled_jobs_json_task("Generate Leads", {"hermes_job_id": executor.LEAD_RESEARCH_JOB_ID})
+
+            self.assertEqual(result["status"], "ok")
+            self.assertEqual(result["results"]["new_unique_businesses"], 0)
+            self.assertTrue(result["results"]["target_achieved"])
+            self.assertEqual(result["results"]["prospect_emails_sent"], 0)
+
     def test_bibs_native_browser_accepts_low_positive_new_unique_count(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -264,7 +391,7 @@ class HermesJobsJsonExecutorTests(unittest.TestCase):
 
             self.assertEqual(result["status"], "ok")
             self.assertEqual(result["results"]["new_unique_businesses"], 3)
-            self.assertIn("LOW_NEW_UNIQUE_BUSINESSES=3", "\n".join(result["logs"]))
+            self.assertIn("EMAIL_READY_TARGET_PARTIAL", "\n".join(result["logs"]))
             self.assertEqual(result["results"]["prospect_emails_sent"], 0)
 
 if __name__ == "__main__":

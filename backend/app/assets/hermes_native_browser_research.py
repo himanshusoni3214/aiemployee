@@ -59,6 +59,13 @@ FIELDNAMES = [
     "Email Ready",
     "Phone Ready",
     "Source Platform ID",
+    "Evidence History",
+    "Enrichment Status",
+    "Missing Fields",
+    "Last Enrichment Attempt",
+    "Pages Checked",
+    "Last Error",
+    "Source File",
 ]
 BUSINESS_SUFFIX_RE = re.compile(r"\b(inc|incorporated|ltd|limited|llc|corp|corporation|company|co|cafe|coffee|restaurant|bar)\b\.?", re.I)
 
@@ -218,6 +225,97 @@ def finalize_lead(row):
     for field in FIELDNAMES:
         row.setdefault(field, "")
     return row
+
+
+def missing_fields(row):
+    missing = []
+    if not clean_text(row.get("Business Name")):
+        missing.append("business_name")
+    if not normalize_email_value(row.get("Public Email")):
+        missing.append("public_email")
+    if normalize_email_value(row.get("Public Email")) and not clean_text(row.get("Email Evidence")):
+        missing.append("email_evidence")
+    if not normalize_phone_value(row.get("Phone")):
+        missing.append("phone")
+    if not normalize_domain_value(row.get("Website")):
+        missing.append("website")
+    return missing
+
+
+def evidence_entry(row, source):
+    payload = {
+        "at": datetime.now(timezone.utc).isoformat(),
+        "source": source,
+        "source_url": clean_text(row.get("Source URL")),
+        "evidence_url": clean_text(row.get("Evidence URL")),
+        "email_evidence": clean_text(row.get("Email Evidence")),
+        "category": row.get("Lead Category") or lead_category(row)[0],
+    }
+    return {k: v for k, v in payload.items() if v}
+
+
+def _history_list(value):
+    if not value:
+        return []
+    try:
+        parsed = json.loads(value)
+        return parsed if isinstance(parsed, list) else []
+    except Exception:
+        return []
+
+
+def merge_lead(existing_row, incoming_row, source_label):
+    existing = finalize_lead(dict(existing_row or {}))
+    incoming = finalize_lead(dict(incoming_row or {}))
+    merged = dict(existing)
+    changed_fields = []
+    better_fields = [
+        "Public Email",
+        "Email Evidence",
+        "Phone",
+        "Website",
+        "Address",
+        "Business Name",
+        "Source URL",
+        "Evidence URL",
+        "Source Platform ID",
+    ]
+    for field in better_fields:
+        old = clean_text(merged.get(field))
+        new = clean_text(incoming.get(field))
+        if new and not old:
+            merged[field] = new
+            changed_fields.append(field)
+        elif new and old and new != old and field in {"Email Evidence", "Evidence URL", "Source URL"}:
+            history = _history_list(merged.get("Evidence History"))
+            history.append({"field": field, "previous": old, "replacement": new, "at": datetime.now(timezone.utc).isoformat()})
+            merged["Evidence History"] = json.dumps(history[-20:], sort_keys=True)
+            merged[field] = new
+            changed_fields.append(field)
+    history = _history_list(merged.get("Evidence History"))
+    entry = evidence_entry(incoming, source_label)
+    if entry and entry not in history:
+        history.append(entry)
+        merged["Evidence History"] = json.dumps(history[-20:], sort_keys=True)
+    before_category = existing.get("Lead Category") or lead_category(existing)[0]
+    merged = finalize_lead(merged)
+    after_category = merged.get("Lead Category") or lead_category(merged)[0]
+    merged["Missing Fields"] = ",".join(missing_fields(merged))
+    merged["Last Enrichment Attempt"] = datetime.now(timezone.utc).isoformat()
+    merged["Enrichment Status"] = "enriched" if changed_fields or before_category != after_category else clean_text(existing.get("Enrichment Status")) or "unchanged"
+    return merged, bool(changed_fields or before_category != after_category), changed_fields
+
+
+def active_email_ready_count(rows):
+    blocked = {"previously_rejected", "do_not_contact", "previously_sent", "duplicate", "invalid"}
+    count = 0
+    for row in rows:
+        row = finalize_lead(dict(row))
+        category = row.get("Lead Category") or lead_category(row)[0]
+        status = clean_text(row.get("Lead Status")).lower()
+        if category == "email_ready" and status not in blocked and status not in {"rejected", "sent", "do_not_contact", "unsubscribed"}:
+            count += 1
+    return count
 
 def find_chrome():
     for candidate in DEFAULT_CHROME_CANDIDATES:
@@ -649,18 +747,26 @@ def extract_business(chrome, url, args):
     }
     return finalize_lead(row), ""
 
-def load_existing_keys(leads_dir):
-    keys = set()
-    for path in Path(leads_dir).glob("leads_brew_it*.csv"):
+def load_existing_rows(leads_dir):
+    by_key = {}
+    rows = []
+    for path in sorted(Path(leads_dir).glob("leads_brew_it*.csv"), key=lambda item: item.stat().st_mtime, reverse=True):
         try:
             with path.open(newline="", encoding="utf-8", errors="replace") as handle:
                 for row in csv.DictReader(handle):
-                    key = business_key(row)
-                    if key:
-                        keys.add(key)
+                    row = finalize_lead(dict(row))
+                    row.setdefault("Source File", str(path))
+                    rows.append(row)
+                    for key in lead_identity_keys(row):
+                        by_key.setdefault(key, row)
         except Exception:
             continue
-    return keys
+    return by_key, rows
+
+
+def load_existing_keys(leads_dir):
+    by_key, _rows = load_existing_rows(leads_dir)
+    return set(by_key.keys())
 
 
 def load_config(path):
@@ -671,14 +777,20 @@ def load_config(path):
 
 def queries_from_config(config):
     plan = config.get("source_plan") if isinstance(config.get("source_plan"), dict) else {}
-    queries = plan.get("search_queries") if isinstance(plan.get("search_queries"), list) else []
-    return [clean_text(q) for q in queries if clean_text(q)] or DEFAULT_QUERIES
+    queries = [clean_text(q) for q in (plan.get("search_queries") if isinstance(plan.get("search_queries"), list) else []) if clean_text(q)] or list(DEFAULT_QUERIES)
+    geographies = ["Toronto", "Scarborough", "North York", "Etobicoke", "Mississauga", "Brampton", "Markham", "Vaughan", "Richmond Hill", "Pickering", "Ajax", "Oakville", "Burlington"]
+    targets = ["independent cafe", "coffee roaster", "espresso bar", "bakery cafe", "Ethiopian restaurant", "Eritrean restaurant", "boutique grocery", "specialty food store", "hotel food and beverage", "catering company", "restaurant coffee program", "wholesale coffee buyer"]
+    for geo in geographies:
+        for target in targets:
+            queries.append(f"{geo} {target} public contact email")
+            queries.append(f"{geo} {target} website contact page")
+    return list(dict.fromkeys(q for q in queries if q))
 
 
 def write_csv(path, rows):
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", newline="", encoding="utf-8") as handle:
-        writer = csv.DictWriter(handle, fieldnames=FIELDNAMES)
+        writer = csv.DictWriter(handle, fieldnames=FIELDNAMES, extrasaction="ignore")
         writer.writeheader()
         writer.writerows(rows)
 
@@ -734,40 +846,56 @@ def research(args):
     config = load_config(args.config)
     chrome = find_chrome()
     leads_dir = Path(args.output_dir)
-    existing = load_existing_keys(leads_dir)
+    existing_by_key, existing_rows = load_existing_rows(leads_dir)
     seen_in_run = set()
     queries = queries_from_config(config)
     rows = []
-    duplicates = 0
-    skipped = []
+    unchanged_duplicates = 0
     invalid = 0
+    skipped = []
     queries_attempted = 0
     pages_opened = 0
-    no_new_unique_queries = 0
+    no_progress_queries = 0
     stop_reason = "sources_exhausted"
+    new_unique_created = 0
+    existing_enriched = 0
+    enrichment_attempted = 0
+    enrichment_successful = 0
+    new_email_ready_created = 0
+    email_ready_upgraded_existing = 0
+    enriched_existing_ids = set()
+    email_ready_upgrade_ids = set()
+    rejected_skipped = 0
+    dnc_skipped = 0
+    previously_sent_skipped = 0
 
     target_type = clean_text(getattr(args, "target_type", "email_ready") or "email_ready")
     target = int(args.limit or 25)
     max_pages = int(getattr(args, "max_pages", 150) or 150)
     max_runtime_seconds = int(getattr(args, "max_runtime_seconds", 900) or 900)
-    no_new_threshold = int(getattr(args, "max_consecutive_no_new_queries", 3) or 3)
+    no_progress_threshold = int(getattr(args, "max_consecutive_no_new_queries", 3) or 3)
+    email_ready_before = active_email_ready_count(existing_rows)
+    remaining_needed = max(0, target - email_ready_before) if target_type == "email_ready" else target
 
-    def counts():
-        result = {key: 0 for key in ["email_ready", "phone_ready", "enrichment_needed", "unreachable", "invalid"]}
+    def category_counts():
+        result = {key: 0 for key in ["email_ready", "phone_ready", "enrichment_needed", "unreachable", "invalid", "enrichment_exhausted"]}
         for row in rows:
             category = row.get("Lead Category") or lead_category(row)[0]
+            if clean_text(row.get("Enrichment Status")) == "enrichment_exhausted":
+                result["enrichment_exhausted"] += 1
             result[category] = result.get(category, 0) + 1
         result["invalid"] += invalid
         return result
 
-    def target_count():
-        if target_type == "email_ready":
-            return counts().get("email_ready", 0)
-        return len(rows)
+    def email_ready_added():
+        return new_email_ready_created + email_ready_upgraded_existing
+
+    def email_ready_after():
+        return email_ready_before + email_ready_added()
 
     def should_stop():
         nonlocal stop_reason
-        if target_count() >= target:
+        if target_type == "email_ready" and email_ready_after() >= target:
             stop_reason = "target_achieved"
             return True
         if pages_opened >= max_pages:
@@ -776,13 +904,37 @@ def research(args):
         if time.monotonic() - started_at >= max_runtime_seconds:
             stop_reason = "max_runtime_reached"
             return True
-        if no_new_unique_queries >= no_new_threshold:
-            stop_reason = "no_new_unique_leads"
+        if no_progress_queries >= no_progress_threshold:
+            stop_reason = "no_new_or_enriched_leads"
             return True
         return False
 
+    def blocked_status(row):
+        status = clean_text(row.get("Lead Status") or row.get("state") or "").lower()
+        category = clean_text(row.get("Lead Category")).lower()
+        if status in {"rejected", "previously_rejected"} or category == "previously_rejected":
+            return "previously_rejected"
+        if status in {"do_not_contact", "unsubscribed"} or category == "do_not_contact":
+            return "do_not_contact"
+        if status in {"sent", "contacted", "previously_sent"} or category == "previously_sent":
+            return "previously_sent"
+        return ""
+
+    def find_existing(keys):
+        for key in keys:
+            if key in existing_by_key:
+                return existing_by_key[key]
+        return None
+
+    def record_keys(row, target_row):
+        for key in lead_identity_keys(row):
+            existing_by_key[key] = target_row
+            seen_in_run.add(key)
+
     def add_lead(lead, source_label):
-        nonlocal duplicates, invalid
+        nonlocal unchanged_duplicates, invalid, new_unique_created, existing_enriched
+        nonlocal rejected_skipped, dnc_skipped, previously_sent_skipped
+        nonlocal new_email_ready_created, email_ready_upgraded_existing
         if not lead:
             return False
         lead = finalize_lead(lead)
@@ -796,16 +948,73 @@ def research(args):
             invalid += 1
             skipped.append({"url": lead.get("Source URL", ""), "business": lead.get("Business Name", ""), "reason": "missing_stable_identity"})
             return False
-        if keys.intersection(existing) or keys.intersection(seen_in_run):
-            duplicates += 1
+        existing = find_existing(keys)
+        if existing:
+            block = blocked_status(existing)
+            if block == "previously_rejected":
+                rejected_skipped += 1
+                return False
+            if block == "do_not_contact":
+                dnc_skipped += 1
+                return False
+            if block == "previously_sent":
+                previously_sent_skipped += 1
+                return False
+            before_category = existing.get("Lead Category") or lead_category(existing)[0]
+            merged, improved, _fields = merge_lead(existing, lead, source_label)
+            if improved:
+                existing.clear(); existing.update(merged)
+                rows.append(merged)
+                record_keys(merged, existing)
+                existing_id = id(existing)
+                if existing_id not in enriched_existing_ids:
+                    enriched_existing_ids.add(existing_id)
+                    existing_enriched += 1
+                after_category = merged.get("Lead Category") or lead_category(merged)[0]
+                if before_category != "email_ready" and after_category == "email_ready" and existing_id not in email_ready_upgrade_ids:
+                    email_ready_upgrade_ids.add(existing_id)
+                    email_ready_upgraded_existing += 1
+                return True
+            unchanged_duplicates += 1
             return False
+        if keys.intersection(seen_in_run):
+            unchanged_duplicates += 1
+            return False
+        lead["Missing Fields"] = ",".join(missing_fields(lead))
+        lead["Enrichment Status"] = "new"
+        lead["Last Enrichment Attempt"] = datetime.now(timezone.utc).isoformat()
         rows.append(lead)
-        seen_in_run.update(keys)
+        new_unique_created += 1
+        if (lead.get("Lead Category") or lead_category(lead)[0]) == "email_ready":
+            new_email_ready_created += 1
+        record_keys(lead, lead)
         return True
+
+    enrichment_candidates = [row for row in existing_rows if (row.get("Lead Category") in {"enrichment_needed", "phone_ready"} or row.get("Identity Needs Review") == "true") and not blocked_status(row)]
+    for row in enrichment_candidates[: max(0, min(remaining_needed * 3 or 10, 50))]:
+        if should_stop():
+            break
+        website = clean_text(row.get("Website"))
+        if not website:
+            continue
+        enrichment_attempted += 1
+        pages_opened += 1
+        lead, error = extract_business(chrome, website, args)
+        if lead:
+            if add_lead({**row, **{k: v for k, v in lead.items() if clean_text(v)}}, "enrichment_existing"):
+                enrichment_successful += 1
+        else:
+            row["Last Enrichment Attempt"] = datetime.now(timezone.utc).isoformat()
+            row["Last Error"] = error
+            row["Pages Checked"] = str(int(row.get("Pages Checked") or 0) + 1)
+            if int(row.get("Pages Checked") or 0) >= 3:
+                row["Enrichment Status"] = "enrichment_exhausted"
+                rows.append(finalize_lead(dict(row)))
 
     for directory_url in PUBLIC_DIRECTORY_URLS:
         if should_stop():
             break
+        before_progress = new_unique_created + existing_enriched
         try:
             directory_source = chrome_dom(chrome, directory_url)
             pages_opened += 1
@@ -817,21 +1026,24 @@ def research(args):
                     break
         except Exception as exc:
             skipped.append({"url": directory_url, "reason": f"directory_jsonld_failed: {exc}"})
+        no_progress_queries = no_progress_queries + 1 if new_unique_created + existing_enriched == before_progress else 0
 
     if not should_stop():
-        nominatim_rows, nominatim_skipped = rows_from_nominatim(chrome, args, limit=max(target * 2, 25))
+        before_progress = new_unique_created + existing_enriched
+        nominatim_rows, nominatim_skipped = rows_from_nominatim(chrome, args, limit=max(remaining_needed * 3, 25))
         skipped.extend(nominatim_skipped)
         for lead in nominatim_rows:
             add_lead(lead, "nominatim")
             if should_stop():
                 break
+        no_progress_queries = no_progress_queries + 1 if new_unique_created + existing_enriched == before_progress else 0
 
     for query in queries:
         if should_stop():
             break
         queries_attempted += 1
-        before = len(rows)
-        candidates = search_urls(chrome, query, max_results=max(target * 4, 40))
+        before_progress = new_unique_created + existing_enriched
+        candidates = search_urls(chrome, query, max_results=max(remaining_needed * 4, 20))
         for url in candidates:
             if should_stop():
                 break
@@ -841,23 +1053,18 @@ def research(args):
                 skipped.append({"url": url, "reason": error})
                 continue
             add_lead(lead, "search")
-        if len(rows) == before:
-            no_new_unique_queries += 1
-        else:
-            no_new_unique_queries = 0
+        no_progress_queries = no_progress_queries + 1 if new_unique_created + existing_enriched == before_progress else 0
 
-    if stop_reason == "sources_exhausted" and target_count() >= target:
+    if stop_reason == "sources_exhausted" and target_type == "email_ready" and email_ready_after() >= target:
         stop_reason = "target_achieved"
-    category_counts = counts()
-    target_achieved = target_count() >= target
+    counts = category_counts()
+    target_achieved = email_ready_after() >= target if target_type == "email_ready" else len(rows) >= target
     if target_achieved:
         status = "completed_target_achieved"
-    elif rows:
+    elif new_unique_created or existing_enriched:
         status = "completed_partial"
-    elif stop_reason == "no_new_unique_leads":
-        status = "no_new_unique_leads"
     else:
-        status = "completed_partial" if rows else "no_new_unique_leads"
+        status = "no_new_unique_leads"
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_dir = leads_dir if rows else leads_dir / "partial"
@@ -869,24 +1076,39 @@ def research(args):
         "output_path": str(output),
         "target": target,
         "target_type": target_type,
+        "active_email_ready": email_ready_before,
+        "email_ready_before": email_ready_before,
+        "approved_unsent": 0,
+        "draft_ready_unsent": 0,
+        "remaining_needed": max(0, target - email_ready_after()),
+        "remaining_to_target": max(0, target - email_ready_after()),
         "target_achieved": target_achieved,
         "status": status,
         "stop_reason": stop_reason,
-        "total_discovered": len(rows) + duplicates + invalid,
-        "new_unique_businesses": len(rows),
-        "email_ready": category_counts.get("email_ready", 0),
-        "phone_ready": category_counts.get("phone_ready", 0),
-        "enrichment_needed": category_counts.get("enrichment_needed", 0),
-        "unreachable": category_counts.get("unreachable", 0),
-        "invalid": category_counts.get("invalid", 0),
-        "duplicates_skipped": duplicates,
-        "rejected_skipped": 0,
-        "DNC_skipped": 0,
-        "previously_sent_skipped": 0,
+        "total_discovered": new_unique_created + existing_enriched + unchanged_duplicates + invalid + rejected_skipped + dnc_skipped + previously_sent_skipped,
+        "new_unique_businesses": new_unique_created,
+        "new_unique_created": new_unique_created,
+        "existing_enriched": existing_enriched,
+        "enriched_existing": existing_enriched,
+        "unchanged_duplicates": unchanged_duplicates,
+        "duplicates_skipped": unchanged_duplicates,
+        "email_ready": counts.get("email_ready", 0),
+        "email_ready_added": email_ready_added(),
+        "email_ready_after": email_ready_after(),
+        "phone_ready": counts.get("phone_ready", 0),
+        "enrichment_needed": counts.get("enrichment_needed", 0),
+        "enrichment_exhausted": counts.get("enrichment_exhausted", 0),
+        "unreachable": counts.get("unreachable", 0),
+        "invalid": counts.get("invalid", 0),
+        "rejected_skipped": rejected_skipped,
+        "DNC_skipped": dnc_skipped,
+        "previously_sent_skipped": previously_sent_skipped,
+        "enrichment_attempted": enrichment_attempted,
+        "enrichment_successful": enrichment_successful,
         "queries_attempted": queries_attempted,
         "pages_opened": pages_opened,
         "skipped": skipped[:80],
-        "queries": queries,
+        "queries": queries[:120],
         "email_sending": False,
         "prospect_emails_sent": 0,
         "generated_at": datetime.now(timezone.utc).isoformat(),
@@ -895,12 +1117,12 @@ def research(args):
     meta_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
     print(f"HERMES_NATIVE_BROWSER_OUTPUT path={output}")
     print(f"HERMES_NATIVE_BROWSER_METADATA path={meta_path}")
-    for key in ["target", "target_type", "target_achieved", "total_discovered", "new_unique_businesses", "email_ready", "phone_ready", "enrichment_needed", "unreachable", "invalid", "duplicates_skipped", "rejected_skipped", "DNC_skipped", "previously_sent_skipped", "queries_attempted", "pages_opened", "stop_reason", "status"]:
+    for key in ["target", "target_type", "active_email_ready", "remaining_needed", "target_achieved", "new_unique_created", "existing_enriched", "unchanged_duplicates", "email_ready_before", "email_ready_added", "email_ready_after", "remaining_to_target", "enrichment_attempted", "enrichment_successful", "rejected_skipped", "DNC_skipped", "previously_sent_skipped", "queries_attempted", "pages_opened", "stop_reason", "status"]:
         print(f"{key.upper()}={metadata[key]}")
     print("PROSPECT_EMAILS_SENT=0")
-    if rows:
+    if rows or target_achieved:
         return 0
-    print(f"ERROR no_new_unique_leads: no new unique businesses found. Partial preserved at {output}", file=sys.stderr)
+    print(f"ERROR no_new_unique_leads: no new or enriched businesses found. Partial preserved at {output}", file=sys.stderr)
     return 3
 
 def parse_args():

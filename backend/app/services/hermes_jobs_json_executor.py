@@ -389,8 +389,8 @@ def _execute_bibs_native_browser_research(task_type: str, payload: dict[str, Any
     if physical_output_path is None or not physical_output_path.exists():
         return _failed("Hermes Native Browser research completed without an output CSV", logs=logs)
     new_keys = _csv_business_keys(physical_output_path)
-    new_unique_businesses = int(metadata.get("new_unique_businesses") or len(new_keys))
-    if new_unique_businesses < 1:
+    new_unique_businesses = int(metadata.get("new_unique_businesses") or _csv_row_count(physical_output_path) or len(new_keys))
+    if new_unique_businesses < 1 and not metadata.get("target_achieved"):
         return _failed(
             "no_new_unique_leads: Hermes Native Browser did not find any new unique businesses.",
             logs=logs + [f"NEW_UNIQUE_BUSINESSES={new_unique_businesses}", "No prospect email sent."],
