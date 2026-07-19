@@ -361,7 +361,7 @@ def _execute_bibs_native_browser_research(task_type: str, payload: dict[str, Any
         "--target-customer", str(config_payload.get("target_customer") or "independent cafés, specialty coffee shops, restaurants, boutique grocers"),
         "--geography", str(config_payload.get("target_geography") or "Toronto/GTA"),
         "--exclusions", str(config_payload.get("exclusions") or "franchises, chains, already contacted businesses"),
-        "--limit", str(int(payload.get("limit") or config_payload.get("lead_limit") or 25)),
+        "--limit", str(int(payload.get("remaining_needed") or payload.get("limit") or config_payload.get("lead_limit") or 25)),
         "--min-success", "1",
         "--target-type", "email_ready",
         "--max-runtime-seconds", str(int(config_payload.get("max_runtime_seconds") or 900)),
@@ -371,6 +371,8 @@ def _execute_bibs_native_browser_research(task_type: str, payload: dict[str, Any
         "--config", str(source_config),
         "--no-email",
     ]
+    if payload.get("remaining_needed") is not None:
+        args.extend(["--existing-email-ready", "0"])
     result = _run(args, cwd=LEADS_DIR)
     logs = _logs_from_completed_process(result)
     output_path = _native_browser_output_from_stdout(result.stdout)

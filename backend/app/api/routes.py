@@ -25,6 +25,7 @@ from app.services.hermes_live import HermesLiveMonitor
 from app.services.hermes_safety import SAFETY_LOCK_MESSAGE, is_safety_blocked_action, safety_block_result
 from app.services.hermes_sync import hermes_sync_status, sync_hermes_snapshot as _sync_hermes_snapshot
 from app.services.internal_mail_queue import ingest_internal_mail_receipts
+from app.services.campaign_inventory import get_campaign_email_inventory
 from app.services.model_policy import (
     default_policy_payload,
     effective_policy,
@@ -934,28 +935,29 @@ def _latest_research_metadata(campaign: Campaign, db: Session) -> dict:
     return {}
 
 
-def _research_status_with_review(campaign: Campaign, db: Session, items: list[dict], counts: dict[str, int]) -> dict:
+def _research_status_with_review(campaign: Campaign, db: Session, items: list[dict], counts: dict[str, int], inventory: dict[str, Any] | None = None) -> dict:
     status = dict(_latest_research_metadata(campaign, db) or {})
-    approved_unsent = sum(1 for item in items if item.get('state') == 'approved_for_outreach' and item.get('can_send'))
-    draft_ready_unsent = db.scalar(
-        select(func.count())
-        .select_from(OutreachDraft)
-        .where(OutreachDraft.campaign_id == campaign.id, OutreachDraft.status.in_(['draft_approved', 'draft_needs_review', 'draft_created']))
-    ) or 0
-    sent_events = db.scalar(
-        select(func.count())
-        .select_from(OutreachEvent)
-        .where(OutreachEvent.campaign_id == campaign.id, OutreachEvent.status.in_(['sent', 'delivered']))
-    ) or 0
+    inventory = inventory or get_campaign_email_inventory(db, campaign.company_id, campaign.id, review_items=items)
     status.update({
-        'approved_unsent': int(approved_unsent),
-        'draft_ready_unsent': int(draft_ready_unsent),
-        'review_rejected': int(counts.get('rejected', 0) + counts.get('previously_rejected', 0)),
-        'review_do_not_contact': int(counts.get('do_not_contact', 0)),
-        'review_sent': int(sent_events + counts.get('previously_sent', 0)),
-        'previously_sent_skipped': int(sent_events + counts.get('previously_sent', 0)),
-        'DNC_skipped': int(counts.get('do_not_contact', 0)),
-        'rejected_skipped': int(counts.get('rejected', 0) + counts.get('previously_rejected', 0)),
+        'active_email_ready': int(inventory.get('unique_email_ready_active', 0)),
+        'email_ready_before': int(inventory.get('unique_email_ready_active', 0)),
+        'email_ready_after': int(inventory.get('unique_email_ready_active', 0)) + int(status.get('email_ready_added') or 0),
+        'remaining_needed': int(inventory.get('remaining_needed', 0)),
+        'remaining_to_target': int(inventory.get('remaining_to_target', 0)),
+        'target_achieved': int(inventory.get('remaining_to_target', 0)) == 0,
+        'approved_unsent': int(inventory.get('approved_unsent', 0)),
+        'draft_ready_unsent': int(inventory.get('drafts_pending_review', 0)) + int(inventory.get('drafts_approved_unsent', 0)),
+        'draft_pending_review': int(inventory.get('drafts_pending_review', 0)),
+        'draft_approved_unsent': int(inventory.get('drafts_approved_unsent', 0)),
+        'ready_to_send': int(inventory.get('ready_to_send', 0)),
+        'review_rejected': int(inventory.get('rejected', 0)),
+        'review_do_not_contact': int(inventory.get('DNC', 0)),
+        'review_sent': int(inventory.get('sent', 0)),
+        'previously_sent_skipped': int(inventory.get('sent', 0)),
+        'DNC_skipped': int(inventory.get('DNC', 0)),
+        'rejected_skipped': int(inventory.get('rejected', 0)),
+        'suppressed_skipped': int(inventory.get('suppressed', 0)),
+        'canonical_inventory': inventory,
     })
     return status
 
@@ -1196,10 +1198,25 @@ def campaign_lead_review(campaign_id: str, db: Session=Depends(get_db), user: Us
     if not campaign: raise HTTPException(404, 'Campaign not found')
     items, source_path = _campaign_review_items(db, campaign)
     counts = _review_counts(items)
-    research_status = _research_status_with_review(campaign, db, items, counts)
     lead_pool = _sync_canonical_lead_pool(db, campaign, items, source_path)
+    inventory = get_campaign_email_inventory(db, campaign.company_id, campaign.id, review_items=items)
+    counts.update({
+        'email_ready': int(inventory.get('unique_email_ready_active', 0)),
+        'approved_unsent': int(inventory.get('approved_unsent', 0)),
+        'draft_pending_review': int(inventory.get('drafts_pending_review', 0)),
+        'draft_approved_unsent': int(inventory.get('drafts_approved_unsent', 0)),
+        'ready_to_send': int(inventory.get('ready_to_send', 0)),
+        'sent': int(inventory.get('sent', 0)),
+        'rejected': int(inventory.get('rejected', 0)),
+        'do_not_contact': int(inventory.get('DNC', 0)),
+        'suppressed': int(inventory.get('suppressed', 0)),
+        'duplicate': int(inventory.get('duplicates', 0)),
+        'enrichment_needed': int(inventory.get('enrichment_needed', 0)),
+        'phone_ready': int(inventory.get('phone_ready', 0)),
+    })
+    research_status = _research_status_with_review(campaign, db, items, counts, inventory)
     db.commit()
-    return {'campaign_id': campaign.id, 'company_id': campaign.company_id, 'source_path': source_path, 'items': items, 'counts': counts, 'research_status': research_status, 'eligible_count': sum(1 for item in items if item.get('can_send')), 'approval_eligible_count': sum(1 for item in items if item.get('approval_eligible')), 'canonical_lead_pool': lead_pool}
+    return {'campaign_id': campaign.id, 'company_id': campaign.company_id, 'source_path': source_path, 'items': items, 'counts': counts, 'research_status': research_status, 'eligible_count': sum(1 for item in items if item.get('can_send')), 'approval_eligible_count': sum(1 for item in items if item.get('approval_eligible')), 'canonical_lead_pool': lead_pool, 'email_inventory': inventory}
 
 
 @router.post('/campaigns/{campaign_id}/lead-review/{lead_key}/{action}')
@@ -1404,6 +1421,12 @@ def sales_employee_find_leads(campaign_id: str, db: Session=Depends(get_db), use
     schedule = db.scalar(select(Schedule).where(Schedule.employee_id == employee.id).order_by(Schedule.name).limit(1))
     payload = dict(schedule.payload or {}) if schedule and isinstance(schedule.payload, dict) else {}
     payload.update({'campaign_id': campaign.id, 'company_id': campaign.company_id, 'hermes_job_id': employee.hermes_job_id, 'source': 'ai_sales_employee_control_center'})
+    items, source_path = _campaign_review_items(db, campaign)
+    counts = _review_counts(items)
+    inventory = get_campaign_email_inventory(db, campaign.company_id, campaign.id, review_items=items)
+    target = int(inventory.get('target') or campaign.daily_lead_goal or 25)
+    remaining_needed = int(inventory.get('remaining_needed') or 0)
+    payload.update({'target': target, 'limit': max(0, remaining_needed), 'remaining_needed': remaining_needed, 'canonical_email_ready_before': int(inventory.get('unique_email_ready_active', 0))})
     started = datetime.utcnow()
     job = Job(
         employee_id=employee.id,
@@ -1419,7 +1442,34 @@ def sales_employee_find_leads(campaign_id: str, db: Session=Depends(get_db), use
         created_at=started,
     )
     db.add(job); db.flush()
-    result = execute_scheduled_jobs_json_task('Generate Leads', payload)
+    if remaining_needed <= 0:
+        result = {
+            'status': 'ok',
+            'logs': ['Canonical inventory already meets BIBS email-ready target; Hermes research was not invoked.', 'PROSPECT_EMAILS_SENT=0'],
+            'results': {
+                'provider': 'voryx_canonical_inventory',
+                'hermes_job_id': employee.hermes_job_id,
+                'status': 'completed_target_achieved',
+                'stop_reason': 'target_achieved',
+                'target': target,
+                'target_type': 'email_ready',
+                'target_achieved': True,
+                'email_ready_before': int(inventory.get('unique_email_ready_active', 0)),
+                'email_ready_added': 0,
+                'email_ready_after': int(inventory.get('unique_email_ready_active', 0)),
+                'remaining_to_target': 0,
+                'remaining_needed': 0,
+                'new_unique_businesses': 0,
+                'new_unique_created': 0,
+                'existing_enriched': 0,
+                'approved_unsent': int(inventory.get('approved_unsent', 0)),
+                'draft_ready_unsent': int(inventory.get('drafts_pending_review', 0)) + int(inventory.get('drafts_approved_unsent', 0)),
+                'prospect_emails_sent': 0,
+                'canonical_inventory': inventory,
+            },
+        }
+    else:
+        result = execute_scheduled_jobs_json_task('Generate Leads', payload)
     status = str(result.get('status') or '').lower()
     job.result = result.get('results') or result
     job.logs = list(job.logs or []) + list(result.get('logs') or [])
@@ -1443,12 +1493,28 @@ def sales_employee_find_leads(campaign_id: str, db: Session=Depends(get_db), use
     if job.status == JobStatus.completed:
         items, source_path = _campaign_review_items(db, campaign)
         counts = _review_counts(items)
+        inventory = get_campaign_email_inventory(db, campaign.company_id, campaign.id, review_items=items)
+        counts.update({
+            'email_ready': int(inventory.get('unique_email_ready_active', 0)),
+            'approved_unsent': int(inventory.get('approved_unsent', 0)),
+            'draft_pending_review': int(inventory.get('drafts_pending_review', 0)),
+            'draft_approved_unsent': int(inventory.get('drafts_approved_unsent', 0)),
+            'ready_to_send': int(inventory.get('ready_to_send', 0)),
+            'sent': int(inventory.get('sent', 0)),
+            'rejected': int(inventory.get('rejected', 0)),
+            'do_not_contact': int(inventory.get('DNC', 0)),
+            'suppressed': int(inventory.get('suppressed', 0)),
+            'duplicate': int(inventory.get('duplicates', 0)),
+            'enrichment_needed': int(inventory.get('enrichment_needed', 0)),
+            'phone_ready': int(inventory.get('phone_ready', 0)),
+        })
         review_summary = {
             'source_path': source_path,
             'items': len(items),
             'counts': counts,
-            'research_status': _research_status_with_review(campaign, db, items, counts),
+            'research_status': _research_status_with_review(campaign, db, items, counts, inventory),
             'canonical_lead_pool': _sync_canonical_lead_pool(db, campaign, items, source_path),
+            'email_inventory': inventory,
         }
     log(db, 'AI Sales Employee Find Leads', 'Campaign', campaign.id, campaign.company_id, user.id, {'job_id': job.id, 'hermes_job_id': employee.hermes_job_id, 'status': job.status.value, 'prospect_emails_sent': 0})
     db.commit(); db.refresh(job)

@@ -41,6 +41,7 @@ from app.services.outreach import (
     send_real_controlled_batch,
     sender_verification,
 )
+from app.services.campaign_inventory import get_campaign_email_inventory
 from app.services.internal_mail_queue import enqueue_controlled_outreach_delivery, ingest_internal_mail_receipts, queue_root
 from app.api import routes
 
@@ -106,6 +107,49 @@ class OutreachControlsTests(unittest.TestCase):
             refreshed = review_items_from_rows(db, campaign, [row], 'leads_2026_07_14')[0]
             self.assertEqual(refreshed['state'], 'approved_for_outreach')
             self.assertTrue(refreshed['can_send'])
+        finally:
+            db.close()
+
+    def test_campaign_email_inventory_dedupes_historical_rows_and_excludes_blocked(self):
+        db = self.Session()
+        try:
+            user, company, campaign, _other, _other_campaign = self.seed(db)
+            same_business_rows = [
+                {'Business Name': 'Canonical Cafe', 'Website': 'https://canonical.example', 'Public Email': 'hello@canonical.example', 'Email Evidence': 'https://canonical.example/contact', 'Source URL': f'https://canonical.example/contact?run={index}'}
+                for index in range(5)
+            ]
+            sent_row = {'Business Name': 'Sent Cafe', 'Website': 'https://sent.example', 'Public Email': 'hello@sent.example', 'Email Evidence': 'https://sent.example/contact', 'Source URL': 'https://sent.example/contact'}
+            rejected_row = {'Business Name': 'Rejected Cafe', 'Website': 'https://rejected.example', 'Public Email': 'hello@rejected.example', 'Email Evidence': 'https://rejected.example/contact', 'Source URL': 'https://rejected.example/contact'}
+            suppressed_row = {'Business Name': 'Suppressed Cafe', 'Website': 'https://suppressed.example', 'Public Email': 'hello@suppressed.example', 'Email Evidence': 'https://suppressed.example/contact', 'Source URL': 'https://suppressed.example/contact'}
+            phone_row = {'Business Name': 'Phone Cafe', 'Website': 'https://phone.example', 'Phone': '416-555-0100', 'Source URL': 'https://phone.example'}
+            enrich_row = {'Business Name': 'Needs Enrichment', 'Website': 'https://needs.example', 'Source URL': 'https://needs.example'}
+            rows = same_business_rows + [sent_row, rejected_row, suppressed_row, phone_row, enrich_row]
+            items = review_items_from_rows(db, campaign, rows, 'historical')
+            canonical_item = next(item for item in items if item['business'] == 'Canonical Cafe')
+            sent_item = next(item for item in items if item['business'] == 'Sent Cafe')
+            rejected_item = next(item for item in items if item['business'] == 'Rejected Cafe')
+            db.add(LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key=canonical_item['lead_key'], email=canonical_item['email'], domain=canonical_item['domain'], business=canonical_item['business'], state='approved_for_outreach', raw=canonical_item['raw']))
+            db.add(LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key=sent_item['lead_key'], email=sent_item['email'], domain=sent_item['domain'], business=sent_item['business'], state='sent', raw=sent_item['raw']))
+            db.add(LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key=rejected_item['lead_key'], email=rejected_item['email'], domain=rejected_item['domain'], business=rejected_item['business'], state='rejected', raw=rejected_item['raw']))
+            db.add(SuppressionEntry(company_id=company.id, kind='email', value='hello@suppressed.example', reason='qa'))
+            db.add(OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key=canonical_item['lead_key'], lead_email='hello@canonical.example', business='Canonical Cafe', subject='Hello', body='Body. Reply STOP to opt out.', status='draft_approved'))
+            db.add(OutreachEvent(event_id='sent-event-1', company_id=company.id, campaign_id=campaign.id, recipient='hello@sent.example', status='sent', dry_run=False, message_id='smtp-1'))
+            db.flush()
+
+            inventory = get_campaign_email_inventory(db, company.id, campaign.id, review_items=items)
+
+            self.assertEqual(inventory['raw_historical_email_ready_rows'], 8)
+            self.assertEqual(inventory['unique_historical_email_ready_identities'], 4)
+            self.assertEqual(inventory['unique_email_ready_active'], 1)
+            self.assertEqual(inventory['approved_unsent'], 1)
+            self.assertEqual(inventory['drafts_approved_unsent'], 1)
+            self.assertEqual(inventory['ready_to_send'], 1)
+            self.assertEqual(inventory['sent'], 1)
+            self.assertEqual(inventory['rejected'], 1)
+            self.assertEqual(inventory['suppressed'], 1)
+            self.assertGreaterEqual(inventory['duplicates'], 4)
+            self.assertEqual(inventory['phone_ready'], 1)
+            self.assertEqual(inventory['enrichment_needed'], 1)
         finally:
             db.close()
 
@@ -269,7 +313,7 @@ class OutreachControlsTests(unittest.TestCase):
             settings.allowed_sending_days = []
             settings.allowed_sending_hours = {'start': '00:00', 'end': '23:59'}
             db.add(settings)
-            approval = LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach')
+            approval = LeadApproval(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', email='owner@example.com', business='Cafe One', state='approved_for_outreach', raw={'Business Name': 'Cafe One', 'Public Email': 'owner@example.com', 'Email Evidence': 'https://example.com/contact', 'Lead Category': 'email_ready'})
             draft = OutreachDraft(company_id=company.id, campaign_id=campaign.id, lead_key='lead-1', lead_email='owner@example.com', business='Cafe One', subject='Hello Cafe One', body='Draft body. Reply STOP to opt out.', status='draft_approved')
             db.add_all([approval, draft]); db.flush()
 

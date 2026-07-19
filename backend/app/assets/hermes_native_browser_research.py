@@ -874,7 +874,8 @@ def research(args):
     max_pages = int(getattr(args, "max_pages", 150) or 150)
     max_runtime_seconds = int(getattr(args, "max_runtime_seconds", 900) or 900)
     no_progress_threshold = int(getattr(args, "max_consecutive_no_new_queries", 3) or 3)
-    email_ready_before = active_email_ready_count(existing_rows)
+    existing_email_ready_override = getattr(args, "existing_email_ready", None)
+    email_ready_before = int(existing_email_ready_override) if existing_email_ready_override is not None else active_email_ready_count(existing_rows)
     remaining_needed = max(0, target - email_ready_before) if target_type == "email_ready" else target
 
     def category_counts():
@@ -1139,6 +1140,7 @@ def parse_args():
     parser.add_argument("--limit", type=int, default=25)
     parser.add_argument("--min-success", type=int, default=10)
     parser.add_argument("--target-type", default="email_ready")
+    parser.add_argument("--existing-email-ready", type=int, default=None)
     parser.add_argument("--max-runtime-seconds", type=int, default=900)
     parser.add_argument("--max-pages", type=int, default=150)
     parser.add_argument("--max-consecutive-no-new-queries", type=int, default=3)

@@ -9,13 +9,15 @@ from zoneinfo import ZoneInfo
 
 from app.core.config import settings
 from app.core.db import SessionLocal
-from app.models.entities import LeadApproval, OutreachDraft, OutreachEvent
+from app.models.entities import Campaign, LeadApproval, OutreachDraft, OutreachEvent
+from app.services.campaign_inventory import get_campaign_email_inventory
 from app.services.job_evidence import INTERNAL_REPORT_RECIPIENT, provider_message_id_from_output, validate_report_recipient
 
 TORONTO = "America/Toronto"
 SUCCESS_STATUSES = {"sent", "delivered", "accepted", "queued_by_provider"}
 MESSAGE_ID_KEYS = {"message_id", "smtp_id", "smtp_response", "provider_message_id", "receipt_id"}
 BIBS_COMPANY_ID = "company-brew-it-by-sash"
+BIBS_LEAD_CAMPAIGN_ID = "campaign-brew-it-by-sash-lead-research"
 
 
 @dataclass(frozen=True)
@@ -136,15 +138,20 @@ def _db_outreach_metrics(window: DayWindow) -> dict[str, Any]:
         approved_leads = db.query(LeadApproval).filter(LeadApproval.company_id == BIBS_COMPANY_ID, LeadApproval.state == "approved_for_outreach").count()
         approved_drafts = db.query(OutreachDraft).filter(OutreachDraft.company_id == BIBS_COMPANY_ID, OutreachDraft.status == "draft_approved").count()
         generated_drafts = db.query(OutreachDraft).filter(OutreachDraft.company_id == BIBS_COMPANY_ID).count()
+        campaign = db.get(Campaign, BIBS_LEAD_CAMPAIGN_ID)
+        inventory = get_campaign_email_inventory(db, BIBS_COMPANY_ID, BIBS_LEAD_CAMPAIGN_ID) if campaign else {}
         return {
             "real_emails_sent_today": len(real_sent),
             "real_message_ids": [e.message_id for e in real_sent],
             "dry_runs_prepared_today": len(dry_runs),
             "internal_tests_today": len(internal),
-            "approved_leads": approved_leads,
+            "approved_leads": inventory.get("approved_unsent", approved_leads),
             "drafts_generated": generated_drafts,
-            "drafts_approved": approved_drafts,
-            "ready_to_send": min(approved_leads, approved_drafts),
+            "drafts_approved": inventory.get("drafts_approved_unsent", approved_drafts),
+            "ready_to_send": inventory.get("ready_to_send", min(approved_leads, approved_drafts)),
+            "active_unsent_email_ready": inventory.get("active_unsent_email_ready"),
+            "enrichment_needed": inventory.get("enrichment_needed"),
+            "phone_ready": inventory.get("phone_ready"),
         }
     except Exception as exc:
         return {"error": str(exc)}
