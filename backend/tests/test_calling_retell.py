@@ -2,7 +2,16 @@ import hashlib
 import hmac
 import unittest
 
-from app.services.calling import MockCallingProvider, RetellCallingProvider, normalize_phone, valid_us_ca_e164
+from app.services.calling import (
+    ALLSTATE_BEGIN_MESSAGE,
+    REQUIRED_DYNAMIC_VARIABLES,
+    MockCallingProvider,
+    RetellCallingProvider,
+    internal_test_dynamic_variables,
+    internal_test_preview_payload,
+    normalize_phone,
+    valid_us_ca_e164,
+)
 
 
 class CallingRetellTests(unittest.TestCase):
@@ -28,6 +37,25 @@ class CallingRetellTests(unittest.TestCase):
         provider = MockCallingProvider()
         self.assertTrue(provider.verify_webhook(b'{}', 'test-valid'))
         self.assertFalse(provider.verify_webhook(b'{}', 'wrong'))
+
+    def test_internal_test_dynamic_variables_are_allstate_specific(self):
+        values = internal_test_dynamic_variables('attempt-1', {'recipient_name': 'Himanshu'})
+        self.assertEqual(sorted(values), sorted(REQUIRED_DYNAMIC_VARIABLES))
+        self.assertEqual(values['assistant_name'], 'Ava')
+        self.assertEqual(values['agent_name'], 'Himanshu Soni')
+        self.assertEqual(values['agent_role'], 'Allstate Sales Agent')
+        self.assertEqual(values['agency_location'], 'Scarborough, Ontario')
+        self.assertIn('insurance quote appointment', values['call_purpose'])
+        self.assertEqual(values['internal_test'], 'true')
+
+    def test_preview_begin_message_is_not_generic(self):
+        preview = internal_test_preview_payload('attempt-1')
+        self.assertEqual(preview['begin_message'], ALLSTATE_BEGIN_MESSAGE)
+        self.assertIn('Ava', preview['begin_message'])
+        self.assertIn('Himanshu Soni', preview['begin_message'])
+        self.assertIn('Allstate Sales Agent', preview['begin_message'])
+        self.assertIn('internal test call', preview['begin_message'])
+        self.assertEqual(preview['missing_dynamic_variables'], [])
 
 
 if __name__ == '__main__':

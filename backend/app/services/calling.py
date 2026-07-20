@@ -32,7 +32,30 @@ ALLSTATE_AGENT_NAME = 'Voryx Allstate Quote Appointment Assistant'
 RETELL_BASE_URL = 'https://api.retellai.com'
 CALL_ACTIVE_STATUSES = {'requested', 'queued', 'initiated', 'registered', 'ringing', 'ongoing', 'in_progress', 'started'}
 INTERNAL_CONFIRMATION = 'PLACE INTERNAL TEST CALL'
+CORRECTED_INTERNAL_CONFIRMATION = 'PLACE CORRECTED INTERNAL TEST CALL'
+INTERNAL_CONFIRMATIONS = {INTERNAL_CONFIRMATION, CORRECTED_INTERNAL_CONFIRMATION}
 US_CA_E164_RE = re.compile(r'^\+1[2-9]\d{9}$')
+ALLSTATE_BEGIN_MESSAGE = (
+    "Hi {{customer_name}}, this is Ava, the Voryx AI assistant for Himanshu Soni, "
+    "an Allstate Sales Agent in Scarborough. This is an internal test call for "
+    "Himanshu's Allstate quote appointment workflow. Is now a good time for a short test conversation?"
+)
+REQUIRED_DYNAMIC_VARIABLES = [
+    'customer_name',
+    'assistant_name',
+    'agent_name',
+    'agent_role',
+    'company_name',
+    'agency_location',
+    'campaign_name',
+    'call_purpose',
+    'insurance_interest',
+    'consent_source',
+    'consent_date',
+    'booking_timezone',
+    'internal_test',
+    'voryx_call_attempt_id',
+]
 TERMINAL_STATUS_MAP = {
     'call_started': 'started',
     'call_ended': 'ended',
@@ -131,6 +154,9 @@ class RetellCallingProvider:
     async def get_phone_number(self, phone_number: str) -> dict:
         return await self._request('GET', f'/get-phone-number/{phone_number}')
 
+    async def get_call(self, call_id: str) -> dict:
+        return await self._request('GET', f'/v2/get-call/{call_id}')
+
     async def health(self) -> dict:
         blockers: list[str] = []
         api_authenticated = False
@@ -139,6 +165,7 @@ class RetellCallingProvider:
         outbound_agent_correct = False
         agent_payload: dict = {}
         number_payload: dict = {}
+        configured_agent_version = str(settings.retell_agent_version or 'latest_published')
 
         if not self.api_key:
             blockers.append('RETELL_API_KEY missing')
@@ -152,6 +179,12 @@ class RetellCallingProvider:
             try:
                 agent_payload = await self.get_agent(agent_id)
                 agent_exists = True
+                if agent_payload.get('agent_name') != ALLSTATE_AGENT_NAME:
+                    blockers.append('Configured Retell agent is not the Voryx Allstate agent')
+                if str(agent_payload.get('agent_name') or '').strip().lower() in {'call agent', 'generic call agent'}:
+                    blockers.append('Generic Call Agent is selected')
+                if agent_payload.get('is_published') is False:
+                    blockers.append('Retell agent prompt/version is unpublished')
             except CallingProviderError as exc:
                 blockers.append(str(exc))
                 api_authenticated = 'authentication failed' not in str(exc).lower()
@@ -167,6 +200,8 @@ class RetellCallingProvider:
                 outbound_agent_correct = any(str(item.get('agent_id')) == str(agent_id) for item in outbound_agents if isinstance(item, dict))
                 if agent_id and not outbound_agent_correct:
                     blockers.append('Retell outbound number is not assigned to RETELL_AGENT_ID')
+                if len(outbound_agents) != 1:
+                    blockers.append('Retell outbound number must have exactly one outbound agent for QA')
             except CallingProviderError as exc:
                 blockers.append(str(exc))
                 api_authenticated = 'authentication failed' not in str(exc).lower()
@@ -192,9 +227,23 @@ class RetellCallingProvider:
             'agent_id_configured': bool(agent_id),
             'agent_exists': agent_exists,
             'agent_name': agent_payload.get('agent_name') if isinstance(agent_payload, dict) else None,
+            'agent_id': agent_payload.get('agent_id') if isinstance(agent_payload, dict) else settings.retell_agent_id,
+            'agent_version': agent_payload.get('version') if isinstance(agent_payload, dict) else None,
+            'agent_is_published': agent_payload.get('is_published') if isinstance(agent_payload, dict) else None,
+            'configured_agent_version': configured_agent_version,
+            'response_engine': agent_payload.get('response_engine') if isinstance(agent_payload, dict) else None,
             'from_number_configured': bool(from_number),
             'number_exists': number_exists,
             'outbound_agent_correctly_assigned': outbound_agent_correct,
+            'outbound_agents': [
+                {
+                    'agent_id': item.get('agent_id'),
+                    'agent_version': item.get('agent_version'),
+                    'weight': item.get('weight'),
+                }
+                for item in (number_payload.get('outbound_agents') or [])
+                if isinstance(item, dict)
+            ] if isinstance(number_payload, dict) else [],
             'webhook_url_configured': bool(settings.retell_webhook_url),
             'webhook_signature_key_configured': webhook_ready,
             'tool_token_configured': bool(settings.retell_tool_token),
@@ -204,12 +253,13 @@ class RetellCallingProvider:
         }
 
     async def place_call(self, *, to_number: str, call_attempt_id: str, dynamic_variables: dict[str, str]) -> dict:
+        override_version = str(settings.retell_agent_version or 'latest_published')
         payload = {
             'from_number': normalize_phone(settings.retell_from_number),
             'to_number': normalize_phone(to_number),
             'override_agent_id': settings.retell_agent_id,
-            'override_agent_version': 'latest_published',
-            'metadata': {'voryx_call_attempt_id': call_attempt_id, 'mode': 'internal_test'},
+            'override_agent_version': int(override_version) if override_version.isdigit() else override_version,
+            'metadata': {'voryx_call_attempt_id': call_attempt_id, 'mode': 'internal_test', 'expected_agent_name': ALLSTATE_AGENT_NAME},
             'retell_llm_dynamic_variables': {key: str(value) for key, value in dynamic_variables.items()},
         }
         result = await self._request('POST', '/v2/create-phone-call', payload)
@@ -340,6 +390,44 @@ def call_settings(db: Session) -> CallCampaignSettings:
     return row
 
 
+def internal_test_dynamic_variables(call_attempt_id: str, payload: dict | None = None, now: datetime | None = None) -> dict[str, str]:
+    payload = payload or {}
+    now = now or _now()
+    values = {
+        'customer_name': str(payload.get('recipient_name') or 'Himanshu'),
+        'assistant_name': 'Ava',
+        'agent_name': 'Himanshu Soni',
+        'agent_role': 'Allstate Sales Agent',
+        'company_name': 'Allstate',
+        'agency_location': 'Scarborough, Ontario',
+        'campaign_name': 'Allstate Quote Appointment Calling',
+        'call_purpose': 'Internal test of an insurance quote appointment conversation',
+        'insurance_interest': str(payload.get('insurance_interest') or 'Auto and home insurance'),
+        'consent_source': 'Internal self-test entered in Voryx',
+        'consent_date': now.date().isoformat(),
+        'booking_timezone': str(payload.get('booking_timezone') or 'America/Toronto'),
+        'internal_test': 'true',
+        'voryx_call_attempt_id': call_attempt_id,
+    }
+    return {key: str(values[key]) for key in REQUIRED_DYNAMIC_VARIABLES}
+
+
+def internal_test_preview_payload(call_attempt_id: str = '<created after click>', payload: dict | None = None) -> dict:
+    variables = internal_test_dynamic_variables(call_attempt_id, payload)
+    missing = [key for key in REQUIRED_DYNAMIC_VARIABLES if not variables.get(key)]
+    return {
+        'begin_message': ALLSTATE_BEGIN_MESSAGE,
+        'business_purpose': variables['call_purpose'],
+        'dynamic_variables': variables,
+        'required_dynamic_variables': REQUIRED_DYNAMIC_VARIABLES,
+        'missing_dynamic_variables': missing,
+        'override_agent_id': settings.retell_agent_id,
+        'override_agent_version': str(settings.retell_agent_version or 'latest_published'),
+        'from_number': normalize_phone(settings.retell_from_number),
+        'expected_agent_name': ALLSTATE_AGENT_NAME,
+    }
+
+
 def update_internal_test_number(db: Session, phone_number: str, allow: bool) -> dict:
     row = call_settings(db)
     phone = normalize_phone(phone_number)
@@ -366,8 +454,8 @@ async def authorize_internal_test_call(db: Session, user: User, phone_number: st
         blockers.append('Internal test calling is disabled for this campaign')
     if row.prospect_calling_enabled or row.automated_queue_enabled:
         blockers.append('Prospect or automated calling must remain disabled for this milestone')
-    if confirmation != INTERNAL_CONFIRMATION:
-        blockers.append('Confirmation must exactly match PLACE INTERNAL TEST CALL')
+    if confirmation not in INTERNAL_CONFIRMATIONS:
+        blockers.append(f'Confirmation must exactly match {CORRECTED_INTERNAL_CONFIRMATION}')
     if not valid_us_ca_e164(phone):
         blockers.append('Phone number must be a valid US/Canada E.164 number')
     allowlist = {normalize_phone(item) for item in row.internal_test_numbers or []}
@@ -435,16 +523,7 @@ async def create_internal_test_call(db: Session, user: User, payload: dict, prov
     db.add(consent)
 
     dynamic_variables = {
-        'customer_name': str(payload.get('recipient_name') or 'Himanshu'),
-        'agent_name': 'Himanshu',
-        'company_name': 'Allstate',
-        'campaign_name': 'Allstate Quote Appointment Calling',
-        'insurance_interest': str(payload.get('insurance_interest') or 'Auto and property insurance'),
-        'consent_source': 'Internal self-test',
-        'consent_date': now.date().isoformat(),
-        'booking_timezone': str(payload.get('booking_timezone') or 'America/Toronto'),
-        'internal_test': 'true',
-        'voryx_call_attempt_id': attempt.id,
+        **internal_test_dynamic_variables(attempt.id, payload, now),
     }
     try:
         receipt = await provider.place_call(to_number=phone, call_attempt_id=attempt.id, dynamic_variables=dynamic_variables)
@@ -472,6 +551,69 @@ def _extract_call(payload: dict) -> dict:
 def _extract_call_id(payload: dict) -> str | None:
     call = _extract_call(payload)
     return str(call.get('call_id') or payload.get('call_id') or payload.get('provider_call_id') or '') or None
+
+
+def _sync_attempt_from_call_payload(db: Session, attempt: CallAttempt, call: dict) -> None:
+    now = _now()
+    attempt.status = str(call.get('call_status') or attempt.status)
+    attempt.provider_agent_id = str(call.get('agent_id') or attempt.provider_agent_id or '') or None
+    attempt.started_at = _timestamp_ms_to_dt(call.get('start_timestamp')) or attempt.started_at
+    attempt.ended_at = _timestamp_ms_to_dt(call.get('end_timestamp')) or attempt.ended_at
+    attempt.duration_seconds = int(call.get('duration_ms') / 1000) if isinstance(call.get('duration_ms'), (int, float)) else attempt.duration_seconds
+    attempt.termination_reason = str(call.get('disconnection_reason') or attempt.termination_reason or '') or None
+    receipt = _redact_payload({
+        'call_id': call.get('call_id'),
+        'agent_id': call.get('agent_id'),
+        'agent_name': call.get('agent_name'),
+        'agent_version': call.get('agent_version'),
+        'call_status': call.get('call_status'),
+        'disconnection_reason': call.get('disconnection_reason'),
+        'duration_ms': call.get('duration_ms'),
+        'metadata': call.get('metadata'),
+        'retell_llm_dynamic_variables': call.get('retell_llm_dynamic_variables'),
+        'from_number': call.get('from_number'),
+        'to_number': call.get('to_number'),
+    })
+    attempt.provider_receipt = {**(attempt.provider_receipt or {}), **receipt}
+    attempt.updated_at = now
+    transcript_text = call.get('transcript') or ''
+    analysis = call.get('call_analysis') or call.get('analysis') or {}
+    if transcript_text or analysis or call.get('recording_url'):
+        transcript = db.scalar(select(CallTranscript).where(CallTranscript.call_attempt_id == attempt.id))
+        if not transcript:
+            transcript = CallTranscript(call_attempt_id=attempt.id, created_at=now, updated_at=now)
+            db.add(transcript)
+        transcript.transcript = transcript_text or transcript.transcript
+        transcript.transcript_segments = call.get('transcript_object') or call.get('transcript_segments') or transcript.transcript_segments or []
+        transcript.summary = analysis.get('call_summary') or analysis.get('summary') or transcript.summary
+        transcript.recording_url = call.get('recording_url') or transcript.recording_url
+        transcript.sentiment = analysis.get('user_sentiment') or analysis.get('sentiment') or transcript.sentiment
+        custom = analysis.get('custom_analysis_data') if isinstance(analysis.get('custom_analysis_data'), dict) else {}
+        transcript.extracted_fields = {**(transcript.extracted_fields or {}), **(analysis if isinstance(analysis, dict) else {}), **custom}
+        transcript.updated_at = now
+    if analysis:
+        custom = analysis.get('custom_analysis_data') if isinstance(analysis.get('custom_analysis_data'), dict) else {}
+        disposition = db.scalar(select(CallDisposition).where(CallDisposition.call_attempt_id == attempt.id))
+        if not disposition:
+            disposition = CallDisposition(call_attempt_id=attempt.id, created_at=now, updated_at=now)
+            db.add(disposition)
+        outcome = custom.get('call_outcome') or analysis.get('call_outcome') or analysis.get('call_successful') or 'incomplete'
+        disposition.disposition = str(outcome)
+        disposition.interested = bool(custom.get('interested') or custom.get('appointment_requested') or analysis.get('appointment_requested'))
+        disposition.appointment_requested = bool(custom.get('appointment_requested') or analysis.get('appointment_requested'))
+        disposition.callback_requested = bool(custom.get('callback_requested') or analysis.get('callback_requested'))
+        disposition.do_not_call_requested = bool(custom.get('do_not_call_requested') or analysis.get('do_not_call_requested'))
+        disposition.notes = custom.get('summary') or analysis.get('summary') or analysis.get('call_summary') or disposition.notes
+        disposition.updated_at = now
+
+
+async def sync_call_attempt_from_retell(db: Session, attempt: CallAttempt, provider: RetellCallingProvider | None = None) -> bool:
+    if not attempt.provider_call_id:
+        return False
+    provider = provider or calling_provider()
+    call = await provider.get_call(attempt.provider_call_id)
+    _sync_attempt_from_call_payload(db, attempt, call)
+    return True
 
 
 def _timestamp_ms_to_dt(value: Any) -> datetime | None:
@@ -509,39 +651,10 @@ def process_retell_webhook(db: Session, raw_body: bytes, payload: dict) -> dict:
         call = _extract_call(payload)
         attempt = db.scalar(select(CallAttempt).where(CallAttempt.provider_call_id == provider_call_id)) if provider_call_id else None
         if attempt:
-            attempt.status = TERMINAL_STATUS_MAP.get(event_type, str(call.get('call_status') or attempt.status))
-            attempt.updated_at = now
-            attempt.started_at = _timestamp_ms_to_dt(call.get('start_timestamp')) or attempt.started_at
-            attempt.ended_at = _timestamp_ms_to_dt(call.get('end_timestamp')) or attempt.ended_at
-            attempt.duration_seconds = int(call.get('duration_ms') / 1000) if isinstance(call.get('duration_ms'), (int, float)) else attempt.duration_seconds
-            attempt.termination_reason = str(call.get('disconnection_reason') or attempt.termination_reason or '') or None
-            transcript_text = call.get('transcript') or payload.get('transcript') or ''
-            analysis = call.get('call_analysis') or call.get('analysis') or payload.get('call_analysis') or {}
-            if transcript_text or analysis or call.get('recording_url'):
-                transcript = db.scalar(select(CallTranscript).where(CallTranscript.call_attempt_id == attempt.id))
-                if not transcript:
-                    transcript = CallTranscript(call_attempt_id=attempt.id, created_at=now, updated_at=now)
-                    db.add(transcript)
-                transcript.transcript = transcript_text or transcript.transcript
-                transcript.transcript_segments = call.get('transcript_object') or call.get('transcript_segments') or transcript.transcript_segments or []
-                transcript.summary = analysis.get('call_summary') or analysis.get('summary') or transcript.summary
-                transcript.recording_url = call.get('recording_url') or transcript.recording_url
-                transcript.sentiment = analysis.get('user_sentiment') or analysis.get('sentiment') or transcript.sentiment
-                transcript.extracted_fields = {**(transcript.extracted_fields or {}), **(analysis if isinstance(analysis, dict) else {})}
-                transcript.updated_at = now
-            if analysis:
-                disposition = db.scalar(select(CallDisposition).where(CallDisposition.call_attempt_id == attempt.id))
-                if not disposition:
-                    disposition = CallDisposition(call_attempt_id=attempt.id, created_at=now, updated_at=now)
-                    db.add(disposition)
-                outcome = analysis.get('call_outcome') or analysis.get('call_successful') or 'incomplete'
-                disposition.disposition = str(outcome)
-                disposition.interested = bool(analysis.get('interested') or analysis.get('appointment_requested'))
-                disposition.appointment_requested = bool(analysis.get('appointment_requested'))
-                disposition.callback_requested = bool(analysis.get('callback_requested'))
-                disposition.do_not_call_requested = bool(analysis.get('do_not_call_requested'))
-                disposition.notes = analysis.get('summary') or analysis.get('call_summary') or disposition.notes
-                disposition.updated_at = now
+            call_payload = {**call, **{key: payload[key] for key in ('transcript', 'call_analysis', 'analysis') if key in payload}}
+            _sync_attempt_from_call_payload(db, attempt, call_payload)
+            if event_type in TERMINAL_STATUS_MAP:
+                attempt.status = TERMINAL_STATUS_MAP[event_type]
         event.processing_status = 'processed'
         event.processed_at = now
     except Exception as exc:

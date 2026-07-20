@@ -18,6 +18,12 @@ type CallingHealth = {
   tool_token_configured?: boolean;
   internal_test_ready?: boolean;
   prospect_calling_ready?: boolean;
+  agent_id?: string | null;
+  agent_version?: number | string | null;
+  configured_agent_version?: string | null;
+  agent_is_published?: boolean | null;
+  outbound_agents?: Array<{ agent_id?: string | null; agent_version?: string | number | null; weight?: number | null }>;
+  response_engine?: Record<string, unknown> | null;
   blockers?: string[];
 };
 
@@ -63,6 +69,18 @@ export type CallingWorkspace = {
   confirmation_required: string;
   settings: CallingSettings;
   health: CallingHealth;
+  preview?: {
+    begin_message?: string;
+    business_purpose?: string;
+    dynamic_variables?: Record<string, string>;
+    required_dynamic_variables?: string[];
+    missing_dynamic_variables?: string[];
+    override_agent_id?: string;
+    override_agent_version?: string;
+    from_number?: string;
+    expected_agent_name?: string;
+  };
+  warnings?: string[];
   attempts: CallAttempt[];
 };
 
@@ -101,6 +119,8 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   const confirmationValid = confirmation === workspace.confirmation_required;
   const canPlaceCall = Boolean(workspace.health?.internal_test_ready && localPhoneValid && confirmationValid && !busy);
   const blockers = useMemo(() => workspace.health?.blockers || [], [workspace.health]);
+  const warnings = workspace.warnings || [];
+  const preview = workspace.preview || {};
 
   async function allowNumber() {
     setBusy(true);
@@ -166,6 +186,14 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
             </ul>
           </div>
         ) : null}
+        {warnings.length ? (
+          <div className="mt-4 rounded border border-red-800 bg-red-950/30 p-3 text-sm text-red-200">
+            <div className="font-medium">Assignment warnings</div>
+            <ul className="mt-2 list-disc pl-5">
+              {warnings.map((item) => <li key={item}>{item}</li>)}
+            </ul>
+          </div>
+        ) : null}
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
@@ -177,6 +205,48 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
         <CheckRow label="Internal test enabled" ok={workspace.settings?.internal_test_enabled} />
         <CheckRow label="Prospect calling disabled" ok={!workspace.settings?.prospect_calling_enabled} />
         <CheckRow label="Batch queue disabled" ok={!workspace.settings?.automated_queue_enabled} />
+      </section>
+
+      <section className="card">
+        <h2 className="text-lg font-semibold">Retell Call Preview</h2>
+        <div className="mt-3 grid gap-3 md:grid-cols-2">
+          <div className="rounded border border-zinc-800 p-3 text-sm">
+            <div className="text-zinc-500">Expected agent</div>
+            <div className="font-mono text-xs text-zinc-200">{preview.expected_agent_name || workspace.health?.agent_name || '-'}</div>
+          </div>
+          <div className="rounded border border-zinc-800 p-3 text-sm">
+            <div className="text-zinc-500">Agent ID / version</div>
+            <div className="font-mono text-xs text-zinc-200">{workspace.health?.agent_id || preview.override_agent_id || '-'} / {workspace.health?.configured_agent_version || preview.override_agent_version || workspace.health?.agent_version || '-'}</div>
+          </div>
+          <div className="rounded border border-zinc-800 p-3 text-sm">
+            <div className="text-zinc-500">From number</div>
+            <div>{preview.from_number || workspace.settings?.from_number || '-'}</div>
+          </div>
+          <div className="rounded border border-zinc-800 p-3 text-sm">
+            <div className="text-zinc-500">Provider health</div>
+            <div>{workspace.health?.internal_test_ready ? 'Internal test ready' : 'Blocked'}</div>
+          </div>
+        </div>
+        <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
+          <div className="text-zinc-500">Begin message preview</div>
+          <p className="mt-1 text-zinc-200">{preview.begin_message || '-'}</p>
+        </div>
+        <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
+          <div className="text-zinc-500">Business purpose</div>
+          <p className="mt-1 text-zinc-200">{preview.business_purpose || '-'}</p>
+        </div>
+        <details className="mt-3 rounded border border-zinc-800 p-3">
+          <summary className="cursor-pointer text-sm font-semibold">Dynamic variables</summary>
+          <div className="mt-3 grid gap-2 md:grid-cols-2">
+            {Object.entries(preview.dynamic_variables || {}).map(([key, value]) => (
+              <div className="rounded border border-zinc-900 p-2 text-xs" key={key}>
+                <div className="font-mono text-zinc-500">{key}</div>
+                <div className="text-zinc-200">{value}</div>
+              </div>
+            ))}
+          </div>
+          {preview.missing_dynamic_variables?.length ? <div className="mt-3 text-sm text-red-300">Missing: {preview.missing_dynamic_variables.join(', ')}</div> : null}
+        </details>
       </section>
 
       <section className="card">

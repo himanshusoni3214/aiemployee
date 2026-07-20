@@ -87,17 +87,20 @@ from app.services.outreach import (
 from app.services.calling import (
     ALLSTATE_CAMPAIGN_ID,
     ALLSTATE_COMPANY_ID,
-    INTERNAL_CONFIRMATION,
+    ALLSTATE_AGENT_NAME,
+    CORRECTED_INTERNAL_CONFIRMATION,
     RetellCallingProvider,
     book_quote_appointment,
     call_settings,
     calling_provider,
     create_internal_test_call,
     ensure_allstate_calling_campaign,
+    internal_test_preview_payload,
     mark_do_not_call,
     masked_phone,
     normalize_phone,
     process_retell_webhook,
+    sync_call_attempt_from_retell,
     update_internal_test_number,
     validate_tool_token,
     valid_us_ca_e164,
@@ -2032,16 +2035,37 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
     row.provider_connected = bool(health.get('api_authenticated') and health.get('agent_exists') and health.get('number_exists'))
     row.provider_agent_id = settings.retell_agent_id or row.provider_agent_id
     row.from_number = normalize_phone(settings.retell_from_number) or row.from_number
-    db.commit()
     latest_attempts = db.scalars(select(CallAttempt).where(CallAttempt.campaign_id == ALLSTATE_CAMPAIGN_ID).order_by(CallAttempt.created_at.desc()).limit(20)).all()
+    provider = calling_provider()
+    for attempt in latest_attempts[:5]:
+        if attempt.provider_call_id and attempt.status not in {'ended', 'analyzed'}:
+            try:
+                await sync_call_attempt_from_retell(db, attempt, provider)
+            except Exception:
+                pass
+    preview = internal_test_preview_payload()
+    warnings = []
+    if health.get('agent_name') != ALLSTATE_AGENT_NAME:
+        warnings.append('Expected Allstate agent is not selected')
+    if health.get('agent_id') != settings.retell_agent_id:
+        warnings.append('Retell agent ID differs from configured ID')
+    if str(health.get('agent_name') or '').strip().lower() in {'call agent', 'generic call agent'}:
+        warnings.append('Generic Call Agent is selected')
+    if health.get('agent_is_published') is False:
+        warnings.append('Agent prompt/version is unpublished')
+    if preview.get('missing_dynamic_variables'):
+        warnings.append('Required dynamic variables are missing')
+    db.commit()
     return {
         'company_id': ALLSTATE_COMPANY_ID,
         'campaign_id': ALLSTATE_CAMPAIGN_ID,
-        'confirmation_required': INTERNAL_CONFIRMATION,
+        'confirmation_required': CORRECTED_INTERNAL_CONFIRMATION,
         'prospect_calling_enabled': False,
         'batch_calling_enabled': False,
         'settings': _calling_settings_payload(row),
         'health': health,
+        'preview': preview,
+        'warnings': warnings,
         'attempts': [_call_attempt_payload(db, item) for item in latest_attempts],
     }
 
@@ -2083,6 +2107,19 @@ def get_allstate_call_attempt(attempt_id: str, db: Session=Depends(get_db), user
     attempt = db.get(CallAttempt, attempt_id)
     if not attempt or attempt.campaign_id != ALLSTATE_CAMPAIGN_ID:
         raise HTTPException(404, 'Call attempt not found')
+    return _call_attempt_payload(db, attempt)
+
+@router.post('/calling/allstate/attempts/{attempt_id}/sync')
+async def sync_allstate_call_attempt(attempt_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    attempt = db.get(CallAttempt, attempt_id)
+    if not attempt or attempt.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Call attempt not found')
+    try:
+        await sync_call_attempt_from_retell(db, attempt)
+    except Exception as exc:
+        raise HTTPException(502, f'Retell call sync failed: {exc}') from exc
+    db.commit()
+    db.refresh(attempt)
     return _call_attempt_payload(db, attempt)
 
 @router.post('/webhooks/retell')
