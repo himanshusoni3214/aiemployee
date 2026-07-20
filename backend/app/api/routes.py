@@ -84,6 +84,24 @@ from app.services.outreach import (
     first_text,
     normalize_email,
 )
+from app.services.calling import (
+    ALLSTATE_CAMPAIGN_ID,
+    ALLSTATE_COMPANY_ID,
+    INTERNAL_CONFIRMATION,
+    RetellCallingProvider,
+    book_quote_appointment,
+    call_settings,
+    calling_provider,
+    create_internal_test_call,
+    ensure_allstate_calling_campaign,
+    mark_do_not_call,
+    masked_phone,
+    normalize_phone,
+    process_retell_webhook,
+    update_internal_test_number,
+    validate_tool_token,
+    valid_us_ca_e164,
+)
 
 router = APIRouter()
 oauth2 = OAuth2PasswordBearer(tokenUrl='/api/auth/login', auto_error=False)
@@ -1920,6 +1938,189 @@ def activity(company_id: str|None=None, db: Session=Depends(get_db), user: User=
     if company_id:
         stmt = stmt.where(ActivityLog.company_id == company_id)
     return db.scalars(stmt.order_by(ActivityLog.created_at.desc()).limit(200)).all()
+
+def _call_attempt_payload(db: Session, attempt: CallAttempt) -> dict:
+    transcript = db.scalar(select(CallTranscript).where(CallTranscript.call_attempt_id == attempt.id))
+    disposition = db.scalar(select(CallDisposition).where(CallDisposition.call_attempt_id == attempt.id))
+    appointments = db.scalars(select(CallAppointment).where(CallAppointment.call_attempt_id == attempt.id).order_by(CallAppointment.created_at.desc())).all()
+    return {
+        'id': attempt.id,
+        'company_id': attempt.company_id,
+        'campaign_id': attempt.campaign_id,
+        'provider': attempt.provider,
+        'provider_call_id': attempt.provider_call_id,
+        'provider_agent_id': attempt.provider_agent_id,
+        'from_number': attempt.from_number,
+        'to_number_masked': masked_phone(attempt.to_number),
+        'mode': attempt.mode,
+        'status': attempt.status,
+        'requested_at': attempt.requested_at,
+        'started_at': attempt.started_at,
+        'answered_at': attempt.answered_at,
+        'ended_at': attempt.ended_at,
+        'duration_seconds': attempt.duration_seconds,
+        'termination_reason': attempt.termination_reason,
+        'metadata_json': attempt.metadata_json or {},
+        'provider_receipt': attempt.provider_receipt or {},
+        'transcript': {
+            'transcript': getattr(transcript, 'transcript', None),
+            'segments': getattr(transcript, 'transcript_segments', []) or [],
+            'summary': getattr(transcript, 'summary', None),
+            'recording_url': getattr(transcript, 'recording_url', None),
+            'sentiment': getattr(transcript, 'sentiment', None),
+            'objections': getattr(transcript, 'objections', []) or [],
+            'extracted_fields': getattr(transcript, 'extracted_fields', {}) or {},
+        } if transcript else None,
+        'disposition': {
+            'disposition': getattr(disposition, 'disposition', None),
+            'interested': getattr(disposition, 'interested', False),
+            'appointment_requested': getattr(disposition, 'appointment_requested', False),
+            'appointment_booked': getattr(disposition, 'appointment_booked', False),
+            'callback_requested': getattr(disposition, 'callback_requested', False),
+            'do_not_call_requested': getattr(disposition, 'do_not_call_requested', False),
+            'wrong_number': getattr(disposition, 'wrong_number', False),
+            'voicemail': getattr(disposition, 'voicemail', False),
+            'notes': getattr(disposition, 'notes', None),
+        } if disposition else None,
+        'appointments': [{
+            'id': item.id,
+            'start_time': item.start_time,
+            'timezone': item.timezone,
+            'status': item.status,
+            'insurance_interest': item.insurance_interest,
+            'notes': item.notes,
+            'created_at': item.created_at,
+        } for item in appointments],
+    }
+
+def _calling_settings_payload(row: CallCampaignSettings) -> dict:
+    return {
+        'id': row.id,
+        'company_id': row.company_id,
+        'campaign_id': row.campaign_id,
+        'provider': row.provider,
+        'provider_connected': row.provider_connected,
+        'provider_agent_id': row.provider_agent_id,
+        'from_number': row.from_number,
+        'timezone': row.timezone,
+        'allowed_calling_days': row.allowed_calling_days or [],
+        'allowed_calling_hours': row.allowed_calling_hours or {},
+        'daily_call_limit': row.daily_call_limit,
+        'hourly_call_limit': row.hourly_call_limit,
+        'concurrent_call_limit': row.concurrent_call_limit,
+        'internal_test_enabled': row.internal_test_enabled,
+        'internal_test_numbers_masked': [masked_phone(item) for item in row.internal_test_numbers or []],
+        'prospect_calling_enabled': row.prospect_calling_enabled,
+        'automated_queue_enabled': row.automated_queue_enabled,
+        'recording_enabled': row.recording_enabled,
+        'transcription_enabled': row.transcription_enabled,
+        'appointment_booking_enabled': row.appointment_booking_enabled,
+        'updated_at': row.updated_at,
+    }
+
+@router.post('/calling/allstate/provision')
+def provision_allstate_calling(db: Session=Depends(get_db), user: User=Depends(require_write)):
+    result = ensure_allstate_calling_campaign(db, user.id)
+    db.commit()
+    return {'ok': True, **result}
+
+@router.get('/calling/allstate')
+async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Depends(current_user)):
+    ensure_allstate_calling_campaign(db, user.id)
+    row = call_settings(db)
+    health = await calling_provider().health()
+    row.provider_connected = bool(health.get('api_authenticated') and health.get('agent_exists') and health.get('number_exists'))
+    row.provider_agent_id = settings.retell_agent_id or row.provider_agent_id
+    row.from_number = normalize_phone(settings.retell_from_number) or row.from_number
+    db.commit()
+    latest_attempts = db.scalars(select(CallAttempt).where(CallAttempt.campaign_id == ALLSTATE_CAMPAIGN_ID).order_by(CallAttempt.created_at.desc()).limit(20)).all()
+    return {
+        'company_id': ALLSTATE_COMPANY_ID,
+        'campaign_id': ALLSTATE_CAMPAIGN_ID,
+        'confirmation_required': INTERNAL_CONFIRMATION,
+        'prospect_calling_enabled': False,
+        'batch_calling_enabled': False,
+        'settings': _calling_settings_payload(row),
+        'health': health,
+        'attempts': [_call_attempt_payload(db, item) for item in latest_attempts],
+    }
+
+@router.get('/calling/retell/health')
+async def retell_health(user: User=Depends(current_user)):
+    return await calling_provider().health()
+
+@router.post('/calling/allstate/internal-test-number')
+def set_internal_test_number(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    phone = str(payload.get('phone_number') or '')
+    allow = bool(payload.get('allow', True))
+    try:
+        result = update_internal_test_number(db, phone, allow)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    log(db, 'Allstate Internal Test Number Updated', 'CallCampaignSettings', ALLSTATE_CAMPAIGN_ID, ALLSTATE_COMPANY_ID, user.id, {'allow': allow, 'phone': masked_phone(phone)})
+    db.commit()
+    return {'ok': True, **result}
+
+@router.post('/calling/allstate/internal-test-call')
+async def place_allstate_internal_test_call(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    phone = normalize_phone(payload.get('phone_number'))
+    if not valid_us_ca_e164(phone):
+        raise HTTPException(400, 'Use a valid US/Canada E.164 phone number such as +14165551234')
+    result = await create_internal_test_call(db, user, payload)
+    db.commit()
+    if not result.get('ok'):
+        status_code = 409 if result.get('blocked') else 502
+        raise HTTPException(status_code, result)
+    return result
+
+@router.get('/calling/allstate/attempts')
+def list_allstate_call_attempts(limit: int=Query(50, ge=1, le=200), db: Session=Depends(get_db), user: User=Depends(current_user)):
+    attempts = db.scalars(select(CallAttempt).where(CallAttempt.campaign_id == ALLSTATE_CAMPAIGN_ID).order_by(CallAttempt.created_at.desc()).limit(limit)).all()
+    return [_call_attempt_payload(db, item) for item in attempts]
+
+@router.get('/calling/allstate/attempts/{attempt_id}')
+def get_allstate_call_attempt(attempt_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    attempt = db.get(CallAttempt, attempt_id)
+    if not attempt or attempt.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Call attempt not found')
+    return _call_attempt_payload(db, attempt)
+
+@router.post('/webhooks/retell')
+async def retell_webhook(request: Request, db: Session=Depends(get_db)):
+    raw_body = await request.body()
+    signature = request.headers.get('X-Retell-Signature') or request.headers.get('x-retell-signature')
+    provider = RetellCallingProvider()
+    if not provider.verify_webhook(raw_body, signature):
+        raise HTTPException(401, 'Invalid Retell signature')
+    try:
+        payload = json.loads(raw_body.decode() or '{}')
+    except ValueError as exc:
+        raise HTTPException(400, 'Invalid JSON body') from exc
+    result = process_retell_webhook(db, raw_body, payload)
+    db.commit()
+    return result
+
+@router.post('/retell/tools/book-quote-appointment')
+def retell_tool_book_quote_appointment(request: Request, payload: dict=Body(...), db: Session=Depends(get_db)):
+    token = request.headers.get('X-Voryx-Retell-Tool-Token') or request.headers.get('X-Retell-Tool-Token')
+    if not validate_tool_token(token):
+        raise HTTPException(401, 'Invalid tool token')
+    result = book_quote_appointment(db, payload)
+    db.commit()
+    if not result.get('ok'):
+        raise HTTPException(404, result)
+    return result
+
+@router.post('/retell/tools/mark-do-not-call')
+def retell_tool_mark_do_not_call(request: Request, payload: dict=Body(...), db: Session=Depends(get_db)):
+    token = request.headers.get('X-Voryx-Retell-Tool-Token') or request.headers.get('X-Retell-Tool-Token')
+    if not validate_tool_token(token):
+        raise HTTPException(401, 'Invalid tool token')
+    result = mark_do_not_call(db, payload)
+    db.commit()
+    if not result.get('ok'):
+        raise HTTPException(404, result)
+    return result
 
 @router.get('/workers/status')
 def worker_status(company_id: str|None=None, db: Session=Depends(get_db), user: User=Depends(current_user)):
