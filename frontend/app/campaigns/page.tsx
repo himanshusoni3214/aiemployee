@@ -11,6 +11,7 @@ import { ModelPolicyPanel } from '../../components/ModelPolicyPanel';
 import { LocalTime } from '../../components/LocalTime';
 import { SalesCampaignWizard } from '../../components/SalesCampaignWizard';
 import { BibsLeadSourcePanel } from '../../components/BibsLeadSourcePanel';
+import { AllstateCallingPanel, type CallingWorkspace } from '../../components/AllstateCallingPanel';
 
 type CapabilitiesResponse = { hermes?: ConnectorCapabilities };
 type Company = { id: string; name: string; status: string };
@@ -106,6 +107,9 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
         return [campaign.id, { schema, outputs }];
       })))
     : {};
+  const allstateCallingWorkspace = companyId === 'company-allstate-himanshu'
+    ? await serverApi<CallingWorkspace>('/calling/allstate', { confirmation_required: '', settings: {}, health: {}, attempts: [] })
+    : null;
   const companyName = new Map(companies.map((company) => [company.id, company.name]));
   const statusRank = (status: string) => ({ Running: 0, Scheduled: 1, Paused: 2, Stopped: 3, Error: 4 }[status] ?? 5);
   const hermesIdsByCampaign = new Map<string, string[]>();
@@ -203,6 +207,44 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                     <p className="mt-1 text-xs text-zinc-400">{campaign.industry || 'Industry missing'} / {campaign.geographic_area || 'Location missing'} / {campaign.target_audience || 'Target customer missing'}</p>
                     <p className="mt-1 text-xs text-zinc-400">{campaign.description || 'Offer/product and notes not set'}</p>
                   </section>
+                  <section className="rounded border border-zinc-800 p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <div>
+                        <h3 className="text-sm font-semibold">Overview</h3>
+                        <p className="mt-1 text-xs text-zinc-400">Sales Campaign / Overview / Leads / Channels / Activity / Appointments / Reports / Settings</p>
+                      </div>
+                      <a className="btn-secondary text-xs" href={`/reports${queryString({ company_id: campaign.company_id })}`}>Reports</a>
+                    </div>
+                    <div className="mt-3 grid gap-3 md:grid-cols-2">
+                      <div className="rounded border border-zinc-900 p-3">
+                        <div className="flex items-center justify-between gap-3">
+                          <h4 className="text-sm font-semibold">Email</h4>
+                          <span className="text-xs text-emerald-300">{isEmailOutreach || leadSourceCampaign ? 'Connected' : 'Not connected'}</span>
+                        </div>
+                        <dl className="mt-3 grid grid-cols-2 gap-2 text-xs text-zinc-400">
+                          <div><dt>Eligible leads</dt><dd className="text-lg text-zinc-100">{(leadSourceDetail?.outputs.rows || detail.outputs.rows || []).length}</dd></div>
+                          <div><dt>Approved</dt><dd className="text-lg text-zinc-100">{jobs.filter((job) => job.campaign_id === campaign.id && /approve/i.test(job.task_type)).length}</dd></div>
+                          <div><dt>Ready to send</dt><dd className="text-lg text-zinc-100">{jobs.filter((job) => job.campaign_id === campaign.id && job.status === 'Queued').length}</dd></div>
+                          <div><dt>Sent</dt><dd className="text-lg text-zinc-100">{jobs.filter((job) => job.campaign_id === campaign.id && job.task_type === 'Controlled Outreach Batch' && job.status === 'Completed').length}</dd></div>
+                          <div><dt>Replies</dt><dd className="text-lg text-zinc-100">0</dd></div>
+                        </dl>
+                      </div>
+                      <a className="rounded border border-zinc-900 p-3 transition hover:border-zinc-700" href={campaign.id === 'campaign-allstate-quote-calling' ? '#calling-channel' : '/calling'}>
+                        <div className="flex items-center justify-between gap-3">
+                          <h4 className="text-sm font-semibold">Calling</h4>
+                          <span className={campaign.id === 'campaign-allstate-quote-calling' ? 'text-xs text-emerald-300' : 'text-xs text-zinc-500'}>{campaign.id === 'campaign-allstate-quote-calling' ? 'Connected' : 'Not connected'}</span>
+                        </div>
+                        <dl className="mt-3 grid grid-cols-2 gap-2 text-xs text-zinc-400">
+                          <div><dt>Phone-ready leads</dt><dd className="text-lg text-zinc-100">0</dd></div>
+                          <div><dt>Consent verified</dt><dd className="text-lg text-zinc-100">{campaign.id === 'campaign-allstate-quote-calling' ? 1 : 0}</dd></div>
+                          <div><dt>Approved</dt><dd className="text-lg text-zinc-100">0</dd></div>
+                          <div><dt>Ready to call</dt><dd className="text-lg text-zinc-100">0</dd></div>
+                          <div><dt>Calls completed</dt><dd className="text-lg text-zinc-100">{campaign.id === 'campaign-allstate-quote-calling' ? (allstateCallingWorkspace?.attempts || []).filter((attempt) => ['ended', 'analyzed'].includes(attempt.status)).length : 0}</dd></div>
+                          <div><dt>Appointments</dt><dd className="text-lg text-zinc-100">0</dd></div>
+                        </dl>
+                      </a>
+                    </div>
+                  </section>
                   {isLeadResearch ? <section className="rounded border border-zinc-800 p-3">
                     <h3 className="text-sm font-semibold">Leads</h3>
                     <LeadSchemaEditor campaignId={campaign.id} initialSchema={detail.schema || {}} />
@@ -227,9 +269,13 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                     <p className="mt-1 text-xs text-zinc-400">Reply Monitor: not connected. Follow-up is blocked until Gmail thread monitoring, bounces, unsubscribes and reply classification are connected.</p>
                     <p className="mt-1 text-xs text-zinc-400">Meetings booked: 0. Appointment booking will activate only after reply monitor and calendar policy are connected.</p>
                   </section>
-                  <section className="rounded border border-zinc-800 p-3">
+                  <section id="calling-channel" className="rounded border border-zinc-800 p-3">
                     <h3 className="text-sm font-semibold">Calling</h3>
-                    <p className="mt-1 text-xs text-zinc-400">Status: not connected. Required before enabling: voice provider, caller ID, call script, recording/transcript policy, do-not-call controls and daily call limit.</p>
+                    {campaign.id === 'campaign-allstate-quote-calling' && allstateCallingWorkspace ? (
+                      <div className="mt-3"><AllstateCallingPanel initialWorkspace={allstateCallingWorkspace} /></div>
+                    ) : (
+                      <p className="mt-1 text-xs text-zinc-400">Status: not connected. Required before enabling: voice provider, caller ID, call script, recording/transcript policy, do-not-call controls and daily call limit.</p>
+                    )}
                   </section>
                   <section className="rounded border border-zinc-800 p-3">
                     <h3 className="text-sm font-semibold">SMS/Text</h3>

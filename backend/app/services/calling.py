@@ -5,6 +5,7 @@ import json
 import re
 from datetime import datetime
 from typing import Any
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select
@@ -33,12 +34,21 @@ RETELL_BASE_URL = 'https://api.retellai.com'
 CALL_ACTIVE_STATUSES = {'requested', 'queued', 'initiated', 'registered', 'ringing', 'ongoing', 'in_progress', 'started'}
 INTERNAL_CONFIRMATION = 'PLACE INTERNAL TEST CALL'
 CORRECTED_INTERNAL_CONFIRMATION = 'PLACE CORRECTED INTERNAL TEST CALL'
-INTERNAL_CONFIRMATIONS = {INTERNAL_CONFIRMATION, CORRECTED_INTERNAL_CONFIRMATION}
+REFINED_INTERNAL_CONFIRMATION = 'PLACE REFINED INTERNAL TEST CALL'
+INTERNAL_CONFIRMATIONS = {INTERNAL_CONFIRMATION, CORRECTED_INTERNAL_CONFIRMATION, REFINED_INTERNAL_CONFIRMATION}
 US_CA_E164_RE = re.compile(r'^\+1[2-9]\d{9}$')
 ALLSTATE_BEGIN_MESSAGE = (
-    "Hi {{customer_name}}, this is Ava, the Voryx AI assistant for Himanshu Soni, "
-    "an Allstate Sales Agent in Scarborough. This is an internal test call for "
-    "Himanshu's Allstate quote appointment workflow. Is now a good time for a short test conversation?"
+    "Hi {{customer_name}}, this is Ava calling on behalf of Himanshu Soni, "
+    "an Allstate Sales Agent in Scarborough. This is a test of his insurance quote "
+    "appointment workflow. Is now a bad time for a quick conversation?"
+)
+ALLSTATE_CONSENTED_PROSPECT_BEGIN_MESSAGE = (
+    "Hi {{customer_name}}, this is Ava calling on behalf of Himanshu Soni, "
+    "an Allstate Sales Agent in Scarborough. You had given permission to be contacted "
+    "about reviewing your insurance options. Is now a bad time for a quick conversation?"
+)
+ALLSTATE_RECORDING_DISCLOSURE = (
+    "Before we continue, this call may be recorded and transcribed for quality and appointment notes."
 )
 REQUIRED_DYNAMIC_VARIABLES = [
     'customer_name',
@@ -54,8 +64,120 @@ REQUIRED_DYNAMIC_VARIABLES = [
     'consent_date',
     'booking_timezone',
     'internal_test',
+    'recording_disclosure_enabled',
+    'recording_disclosure',
+    'consent_validated_for_called_number',
     'voryx_call_attempt_id',
 ]
+ALLSTATE_VOICE_ID = 'retell-Della'
+ALLSTATE_VOICE_NAME = 'Della'
+ALLSTATE_VOICE_SETTINGS = {
+    'voice_id': ALLSTATE_VOICE_ID,
+    'voice_name': ALLSTATE_VOICE_NAME,
+    'responsiveness': 0.78,
+    'interruption_sensitivity': 0.75,
+    'enable_backchannel': True,
+    'backchannel_words': ['okay', 'right', 'I understand'],
+    'ambient_sound': None,
+    'denoising_mode': 'noise-cancellation',
+    'pronunciation_guidance': {
+        'Himanshu Soni': 'him-AHN-shoo SOH-nee',
+        'Allstate': 'ALL-state',
+        'Scarborough': 'SCAR-bur-oh',
+        'Ontario': 'on-TAIR-ee-oh',
+    },
+}
+ALLSTATE_REFINED_PROMPT = f"""## Identity and role
+
+You are Ava, a professional automated calling assistant calling on behalf of Himanshu Soni, an Allstate Sales Agent in Scarborough, Ontario.
+
+You are not human, and you are not a licensed insurance agent. Do not claim or imply that you are human. If directly asked whether you are automated, virtual, a robot or AI, answer truthfully.
+
+Your job is to have a short, respectful conversation and arrange a quote appointment with Himanshu when appropriate. Do not complete an insurance quote during this call.
+
+## Openings
+
+For an internal test, begin exactly:
+"{ALLSTATE_BEGIN_MESSAGE}"
+
+For a consented prospect, begin exactly:
+"{ALLSTATE_CONSENTED_PROSPECT_BEGIN_MESSAGE}"
+
+Only use the consented-prospect wording when all consent variables are present and {{{{consent_validated_for_called_number}}}} is "true". Required consent data is consent_source, consent_date, consent tied to the called number, and automated or synthesized-call consent. Never invent permission.
+
+If {{{{recording_disclosure_enabled}}}} is "true", state near the beginning:
+"{ALLSTATE_RECORDING_DISCLOSURE}"
+
+If the person objects to recording or transcription, do not continue a prospect call. Offer a human callback if supported; otherwise end politely. Mark recording_objection in the call outcome and avoid storing unnecessary conversation content.
+
+Immediately after permission to continue, say:
+"The reason for my call is to see whether reviewing your auto or property insurance would be useful and, if it is, arrange a short quote appointment with Himanshu."
+
+## Honest automation disclosure
+
+When asked "Are you AI?", "Are you a robot?", "Are you a real person?", or similar, say:
+"Yes, I'm an automated calling assistant helping Himanshu with initial conversations and scheduling. I can't provide insurance advice or quote prices, but I can arrange a conversation with him."
+
+Never evade the question. Never say or imply that Ava is human.
+
+## Conversation style
+
+Use one question at a time. Keep most replies to one or two sentences. Acknowledge the answer before the next question. Use contractions naturally. Avoid repeating the person's name. Do not repeat Allstate in every response. Avoid excessive enthusiasm, sales cliches and lists. Stop speaking when interrupted. Allow brief natural pauses. Never pressure. Do not continue qualifying after a clear rejection. Do not sound like a general-purpose assistant.
+
+Use these acknowledgements sparingly: "Okay.", "That makes sense.", "Understood.", "Got it."
+
+Do not say: "Absolutely!", "Great question!", "I'd be happy to help!", or "As an AI..."
+
+## Scope restrictions
+
+Never quote a premium, promise savings, guarantee eligibility, bind coverage, compare exact coverage without approved information, provide final coverage advice, claim the person is currently an Allstate customer, request banking information, request payment-card information, request a Social Insurance Number, request a driver's licence number during the initial automated call, or request unnecessary sensitive information.
+
+For detailed coverage, eligibility, underwriting or pricing questions say:
+"Himanshu would need to review that with you directly because he is the licensed agent. I can arrange a convenient time for that conversation."
+
+## Scepticism handling
+
+When asked "Is this really Allstate?" say:
+"I'm calling on behalf of Himanshu Soni, an Allstate Sales Agent. I can arrange for you to speak with him directly, and I won't ask for banking or payment information."
+
+When asked "How did you get my number?" use only:
+"Our record shows permission was provided through {{{{consent_source}}}} on {{{{consent_date}}}}."
+
+If consent_source or consent_date is absent, do not fabricate an explanation. Apologize, flag consent_review_required, and end the call.
+
+When asked "Is this a scam?" say:
+"I understand the concern. I'm calling on behalf of Himanshu Soni, an Allstate Sales Agent. I won't ask for payment, banking details or sensitive identity information. I can arrange a direct callback with Himanshu instead."
+
+When told "I already have insurance" say:
+"That makes sense. This would only be an optional comparison of coverage and service. Would reviewing it near your renewal date be useful?"
+
+When told "I'm not interested" say:
+"Understood. Thank you for your time."
+
+Do not continue selling after rejection.
+
+## Do not call
+
+If the person says do not call, stop calling, remove my number, or take me off the list, say:
+"Understood. I'll mark this number not to be contacted again. Thank you."
+
+Invoke voryx_mark_do_not_call immediately and end the call.
+
+## Appointment
+
+When the person agrees to speak with Himanshu, confirm the insurance interest, preferred date, preferred time, and America/Toronto timezone. Invoke voryx_book_quote_appointment and repeat the confirmed appointment naturally. Do not claim the appointment is booked unless the function confirms success.
+
+## Internal testing
+
+When {{{{internal_test}}}} is "true", state that it is a test of Himanshu's quote appointment workflow, exercise the same insurance conversation flow, do not create a prospect lead, and do not change a real prospect's consent or status.
+
+## Pronunciation
+
+Himanshu Soni: him-AHN-shoo SOH-nee.
+Allstate: ALL-state.
+Scarborough: SCAR-bur-oh.
+Ontario: on-TAIR-ee-oh.
+"""
 TERMINAL_STATUS_MAP = {
     'call_started': 'started',
     'call_ended': 'ended',
@@ -95,6 +217,16 @@ def masked_phone(value: str | None) -> str:
 
 def _now() -> datetime:
     return datetime.utcnow()
+
+
+def _local_date(timezone: str = 'America/Toronto', now: datetime | None = None) -> str:
+    now = now or _now()
+    try:
+        if now.tzinfo is None:
+            return now.replace(tzinfo=ZoneInfo('UTC')).astimezone(ZoneInfo(timezone)).date().isoformat()
+        return now.astimezone(ZoneInfo(timezone)).date().isoformat()
+    except Exception:
+        return now.date().isoformat()
 
 
 def _redact_payload(payload: Any) -> Any:
@@ -183,8 +315,6 @@ class RetellCallingProvider:
                     blockers.append('Configured Retell agent is not the Voryx Allstate agent')
                 if str(agent_payload.get('agent_name') or '').strip().lower() in {'call agent', 'generic call agent'}:
                     blockers.append('Generic Call Agent is selected')
-                if agent_payload.get('is_published') is False:
-                    blockers.append('Retell agent prompt/version is unpublished')
             except CallingProviderError as exc:
                 blockers.append(str(exc))
                 api_authenticated = 'authentication failed' not in str(exc).lower()
@@ -232,6 +362,12 @@ class RetellCallingProvider:
             'agent_is_published': agent_payload.get('is_published') if isinstance(agent_payload, dict) else None,
             'configured_agent_version': configured_agent_version,
             'response_engine': agent_payload.get('response_engine') if isinstance(agent_payload, dict) else None,
+            'voice_id': agent_payload.get('voice_id') if isinstance(agent_payload, dict) else None,
+            'responsiveness': agent_payload.get('responsiveness') if isinstance(agent_payload, dict) else None,
+            'interruption_sensitivity': agent_payload.get('interruption_sensitivity') if isinstance(agent_payload, dict) else None,
+            'enable_backchannel': agent_payload.get('enable_backchannel') if isinstance(agent_payload, dict) else None,
+            'backchannel_words': agent_payload.get('backchannel_words') if isinstance(agent_payload, dict) else None,
+            'ambient_sound': agent_payload.get('ambient_sound') if isinstance(agent_payload, dict) else None,
             'from_number_configured': bool(from_number),
             'number_exists': number_exists,
             'outbound_agent_correctly_assigned': outbound_agent_correct,
@@ -362,6 +498,7 @@ def ensure_allstate_calling_campaign(db: Session, user_id: str | None = None) ->
             automated_queue_enabled=False,
             recording_enabled=True,
             transcription_enabled=True,
+            call_recording_disclosure_enabled=True,
             appointment_booking_enabled=True,
             created_at=now,
             updated_at=now,
@@ -369,12 +506,25 @@ def ensure_allstate_calling_campaign(db: Session, user_id: str | None = None) ->
         db.add(settings_row)
         created.append('call_settings')
     else:
-        settings_row.provider_agent_id = settings.retell_agent_id or settings_row.provider_agent_id
-        settings_row.from_number = normalize_phone(settings.retell_from_number) or settings_row.from_number
-        settings_row.prospect_calling_enabled = False
-        settings_row.automated_queue_enabled = False
-        settings_row.concurrent_call_limit = max(1, settings_row.concurrent_call_limit or 1)
-        settings_row.updated_at = now
+        desired_values = {
+            'provider_agent_id': settings.retell_agent_id or settings_row.provider_agent_id,
+            'from_number': normalize_phone(settings.retell_from_number) or settings_row.from_number,
+            'prospect_calling_enabled': False,
+            'automated_queue_enabled': False,
+            'concurrent_call_limit': max(1, settings_row.concurrent_call_limit or 1),
+            'call_recording_disclosure_enabled': bool(
+                settings_row.call_recording_disclosure_enabled
+                or settings_row.recording_enabled
+                or settings_row.transcription_enabled
+            ),
+        }
+        changed = False
+        for field, value in desired_values.items():
+            if getattr(settings_row, field) != value:
+                setattr(settings_row, field, value)
+                changed = True
+        if changed:
+            settings_row.updated_at = now
 
     db.flush()
     if created:
@@ -390,9 +540,18 @@ def call_settings(db: Session) -> CallCampaignSettings:
     return row
 
 
-def internal_test_dynamic_variables(call_attempt_id: str, payload: dict | None = None, now: datetime | None = None) -> dict[str, str]:
+def internal_test_dynamic_variables(
+    call_attempt_id: str,
+    payload: dict | None = None,
+    now: datetime | None = None,
+    call_settings_row: CallCampaignSettings | None = None,
+) -> dict[str, str]:
     payload = payload or {}
     now = now or _now()
+    disclosure_enabled = True if call_settings_row is None else bool(
+        call_settings_row.call_recording_disclosure_enabled
+        and (call_settings_row.recording_enabled or call_settings_row.transcription_enabled)
+    )
     values = {
         'customer_name': str(payload.get('recipient_name') or 'Himanshu'),
         'assistant_name': 'Ava',
@@ -404,19 +563,29 @@ def internal_test_dynamic_variables(call_attempt_id: str, payload: dict | None =
         'call_purpose': 'Internal test of an insurance quote appointment conversation',
         'insurance_interest': str(payload.get('insurance_interest') or 'Auto and home insurance'),
         'consent_source': 'Internal self-test entered in Voryx',
-        'consent_date': now.date().isoformat(),
+        'consent_date': _local_date(str(payload.get('booking_timezone') or 'America/Toronto'), now),
         'booking_timezone': str(payload.get('booking_timezone') or 'America/Toronto'),
         'internal_test': 'true',
+        'recording_disclosure_enabled': 'true' if disclosure_enabled else 'false',
+        'recording_disclosure': ALLSTATE_RECORDING_DISCLOSURE if disclosure_enabled else '',
+        'consent_validated_for_called_number': 'true',
         'voryx_call_attempt_id': call_attempt_id,
     }
     return {key: str(values[key]) for key in REQUIRED_DYNAMIC_VARIABLES}
 
 
-def internal_test_preview_payload(call_attempt_id: str = '<created after click>', payload: dict | None = None) -> dict:
-    variables = internal_test_dynamic_variables(call_attempt_id, payload)
+def internal_test_preview_payload(
+    call_attempt_id: str = '<created after click>',
+    payload: dict | None = None,
+    call_settings_row: CallCampaignSettings | None = None,
+) -> dict:
+    variables = internal_test_dynamic_variables(call_attempt_id, payload, call_settings_row=call_settings_row)
     missing = [key for key in REQUIRED_DYNAMIC_VARIABLES if not variables.get(key)]
     return {
         'begin_message': ALLSTATE_BEGIN_MESSAGE,
+        'consented_prospect_begin_message': ALLSTATE_CONSENTED_PROSPECT_BEGIN_MESSAGE,
+        'recording_disclosure': ALLSTATE_RECORDING_DISCLOSURE,
+        'recording_disclosure_enabled': variables['recording_disclosure_enabled'] == 'true',
         'business_purpose': variables['call_purpose'],
         'dynamic_variables': variables,
         'required_dynamic_variables': REQUIRED_DYNAMIC_VARIABLES,
@@ -425,6 +594,7 @@ def internal_test_preview_payload(call_attempt_id: str = '<created after click>'
         'override_agent_version': str(settings.retell_agent_version or 'latest_published'),
         'from_number': normalize_phone(settings.retell_from_number),
         'expected_agent_name': ALLSTATE_AGENT_NAME,
+        'voice': ALLSTATE_VOICE_SETTINGS,
     }
 
 
@@ -455,7 +625,7 @@ async def authorize_internal_test_call(db: Session, user: User, phone_number: st
     if row.prospect_calling_enabled or row.automated_queue_enabled:
         blockers.append('Prospect or automated calling must remain disabled for this milestone')
     if confirmation not in INTERNAL_CONFIRMATIONS:
-        blockers.append(f'Confirmation must exactly match {CORRECTED_INTERNAL_CONFIRMATION}')
+        blockers.append(f'Confirmation must exactly match {REFINED_INTERNAL_CONFIRMATION}')
     if not valid_us_ca_e164(phone):
         blockers.append('Phone number must be a valid US/Canada E.164 number')
     allowlist = {normalize_phone(item) for item in row.internal_test_numbers or []}
@@ -523,7 +693,7 @@ async def create_internal_test_call(db: Session, user: User, payload: dict, prov
     db.add(consent)
 
     dynamic_variables = {
-        **internal_test_dynamic_variables(attempt.id, payload, now),
+        **internal_test_dynamic_variables(attempt.id, payload, now, call_settings(db)),
     }
     try:
         receipt = await provider.place_call(to_number=phone, call_attempt_id=attempt.id, dynamic_variables=dynamic_variables)

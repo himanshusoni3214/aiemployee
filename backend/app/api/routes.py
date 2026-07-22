@@ -88,7 +88,7 @@ from app.services.calling import (
     ALLSTATE_CAMPAIGN_ID,
     ALLSTATE_COMPANY_ID,
     ALLSTATE_AGENT_NAME,
-    CORRECTED_INTERNAL_CONFIRMATION,
+    REFINED_INTERNAL_CONFIRMATION,
     RetellCallingProvider,
     book_quote_appointment,
     call_settings,
@@ -2017,6 +2017,7 @@ def _calling_settings_payload(row: CallCampaignSettings) -> dict:
         'automated_queue_enabled': row.automated_queue_enabled,
         'recording_enabled': row.recording_enabled,
         'transcription_enabled': row.transcription_enabled,
+        'call_recording_disclosure_enabled': row.call_recording_disclosure_enabled,
         'appointment_booking_enabled': row.appointment_booking_enabled,
         'updated_at': row.updated_at,
     }
@@ -2029,9 +2030,8 @@ def provision_allstate_calling(db: Session=Depends(get_db), user: User=Depends(r
 
 @router.get('/calling/allstate')
 async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Depends(current_user)):
-    ensure_allstate_calling_campaign(db, user.id)
-    row = call_settings(db)
     health = await calling_provider().health()
+    row = call_settings(db)
     row.provider_connected = bool(health.get('api_authenticated') and health.get('agent_exists') and health.get('number_exists'))
     row.provider_agent_id = settings.retell_agent_id or row.provider_agent_id
     row.from_number = normalize_phone(settings.retell_from_number) or row.from_number
@@ -2043,7 +2043,7 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
                 await sync_call_attempt_from_retell(db, attempt, provider)
             except Exception:
                 pass
-    preview = internal_test_preview_payload()
+    preview = internal_test_preview_payload(call_settings_row=row)
     warnings = []
     if health.get('agent_name') != ALLSTATE_AGENT_NAME:
         warnings.append('Expected Allstate agent is not selected')
@@ -2051,15 +2051,13 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
         warnings.append('Retell agent ID differs from configured ID')
     if str(health.get('agent_name') or '').strip().lower() in {'call agent', 'generic call agent'}:
         warnings.append('Generic Call Agent is selected')
-    if health.get('agent_is_published') is False:
-        warnings.append('Agent prompt/version is unpublished')
     if preview.get('missing_dynamic_variables'):
         warnings.append('Required dynamic variables are missing')
     db.commit()
     return {
         'company_id': ALLSTATE_COMPANY_ID,
         'campaign_id': ALLSTATE_CAMPAIGN_ID,
-        'confirmation_required': CORRECTED_INTERNAL_CONFIRMATION,
+        'confirmation_required': REFINED_INTERNAL_CONFIRMATION,
         'prospect_calling_enabled': False,
         'batch_calling_enabled': False,
         'settings': _calling_settings_payload(row),

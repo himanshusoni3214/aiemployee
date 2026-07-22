@@ -382,6 +382,7 @@ class CallCampaignSettings(Base):
     automated_queue_enabled: Mapped[bool]=mapped_column(Boolean, default=False)
     recording_enabled: Mapped[bool]=mapped_column(Boolean, default=True)
     transcription_enabled: Mapped[bool]=mapped_column(Boolean, default=True)
+    call_recording_disclosure_enabled: Mapped[bool]=mapped_column(Boolean, default=True)
     appointment_booking_enabled: Mapped[bool]=mapped_column(Boolean, default=True)
     created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)

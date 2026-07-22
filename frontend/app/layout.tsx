@@ -7,7 +7,6 @@ const links = [
   ['Companies', '/companies'],
   ['Sales Workspaces', '/campaigns'],
   ['Leads', '/leads'],
-  ['Calling', '/calling'],
   ['Outreach', '/outreach'],
   ['Replies', '/replies'],
   ['Meetings', '/meetings'],
