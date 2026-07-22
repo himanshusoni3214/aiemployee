@@ -17,6 +17,7 @@ class Settings(BaseSettings):
     retell_api_key: str = ""
     retell_webhook_api_key: str = ""
     retell_agent_id: str = ""
+    retell_permanent_agent_id: str = ""
     retell_agent_version: str = "latest_published"
     retell_from_number: str = "+14377475010"
     retell_tool_token: str = ""

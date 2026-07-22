@@ -1,6 +1,6 @@
 import enum, uuid
 from datetime import datetime
-from sqlalchemy import Boolean, DateTime, Enum, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, Enum, Float, ForeignKey, Integer, JSON, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base
 
@@ -417,6 +417,13 @@ class CallAttempt(Base):
     provider: Mapped[str]=mapped_column(String, default='retell', index=True)
     provider_call_id: Mapped[str|None]=mapped_column(String, nullable=True, unique=True, index=True)
     provider_agent_id: Mapped[str|None]=mapped_column(String, nullable=True, index=True)
+    provider_agent_version: Mapped[int|None]=mapped_column(Integer, nullable=True)
+    provider_cost_cents: Mapped[float|None]=mapped_column(Float, nullable=True)
+    provider_cost_final: Mapped[bool]=mapped_column(Boolean, default=False)
+    provider_cost_currency: Mapped[str]=mapped_column(String, default='USD')
+    provider_cost_breakdown: Mapped[dict]=mapped_column(JSON, default=dict)
+    provider_llm_model: Mapped[str|None]=mapped_column(String, nullable=True)
+    provider_voice_id: Mapped[str|None]=mapped_column(String, nullable=True)
     from_number: Mapped[str|None]=mapped_column(String, nullable=True)
     to_number: Mapped[str]=mapped_column(String, index=True)
     mode: Mapped[str]=mapped_column(String, default='internal_test', index=True)

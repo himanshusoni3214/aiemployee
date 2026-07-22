@@ -88,7 +88,7 @@ from app.services.calling import (
     ALLSTATE_CAMPAIGN_ID,
     ALLSTATE_COMPANY_ID,
     ALLSTATE_AGENT_NAME,
-    REFINED_INTERNAL_CONFIRMATION,
+    FINAL_SALES_INTERNAL_CONFIRMATION,
     RetellCallingProvider,
     book_quote_appointment,
     call_settings,
@@ -1946,6 +1946,8 @@ def _call_attempt_payload(db: Session, attempt: CallAttempt) -> dict:
     transcript = db.scalar(select(CallTranscript).where(CallTranscript.call_attempt_id == attempt.id))
     disposition = db.scalar(select(CallDisposition).where(CallDisposition.call_attempt_id == attempt.id))
     appointments = db.scalars(select(CallAppointment).where(CallAppointment.call_attempt_id == attempt.id).order_by(CallAppointment.created_at.desc())).all()
+    cost_dollars = (attempt.provider_cost_cents / 100.0) if attempt.provider_cost_cents is not None else None
+    duration_minutes = (attempt.duration_seconds / 60.0) if attempt.duration_seconds else None
     return {
         'id': attempt.id,
         'company_id': attempt.company_id,
@@ -1953,6 +1955,7 @@ def _call_attempt_payload(db: Session, attempt: CallAttempt) -> dict:
         'provider': attempt.provider,
         'provider_call_id': attempt.provider_call_id,
         'provider_agent_id': attempt.provider_agent_id,
+        'provider_agent_version': attempt.provider_agent_version,
         'from_number': attempt.from_number,
         'to_number_masked': masked_phone(attempt.to_number),
         'mode': attempt.mode,
@@ -1965,6 +1968,16 @@ def _call_attempt_payload(db: Session, attempt: CallAttempt) -> dict:
         'termination_reason': attempt.termination_reason,
         'metadata_json': attempt.metadata_json or {},
         'provider_receipt': attempt.provider_receipt or {},
+        'cost': {
+            'amount': cost_dollars,
+            'currency': attempt.provider_cost_currency or 'USD',
+            'final': bool(attempt.provider_cost_final),
+            'label': 'Final provider cost' if attempt.provider_cost_final else 'Estimated provider cost',
+            'per_connected_minute': (cost_dollars / duration_minutes) if cost_dollars is not None and duration_minutes else None,
+            'breakdown': attempt.provider_cost_breakdown or {},
+            'llm': attempt.provider_llm_model,
+            'voice': attempt.provider_voice_id,
+        },
         'transcript': {
             'transcript': getattr(transcript, 'transcript', None),
             'segments': getattr(transcript, 'transcript_segments', []) or [],
@@ -2038,7 +2051,7 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
     latest_attempts = db.scalars(select(CallAttempt).where(CallAttempt.campaign_id == ALLSTATE_CAMPAIGN_ID).order_by(CallAttempt.created_at.desc()).limit(20)).all()
     provider = calling_provider()
     for attempt in latest_attempts[:5]:
-        if attempt.provider_call_id and attempt.status not in {'ended', 'analyzed'}:
+        if attempt.provider_call_id and (attempt.status not in {'ended', 'analyzed'} or attempt.provider_cost_cents is None):
             try:
                 await sync_call_attempt_from_retell(db, attempt, provider)
             except Exception:
@@ -2057,7 +2070,7 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
     return {
         'company_id': ALLSTATE_COMPANY_ID,
         'campaign_id': ALLSTATE_CAMPAIGN_ID,
-        'confirmation_required': REFINED_INTERNAL_CONFIRMATION,
+        'confirmation_required': FINAL_SALES_INTERNAL_CONFIRMATION,
         'prospect_calling_enabled': False,
         'batch_calling_enabled': False,
         'settings': _calling_settings_payload(row),
@@ -2065,6 +2078,11 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
         'preview': preview,
         'warnings': warnings,
         'attempts': [_call_attempt_payload(db, item) for item in latest_attempts],
+        'campaign_cost': {
+            'amount': sum(float(item.provider_cost_cents or 0) for item in latest_attempts) / 100.0,
+            'currency': 'USD',
+            'scope': 'latest 20 calls stored in Voryx',
+        },
     }
 
 @router.get('/calling/retell/health')

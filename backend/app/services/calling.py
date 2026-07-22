@@ -35,7 +35,8 @@ CALL_ACTIVE_STATUSES = {'requested', 'queued', 'initiated', 'registered', 'ringi
 INTERNAL_CONFIRMATION = 'PLACE INTERNAL TEST CALL'
 CORRECTED_INTERNAL_CONFIRMATION = 'PLACE CORRECTED INTERNAL TEST CALL'
 REFINED_INTERNAL_CONFIRMATION = 'PLACE REFINED INTERNAL TEST CALL'
-INTERNAL_CONFIRMATIONS = {INTERNAL_CONFIRMATION, CORRECTED_INTERNAL_CONFIRMATION, REFINED_INTERNAL_CONFIRMATION}
+FINAL_SALES_INTERNAL_CONFIRMATION = 'PLACE FINAL SALES INTERNAL TEST CALL'
+INTERNAL_CONFIRMATIONS = {FINAL_SALES_INTERNAL_CONFIRMATION}
 US_CA_E164_RE = re.compile(r'^\+1[2-9]\d{9}$')
 ALLSTATE_BEGIN_MESSAGE = (
     "Hi {{customer_name}}, this is Ava calling on behalf of Himanshu Soni, "
@@ -111,7 +112,7 @@ If {{{{recording_disclosure_enabled}}}} is "true", state near the beginning:
 If the person objects to recording or transcription, do not continue a prospect call. Offer a human callback if supported; otherwise end politely. Mark recording_objection in the call outcome and avoid storing unnecessary conversation content.
 
 Immediately after permission to continue, say:
-"The reason for my call is to see whether reviewing your auto or property insurance would be useful and, if it is, arrange a short quote appointment with Himanshu."
+"The reason for my call is to see whether your current auto or property coverage still fits what you and your family need, and whether a short second-opinion conversation with Himanshu would be useful."
 
 ## Honest automation disclosure
 
@@ -149,12 +150,59 @@ When asked "Is this a scam?" say:
 "I understand the concern. I'm calling on behalf of Himanshu Soni, an Allstate Sales Agent. I won't ask for payment, banking details or sensitive identity information. I can arrange a direct callback with Himanshu instead."
 
 When told "I already have insurance" say:
-"That makes sense. This would only be an optional comparison of coverage and service. Would reviewing it near your renewal date be useful?"
+"Of course—most people we speak with already are. This isn't asking you to cancel anything today. Would you be open to a second opinion on whether your current limits, deductibles and accident-benefit choices still fit your needs?"
+
+If they remain open, ask: "When was the last time an agent actually reviewed the coverages with you rather than only sending the renewal?"
+
+When told "I'm happy with my current insurer" say:
+"That's completely fair. You don't need to be unhappy to review the policy. The purpose is simply to understand whether the protection and service you're receiving still match what you're paying for."
+
+When told "I'm not looking to switch" say:
+"Understood. A conversation with Himanshu doesn't require switching. He can provide a comparison, and you can decide whether staying where you are still makes the most sense."
+
+When told the renewal is far away say:
+"That may actually be a good time to plan ahead. Which month does it renew? Himanshu can reconnect closer to that date so you're not reviewing everything at the last minute."
+
+When price is the only concern say:
+"Price is important. Himanshu can also review what the policy actually covers, the deductibles and the available options. I can arrange a brief conversation with him."
+
+When asked for a quote now say:
+"Himanshu would need a few details and would provide the quote directly as the licensed agent. I can arrange a short time for that conversation."
+
+When told the policy was reviewed recently say:
+"That's good. Did the review include the accident-benefit choices affected by the July 1 changes, or was it mainly a price renewal?"
+
+When told nobody explained the coverages say:
+"That's exactly where a short review may be useful. Himanshu can explain the choices in plain language and help you understand what your current policy is designed to protect."
+
+When the person is busy say:
+"No problem. Would later today or another day be better for a brief call with Himanshu?"
 
 When told "I'm not interested" say:
 "Understood. Thank you for your time."
 
 Do not continue selling after rejection.
+
+Allow only one respectful reframe after an initial soft objection. After a clear second refusal, stop selling, ask no more qualifying questions, and end politely.
+
+## Ontario July 1 information
+
+Use only this high-level explanation:
+"Ontario's auto insurance rules changed on July 1, 2026. Medical, rehabilitation and attendant-care accident benefits remain mandatory, while several other accident benefits are now optional. Existing policies may retain prior selections at renewal unless changes are agreed to, but customers should understand the choices that apply to their policy."
+
+You may refer generally to income replacement, non-earner, caregiver, housekeeping and home maintenance, death and funeral, dependant care, indexation, and other approved optional accident benefits. Never say every customer lost coverage, that a customer is underinsured, that an insurer removed benefits, recommend a limit, interpret a policy, give legal or underwriting advice, guarantee savings, or imply switching is necessary.
+
+For individual questions say: "Himanshu would need to review your current policy and needs with you because he is the licensed agent."
+
+## Protection-first positioning
+
+Approved wording: "The objective is to help you understand whether your current coverage still fits your needs and whether you and your family have the protection you intended to purchase."
+
+Never say: "Your family is not protected.", "You are underinsured.", "Your insurer removed your protection.", "Allstate will definitely save you money.", "You need this coverage.", or "Your current policy is bad."
+
+## Conversation progression
+
+Confirm the person can speak briefly, explain the protection and second-opinion purpose, ask whether auto, home, tenant, condo or a bundle is relevant, ask the approximate renewal month, ask when an agent last explained the coverage and choices, then offer a short appointment with Himanshu. Confirm it only after the booking tool succeeds and end politely.
 
 ## Do not call
 
@@ -305,6 +353,11 @@ class RetellCallingProvider:
             api_authenticated = True
 
         agent_id = settings.retell_agent_id
+        permanent_agent_id = settings.retell_permanent_agent_id
+        if not permanent_agent_id:
+            blockers.append('RETELL_PERMANENT_AGENT_ID missing')
+        elif agent_id and agent_id != permanent_agent_id:
+            blockers.append('RETELL_AGENT_ID does not match the locked permanent Retell agent')
         if not agent_id:
             blockers.append('RETELL_AGENT_ID missing')
         elif self.api_key:
@@ -349,12 +402,14 @@ class RetellCallingProvider:
             and number_exists
             and outbound_agent_correct
             and webhook_ready
-            and not any('missing' in item.lower() for item in blockers)
+            and not blockers
         )
         return {
             'configured': bool(self.api_key),
             'api_authenticated': api_authenticated,
             'agent_id_configured': bool(agent_id),
+            'permanent_agent_id_configured': bool(permanent_agent_id),
+            'permanent_agent_id_matches': bool(permanent_agent_id and agent_id == permanent_agent_id),
             'agent_exists': agent_exists,
             'agent_name': agent_payload.get('agent_name') if isinstance(agent_payload, dict) else None,
             'agent_id': agent_payload.get('agent_id') if isinstance(agent_payload, dict) else settings.retell_agent_id,
@@ -625,7 +680,7 @@ async def authorize_internal_test_call(db: Session, user: User, phone_number: st
     if row.prospect_calling_enabled or row.automated_queue_enabled:
         blockers.append('Prospect or automated calling must remain disabled for this milestone')
     if confirmation not in INTERNAL_CONFIRMATIONS:
-        blockers.append(f'Confirmation must exactly match {REFINED_INTERNAL_CONFIRMATION}')
+        blockers.append(f'Confirmation must exactly match {FINAL_SALES_INTERNAL_CONFIRMATION}')
     if not valid_us_ca_e164(phone):
         blockers.append('Phone number must be a valid US/Canada E.164 number')
     allowlist = {normalize_phone(item) for item in row.internal_test_numbers or []}
@@ -727,10 +782,23 @@ def _sync_attempt_from_call_payload(db: Session, attempt: CallAttempt, call: dic
     now = _now()
     attempt.status = str(call.get('call_status') or attempt.status)
     attempt.provider_agent_id = str(call.get('agent_id') or attempt.provider_agent_id or '') or None
+    if isinstance(call.get('agent_version'), int):
+        attempt.provider_agent_version = call['agent_version']
     attempt.started_at = _timestamp_ms_to_dt(call.get('start_timestamp')) or attempt.started_at
     attempt.ended_at = _timestamp_ms_to_dt(call.get('end_timestamp')) or attempt.ended_at
     attempt.duration_seconds = int(call.get('duration_ms') / 1000) if isinstance(call.get('duration_ms'), (int, float)) else attempt.duration_seconds
     attempt.termination_reason = str(call.get('disconnection_reason') or attempt.termination_reason or '') or None
+    call_cost = call.get('call_cost') if isinstance(call.get('call_cost'), dict) else {}
+    combined_cost = call_cost.get('combined_cost')
+    if isinstance(combined_cost, (int, float)):
+        attempt.provider_cost_cents = float(combined_cost)
+        attempt.provider_cost_final = bool(attempt.ended_at or attempt.status in {'ended', 'analyzed'})
+    attempt.provider_cost_currency = str(call_cost.get('currency') or attempt.provider_cost_currency or 'USD').upper()
+    attempt.provider_cost_breakdown = call_cost
+    attempt.provider_voice_id = str(call.get('voice_id') or attempt.provider_voice_id or '') or None
+    llm_model = call_cost.get('llm_model') or call.get('llm_model')
+    if llm_model:
+        attempt.provider_llm_model = str(llm_model)
     receipt = _redact_payload({
         'call_id': call.get('call_id'),
         'agent_id': call.get('agent_id'),
@@ -739,6 +807,9 @@ def _sync_attempt_from_call_payload(db: Session, attempt: CallAttempt, call: dic
         'call_status': call.get('call_status'),
         'disconnection_reason': call.get('disconnection_reason'),
         'duration_ms': call.get('duration_ms'),
+        'call_cost': call.get('call_cost'),
+        'voice_id': call.get('voice_id'),
+        'llm_model': call.get('llm_model'),
         'metadata': call.get('metadata'),
         'retell_llm_dynamic_variables': call.get('retell_llm_dynamic_variables'),
         'from_number': call.get('from_number'),

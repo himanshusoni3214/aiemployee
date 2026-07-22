@@ -43,6 +43,8 @@ type CallingSettings = {
 type CallAttempt = {
   id: string;
   provider_call_id?: string | null;
+  provider_agent_id?: string | null;
+  provider_agent_version?: number | null;
   to_number_masked?: string | null;
   status: string;
   requested_at?: string | null;
@@ -50,6 +52,17 @@ type CallAttempt = {
   ended_at?: string | null;
   duration_seconds?: number | null;
   termination_reason?: string | null;
+  provider_receipt?: Record<string, unknown>;
+  cost?: {
+    amount?: number | null;
+    currency?: string;
+    final?: boolean;
+    label?: string;
+    per_connected_minute?: number | null;
+    breakdown?: Record<string, unknown>;
+    llm?: string | null;
+    voice?: string | null;
+  };
   transcript?: {
     transcript?: string | null;
     segments?: unknown[];
@@ -98,7 +111,13 @@ export type CallingWorkspace = {
   };
   warnings?: string[];
   attempts: CallAttempt[];
+  campaign_cost?: { amount?: number; currency?: string; scope?: string };
 };
+
+function money(value?: number | null, currency = 'USD') {
+  if (value == null) return '-';
+  return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(value);
+}
 
 function CheckRow({ label, ok }: { label: string; ok?: boolean }) {
   return (
@@ -289,7 +308,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
           <button type="button" className="btn-secondary" disabled={!localPhoneValid || busy} onClick={() => void allowNumber()}>Allowlist internal test number</button>
-          <button type="button" className="btn" disabled={!canPlaceCall} onClick={() => void placeCall()}>Place Refined Internal Test Call</button>
+          <button type="button" className="btn" disabled={!canPlaceCall} onClick={() => void placeCall()}>Place Final Sales Internal Test Call</button>
         </div>
         <div className="mt-3 text-xs text-zinc-500">Allowlisted numbers: {(workspace.settings?.internal_test_numbers_masked || []).join(', ') || 'none'}</div>
         {!localPhoneValid && phoneNumber ? <div className="mt-2 text-sm text-amber-300">Use US/Canada E.164 format, for example +14165551234.</div> : null}
@@ -307,12 +326,12 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
 
       <section className="card">
         <div className="flex items-center justify-between gap-3">
-          <h2 className="text-lg font-semibold">Call History</h2>
+          <div><h2 className="text-lg font-semibold">Call History</h2><p className="text-xs text-zinc-500">Campaign usage shown: {money(workspace.campaign_cost?.amount, workspace.campaign_cost?.currency)} ({workspace.campaign_cost?.scope || 'stored calls'})</p></div>
           <button type="button" className="btn-secondary text-xs" onClick={() => void refresh()}>Refresh</button>
         </div>
         <div className="mt-3 table-wrap">
           <table className="ops-table">
-            <thead><tr><th>Timestamp</th><th>Lead/test recipient</th><th>Status</th><th>Duration</th><th>Disposition</th><th>Appointment</th><th>Provider</th><th>Action</th></tr></thead>
+            <thead><tr><th>Timestamp</th><th>Lead/test recipient</th><th>Status</th><th>Duration</th><th>Cost</th><th>Disposition</th><th>Appointment</th><th>Provider</th><th>Action</th></tr></thead>
             <tbody>
               {(workspace.attempts || []).map((attempt) => (
                 <tr key={attempt.id}>
@@ -320,13 +339,14 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
                   <td>{attempt.to_number_masked || '-'}</td>
                   <td>{attempt.status}</td>
                   <td>{attempt.duration_seconds ? `${attempt.duration_seconds}s` : '-'}</td>
+                  <td><span title={attempt.cost?.label}>{money(attempt.cost?.amount, attempt.cost?.currency)}</span></td>
                   <td>{attempt.disposition?.disposition || attempt.termination_reason || '-'}</td>
                   <td>{attempt.appointments?.length ? 'Requested' : '-'}</td>
                   <td>{attempt.provider_call_id ? 'Retell' : '-'}</td>
                   <td><button type="button" className="btn-secondary text-xs" onClick={() => setSelectedAttemptId(attempt.id)}>Details</button></td>
                 </tr>
               ))}
-              {!workspace.attempts?.length ? <tr><td colSpan={8} className="text-zinc-400">No call attempts yet</td></tr> : null}
+              {!workspace.attempts?.length ? <tr><td colSpan={9} className="text-zinc-400">No call attempts yet</td></tr> : null}
             </tbody>
           </table>
         </div>
@@ -348,6 +368,8 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
             <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Started</div><LocalTime value={selectedAttempt.started_at} /></div>
             <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Ended</div><LocalTime value={selectedAttempt.ended_at} /></div>
             <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Disposition</div>{selectedAttempt.disposition?.disposition || '-'}</div>
+            <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Provider cost</div>{money(selectedAttempt.cost?.amount, selectedAttempt.cost?.currency)} <span className="text-xs text-zinc-500">{selectedAttempt.cost?.final ? 'final' : 'estimated'}</span></div>
+            <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Cost / connected minute</div>{money(selectedAttempt.cost?.per_connected_minute, selectedAttempt.cost?.currency)}</div>
           </div>
           {selectedAttempt.transcript?.summary ? <p className="mt-3 text-sm text-zinc-300">{selectedAttempt.transcript.summary}</p> : null}
           <details className="mt-3 rounded border border-zinc-800 p-3">
@@ -368,8 +390,14 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
             <pre className="mt-3 max-h-72 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-300">{JSON.stringify({
               retell_call_id: selectedAttempt.provider_call_id,
               provider: 'retell',
+              agent_id: selectedAttempt.provider_agent_id,
+              agent_version: selectedAttempt.provider_agent_version,
+              voice: selectedAttempt.cost?.voice,
+              llm: selectedAttempt.cost?.llm,
+              begin_message: workspace.preview?.begin_message,
               termination_reason: selectedAttempt.termination_reason,
-              cost: null,
+              cost: selectedAttempt.cost,
+              provider_receipt: selectedAttempt.provider_receipt,
             }, null, 2)}</pre>
           </details>
         </section>
