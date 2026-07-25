@@ -1,6 +1,7 @@
 import hashlib
 import hmac
 import unittest
+from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
 from sqlalchemy import create_engine, select
@@ -8,12 +9,14 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.base import Base
 from app.core.config import settings
-from app.models.entities import CallAttempt, CallCampaignSettings, Company, Campaign
+from app.models.entities import CallAppointment, CallAttempt, CallCampaignSettings, Company, Campaign
 from app.services.calling import (
+    ALLSTATE_CAMPAIGN_ID,
+    ALLSTATE_COMPANY_ID,
     ALLSTATE_BEGIN_MESSAGE,
     ALLSTATE_RECORDING_DISCLOSURE,
     ALLSTATE_REFINED_PROMPT,
-    FINAL_SALES_INTERNAL_CONFIRMATION,
+    CONVERSATION_FLOW_INTERNAL_CONFIRMATION,
     REQUIRED_DYNAMIC_VARIABLES,
     MockCallingProvider,
     RetellCallingProvider,
@@ -21,6 +24,7 @@ from app.services.calling import (
     internal_test_dynamic_variables,
     internal_test_preview_payload,
     normalize_phone,
+    quote_appointment_slots,
     valid_us_ca_e164,
     _sync_attempt_from_call_payload,
 )
@@ -83,8 +87,8 @@ class CallingRetellTests(unittest.TestCase):
         self.assertIn('Allow only one respectful reframe', ALLSTATE_REFINED_PROMPT)
         self.assertIn('second-opinion conversation', ALLSTATE_REFINED_PROMPT)
 
-    def test_final_confirmation_replaces_legacy_gate(self):
-        self.assertEqual(FINAL_SALES_INTERNAL_CONFIRMATION, 'PLACE FINAL SALES INTERNAL TEST CALL')
+    def test_conversation_flow_confirmation_replaces_legacy_gate(self):
+        self.assertEqual(CONVERSATION_FLOW_INTERNAL_CONFIRMATION, 'PLACE CONVERSATION-FLOW INTERNAL TEST CALL')
 
     def test_provider_has_no_agent_creation_method(self):
         self.assertFalse(hasattr(RetellCallingProvider, 'create_agent'))
@@ -124,6 +128,107 @@ class CallingRetellTests(unittest.TestCase):
             health = __import__('asyncio').run(provider.health())
         self.assertFalse(health['internal_test_ready'])
         self.assertIn('RETELL_AGENT_ID does not match the locked permanent Retell agent', health['blockers'])
+
+    def test_successor_health_requires_conversation_flow(self):
+        provider = RetellCallingProvider(api_key='test')
+        provider.get_agent = AsyncMock(side_effect=[
+            {
+                'agent_id': 'permanent', 'agent_name': 'Voryx Allstate Quote Appointment Assistant',
+                'version': 0, 'response_engine': {'type': 'retell-llm', 'llm_id': 'wrong'},
+            },
+            {'agent_id': 'legacy', 'agent_name': 'LEGACY - Voryx Allstate Retell-LLM - DO NOT USE'},
+        ])
+        provider.get_phone_number = AsyncMock(return_value={'outbound_agents': [{'agent_id': 'permanent', 'weight': 1}]})
+        with patch.object(settings, 'retell_agent_id', 'permanent'), \
+             patch.object(settings, 'retell_permanent_agent_id', 'permanent'), \
+             patch.object(settings, 'retell_legacy_agent_id', 'legacy'), \
+             patch.object(settings, 'retell_agent_version', '0'), \
+             patch.object(settings, 'retell_from_number', '+14377475010'), \
+             patch.object(settings, 'retell_internal_test_mode', True), \
+             patch.object(settings, 'retell_tool_token', 'tool'), \
+             patch.object(settings, 'retell_webhook_api_key', 'webhook'):
+            health = __import__('asyncio').run(provider.health())
+        self.assertFalse(health['internal_test_ready'])
+        self.assertIn('Published Retell agent is not using the required Conversation Flow response engine', health['blockers'])
+
+    def test_successor_health_requires_legacy_agent_to_remain_available(self):
+        provider = RetellCallingProvider(api_key='test')
+        provider.get_agent = AsyncMock(side_effect=[
+            {
+                'agent_id': 'successor',
+                'agent_name': 'Voryx Allstate Quote Appointment Assistant',
+                'version': 0,
+                'response_engine': {'type': 'conversation-flow', 'conversation_flow_id': 'flow'},
+            },
+            {'agent_id': 'legacy', 'agent_name': 'LEGACY - Voryx Allstate Retell-LLM - DO NOT USE'},
+        ])
+        provider.get_phone_number = AsyncMock(return_value={
+            'inbound_agents': [],
+            'outbound_agents': [{'agent_id': 'successor', 'agent_version': 0, 'weight': 1}],
+        })
+        with patch.object(settings, 'retell_agent_id', 'successor'), \
+             patch.object(settings, 'retell_permanent_agent_id', 'successor'), \
+             patch.object(settings, 'retell_legacy_agent_id', 'legacy'), \
+             patch.object(settings, 'retell_agent_version', '0'), \
+             patch.object(settings, 'retell_from_number', '+14377475010'), \
+             patch.object(settings, 'retell_internal_test_mode', True), \
+             patch.object(settings, 'retell_tool_token', 'tool'), \
+             patch.object(settings, 'retell_webhook_api_key', 'webhook'):
+            health = __import__('asyncio').run(provider.health())
+        self.assertTrue(health['internal_test_ready'])
+        self.assertTrue(health['legacy_agent_exists'])
+        self.assertEqual(health['inbound_agents'], [])
+        self.assertEqual(len(health['outbound_agents']), 1)
+
+    def test_successor_health_rejects_inbound_or_version_drift(self):
+        provider = RetellCallingProvider(api_key='test')
+        provider.get_agent = AsyncMock(side_effect=[
+            {
+                'agent_id': 'successor',
+                'agent_name': 'Voryx Allstate Quote Appointment Assistant',
+                'version': 0,
+                'response_engine': {'type': 'conversation-flow', 'conversation_flow_id': 'flow'},
+            },
+            {'agent_id': 'legacy', 'agent_name': 'Legacy'},
+        ])
+        provider.get_phone_number = AsyncMock(return_value={
+            'inbound_agents': [{'agent_id': 'successor', 'agent_version': 0, 'weight': 1}],
+            'outbound_agents': [{'agent_id': 'successor', 'agent_version': 2, 'weight': 1}],
+        })
+        with patch.object(settings, 'retell_agent_id', 'successor'), \
+             patch.object(settings, 'retell_permanent_agent_id', 'successor'), \
+             patch.object(settings, 'retell_legacy_agent_id', 'legacy'), \
+             patch.object(settings, 'retell_agent_version', '0'), \
+             patch.object(settings, 'retell_from_number', '+14377475010'), \
+             patch.object(settings, 'retell_internal_test_mode', True), \
+             patch.object(settings, 'retell_tool_token', 'tool'), \
+             patch.object(settings, 'retell_webhook_api_key', 'webhook'):
+            health = __import__('asyncio').run(provider.health())
+        self.assertFalse(health['internal_test_ready'])
+        self.assertIn('Retell outbound number does not exactly match the configured agent, version, and weight', health['blockers'])
+        self.assertIn('Retell inbound number assignment must remain empty', health['blockers'])
+
+    def test_quote_slots_are_allstate_internal_only_and_skip_booked_slot(self):
+        engine = create_engine('sqlite://')
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        with session_factory() as db:
+            db.add(Company(id=ALLSTATE_COMPANY_ID, name='Allstate'))
+            db.add(Campaign(id=ALLSTATE_CAMPAIGN_ID, company_id=ALLSTATE_COMPANY_ID, name='Calling'))
+            attempt = CallAttempt(
+                id='attempt-1', company_id=ALLSTATE_COMPANY_ID, campaign_id=ALLSTATE_CAMPAIGN_ID,
+                to_number='+14165551234', internal_test=True,
+            )
+            db.add(attempt)
+            db.add(CallAppointment(
+                call_attempt_id='attempt-1', start_time='2026-07-22 18:30',
+                timezone='America/Toronto', status='confirmed',
+            ))
+            db.flush()
+            result = quote_appointment_slots(db, {'voryx_call_attempt_id': 'attempt-1'}, datetime(2026, 7, 21, 12, 0))
+            self.assertTrue(result['ok'])
+            self.assertEqual(result['slots'][0]['date'], '2026-07-23')
+            self.assertEqual(len(result['slots']), 2)
 
     def test_existing_calling_campaign_provisioning_is_read_idempotent(self):
         engine = create_engine('sqlite://')

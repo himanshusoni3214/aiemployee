@@ -3,7 +3,7 @@ import hashlib
 import hmac
 import json
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -26,6 +26,7 @@ from app.models.entities import (
     SuppressionEntry,
     User,
 )
+from app.services.allstate_conversation_flow import score_sales_transcript
 
 ALLSTATE_COMPANY_ID = 'company-allstate-himanshu'
 ALLSTATE_CAMPAIGN_ID = 'campaign-allstate-quote-calling'
@@ -36,7 +37,8 @@ INTERNAL_CONFIRMATION = 'PLACE INTERNAL TEST CALL'
 CORRECTED_INTERNAL_CONFIRMATION = 'PLACE CORRECTED INTERNAL TEST CALL'
 REFINED_INTERNAL_CONFIRMATION = 'PLACE REFINED INTERNAL TEST CALL'
 FINAL_SALES_INTERNAL_CONFIRMATION = 'PLACE FINAL SALES INTERNAL TEST CALL'
-INTERNAL_CONFIRMATIONS = {FINAL_SALES_INTERNAL_CONFIRMATION}
+CONVERSATION_FLOW_INTERNAL_CONFIRMATION = 'PLACE CONVERSATION-FLOW INTERNAL TEST CALL'
+INTERNAL_CONFIRMATIONS = {CONVERSATION_FLOW_INTERNAL_CONFIRMATION}
 US_CA_E164_RE = re.compile(r'^\+1[2-9]\d{9}$')
 ALLSTATE_BEGIN_MESSAGE = (
     "Hi {{customer_name}}, this is Ava calling on behalf of Himanshu Soni, "
@@ -343,7 +345,11 @@ class RetellCallingProvider:
         agent_exists = False
         number_exists = False
         outbound_agent_correct = False
+        inbound_agents: list[dict] = []
+        outbound_agents: list[dict] = []
+        legacy_agent_exists = False
         agent_payload: dict = {}
+        legacy_agent_payload: dict = {}
         number_payload: dict = {}
         configured_agent_version = str(settings.retell_agent_version or 'latest_published')
 
@@ -368,9 +374,24 @@ class RetellCallingProvider:
                     blockers.append('Configured Retell agent is not the Voryx Allstate agent')
                 if str(agent_payload.get('agent_name') or '').strip().lower() in {'call agent', 'generic call agent'}:
                     blockers.append('Generic Call Agent is selected')
+                response_engine = agent_payload.get('response_engine') or {}
+                requires_conversation_flow = bool(settings.retell_legacy_agent_id)
+                if requires_conversation_flow and response_engine.get('type') != 'conversation-flow':
+                    blockers.append('Published Retell agent is not using the required Conversation Flow response engine')
             except CallingProviderError as exc:
                 blockers.append(str(exc))
                 api_authenticated = 'authentication failed' not in str(exc).lower()
+
+        legacy_agent_id = settings.retell_legacy_agent_id
+        if legacy_agent_id:
+            if legacy_agent_id == agent_id:
+                blockers.append('RETELL_LEGACY_AGENT_ID must differ from the production Retell agent')
+            elif self.api_key:
+                try:
+                    legacy_agent_payload = await self.get_agent(legacy_agent_id)
+                    legacy_agent_exists = True
+                except CallingProviderError as exc:
+                    blockers.append(f'Legacy Retell agent unavailable: {exc}')
 
         from_number = normalize_phone(settings.retell_from_number)
         if not from_number:
@@ -379,12 +400,26 @@ class RetellCallingProvider:
             try:
                 number_payload = await self.get_phone_number(from_number)
                 number_exists = True
-                outbound_agents = number_payload.get('outbound_agents') or []
-                outbound_agent_correct = any(str(item.get('agent_id')) == str(agent_id) for item in outbound_agents if isinstance(item, dict))
+                inbound_agents = [
+                    item for item in (number_payload.get('inbound_agents') or [])
+                    if isinstance(item, dict)
+                ]
+                outbound_agents = [
+                    item for item in (number_payload.get('outbound_agents') or [])
+                    if isinstance(item, dict)
+                ]
+                expected_version = int(configured_agent_version) if configured_agent_version.isdigit() else None
+                outbound_agent_correct = len(outbound_agents) == 1 and (
+                    str(outbound_agents[0].get('agent_id')) == str(agent_id)
+                    and (expected_version is None or int(outbound_agents[0].get('agent_version') or 0) == expected_version)
+                    and float(outbound_agents[0].get('weight') or 0) == 1.0
+                )
                 if agent_id and not outbound_agent_correct:
-                    blockers.append('Retell outbound number is not assigned to RETELL_AGENT_ID')
+                    blockers.append('Retell outbound number does not exactly match the configured agent, version, and weight')
                 if len(outbound_agents) != 1:
                     blockers.append('Retell outbound number must have exactly one outbound agent for QA')
+                if inbound_agents:
+                    blockers.append('Retell inbound number assignment must remain empty')
             except CallingProviderError as exc:
                 blockers.append(str(exc))
                 api_authenticated = 'authentication failed' not in str(exc).lower()
@@ -410,6 +445,9 @@ class RetellCallingProvider:
             'agent_id_configured': bool(agent_id),
             'permanent_agent_id_configured': bool(permanent_agent_id),
             'permanent_agent_id_matches': bool(permanent_agent_id and agent_id == permanent_agent_id),
+            'legacy_agent_id_configured': bool(legacy_agent_id),
+            'legacy_agent_id': legacy_agent_payload.get('agent_id') if legacy_agent_exists else legacy_agent_id or None,
+            'legacy_agent_exists': legacy_agent_exists,
             'agent_exists': agent_exists,
             'agent_name': agent_payload.get('agent_name') if isinstance(agent_payload, dict) else None,
             'agent_id': agent_payload.get('agent_id') if isinstance(agent_payload, dict) else settings.retell_agent_id,
@@ -432,9 +470,16 @@ class RetellCallingProvider:
                     'agent_version': item.get('agent_version'),
                     'weight': item.get('weight'),
                 }
-                for item in (number_payload.get('outbound_agents') or [])
-                if isinstance(item, dict)
-            ] if isinstance(number_payload, dict) else [],
+                for item in outbound_agents
+            ],
+            'inbound_agents': [
+                {
+                    'agent_id': item.get('agent_id'),
+                    'agent_version': item.get('agent_version'),
+                    'weight': item.get('weight'),
+                }
+                for item in inbound_agents
+            ],
             'webhook_url_configured': bool(settings.retell_webhook_url),
             'webhook_signature_key_configured': webhook_ready,
             'tool_token_configured': bool(settings.retell_tool_token),
@@ -680,7 +725,7 @@ async def authorize_internal_test_call(db: Session, user: User, phone_number: st
     if row.prospect_calling_enabled or row.automated_queue_enabled:
         blockers.append('Prospect or automated calling must remain disabled for this milestone')
     if confirmation not in INTERNAL_CONFIRMATIONS:
-        blockers.append(f'Confirmation must exactly match {FINAL_SALES_INTERNAL_CONFIRMATION}')
+        blockers.append(f'Confirmation must exactly match {CONVERSATION_FLOW_INTERNAL_CONFIRMATION}')
     if not valid_us_ca_e164(phone):
         blockers.append('Phone number must be a valid US/Canada E.164 number')
     allowlist = {normalize_phone(item) for item in row.internal_test_numbers or []}
@@ -831,6 +876,9 @@ def _sync_attempt_from_call_payload(db: Session, attempt: CallAttempt, call: dic
         transcript.sentiment = analysis.get('user_sentiment') or analysis.get('sentiment') or transcript.sentiment
         custom = analysis.get('custom_analysis_data') if isinstance(analysis.get('custom_analysis_data'), dict) else {}
         transcript.extracted_fields = {**(transcript.extracted_fields or {}), **(analysis if isinstance(analysis, dict) else {}), **custom}
+        sales_quality = score_sales_transcript(transcript.transcript)
+        transcript.sales_score = sales_quality['overall_score']
+        transcript.sales_score_details = sales_quality
         transcript.updated_at = now
     if analysis:
         custom = analysis.get('custom_analysis_data') if isinstance(analysis.get('custom_analysis_data'), dict) else {}
@@ -907,6 +955,32 @@ def process_retell_webhook(db: Session, raw_body: bytes, payload: dict) -> dict:
 
 def validate_tool_token(token: str | None) -> bool:
     return bool(settings.retell_tool_token and token and hmac.compare_digest(settings.retell_tool_token, token))
+
+
+def quote_appointment_slots(db: Session, payload: dict | None = None, now: datetime | None = None) -> dict:
+    payload = payload or {}
+    if isinstance(payload.get('args'), dict):
+        payload = payload['args']
+    attempt = db.get(CallAttempt, str(payload.get('voryx_call_attempt_id') or ''))
+    if not attempt or attempt.campaign_id != ALLSTATE_CAMPAIGN_ID or not attempt.internal_test:
+        return {'ok': False, 'blocker': 'call_attempt_not_found'}
+    local_now = (now or _now()).replace(tzinfo=ZoneInfo('UTC')).astimezone(ZoneInfo('America/Toronto'))
+    candidates = []
+    day = local_now.date() + timedelta(days=1)
+    while len(candidates) < 8:
+        if day.weekday() < 5:
+            candidates.append(datetime.combine(day, datetime.min.time()).replace(hour=18, minute=30))
+        elif day.weekday() == 5:
+            candidates.append(datetime.combine(day, datetime.min.time()).replace(hour=10, minute=30))
+        day += timedelta(days=1)
+    booked = {
+        str(value).strip()
+        for value in db.scalars(select(CallAppointment.start_time).where(CallAppointment.status.in_(['requested', 'confirmed']))).all()
+        if value
+    }
+    available = [item for item in candidates if item.strftime('%Y-%m-%d %H:%M') not in booked][:2]
+    slots = [{'date': item.strftime('%Y-%m-%d'), 'time': item.strftime('%H:%M'), 'timezone': 'America/Toronto', 'label': item.strftime('%A, %B %-d at %-I:%M %p')} for item in available]
+    return {'ok': len(slots) == 2, 'slots': slots, 'slot_one': slots[0]['label'] if slots else None, 'slot_two': slots[1]['label'] if len(slots) > 1 else None}
 
 
 def book_quote_appointment(db: Session, payload: dict) -> dict:

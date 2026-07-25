@@ -88,7 +88,7 @@ from app.services.calling import (
     ALLSTATE_CAMPAIGN_ID,
     ALLSTATE_COMPANY_ID,
     ALLSTATE_AGENT_NAME,
-    FINAL_SALES_INTERNAL_CONFIRMATION,
+    CONVERSATION_FLOW_INTERNAL_CONFIRMATION,
     RetellCallingProvider,
     book_quote_appointment,
     call_settings,
@@ -97,6 +97,7 @@ from app.services.calling import (
     ensure_allstate_calling_campaign,
     internal_test_preview_payload,
     mark_do_not_call,
+    quote_appointment_slots,
     masked_phone,
     normalize_phone,
     process_retell_webhook,
@@ -1986,6 +1987,8 @@ def _call_attempt_payload(db: Session, attempt: CallAttempt) -> dict:
             'sentiment': getattr(transcript, 'sentiment', None),
             'objections': getattr(transcript, 'objections', []) or [],
             'extracted_fields': getattr(transcript, 'extracted_fields', {}) or {},
+            'sales_score': getattr(transcript, 'sales_score', None),
+            'sales_score_details': getattr(transcript, 'sales_score_details', {}) or {},
         } if transcript else None,
         'disposition': {
             'disposition': getattr(disposition, 'disposition', None),
@@ -2051,12 +2054,19 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
     latest_attempts = db.scalars(select(CallAttempt).where(CallAttempt.campaign_id == ALLSTATE_CAMPAIGN_ID).order_by(CallAttempt.created_at.desc()).limit(20)).all()
     provider = calling_provider()
     for attempt in latest_attempts[:5]:
-        if attempt.provider_call_id and (attempt.status not in {'ended', 'analyzed'} or attempt.provider_cost_cents is None):
+        transcript = db.scalar(select(CallTranscript).where(CallTranscript.call_attempt_id == attempt.id))
+        score_missing = bool(transcript and transcript.transcript and transcript.sales_score is None)
+        if attempt.provider_call_id and (attempt.status not in {'ended', 'analyzed'} or attempt.provider_cost_cents is None or score_missing):
             try:
                 await sync_call_attempt_from_retell(db, attempt, provider)
             except Exception:
                 pass
     preview = internal_test_preview_payload(call_settings_row=row)
+    migration = db.scalar(
+        select(RetellAgentMigration)
+        .order_by(RetellAgentMigration.created_at.desc())
+        .limit(1)
+    )
     warnings = []
     if health.get('agent_name') != ALLSTATE_AGENT_NAME:
         warnings.append('Expected Allstate agent is not selected')
@@ -2066,17 +2076,27 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
         warnings.append('Generic Call Agent is selected')
     if preview.get('missing_dynamic_variables'):
         warnings.append('Required dynamic variables are missing')
+    if str((health.get('response_engine') or {}).get('type') or '') != 'conversation-flow':
+        warnings.append('Published agent is not using the structured Conversation Flow')
     db.commit()
     return {
         'company_id': ALLSTATE_COMPANY_ID,
         'campaign_id': ALLSTATE_CAMPAIGN_ID,
-        'confirmation_required': FINAL_SALES_INTERNAL_CONFIRMATION,
+        'confirmation_required': CONVERSATION_FLOW_INTERNAL_CONFIRMATION,
         'prospect_calling_enabled': False,
         'batch_calling_enabled': False,
         'settings': _calling_settings_payload(row),
         'health': health,
         'preview': preview,
         'warnings': warnings,
+        'agent_migration': {
+            'legacy_agent_id': migration.legacy_agent_id,
+            'successor_agent_id': migration.successor_agent_id,
+            'conversation_flow_id': migration.conversation_flow_id,
+            'cutover_at': migration.cutover_at,
+            'rollback_status': migration.rollback_status,
+            'test_result': migration.test_result or {},
+        } if migration else None,
         'attempts': [_call_attempt_payload(db, item) for item in latest_attempts],
         'campaign_cost': {
             'amount': sum(float(item.provider_cost_cents or 0) for item in latest_attempts) / 100.0,
@@ -2160,6 +2180,16 @@ def retell_tool_book_quote_appointment(request: Request, payload: dict=Body(...)
         raise HTTPException(401, 'Invalid tool token')
     result = book_quote_appointment(db, payload)
     db.commit()
+    if not result.get('ok'):
+        raise HTTPException(404, result)
+    return result
+
+@router.post('/retell/tools/quote-appointment-slots')
+def retell_tool_quote_appointment_slots(request: Request, payload: dict=Body(...), db: Session=Depends(get_db)):
+    token = request.headers.get('X-Voryx-Retell-Tool-Token') or request.headers.get('X-Retell-Tool-Token')
+    if not validate_tool_token(token):
+        raise HTTPException(401, 'Invalid tool token')
+    result = quote_appointment_slots(db, payload)
     if not result.get('ok'):
         raise HTTPException(404, result)
     return result

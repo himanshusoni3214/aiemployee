@@ -15,6 +15,9 @@ type CallingHealth = {
   prospect_calling_ready?: boolean;
   agent_id?: string | null;
   agent_version?: number | string | null;
+  response_engine?: { type?: string; conversation_flow_id?: string; version?: number | null } | null;
+  legacy_agent_id_configured?: boolean;
+  legacy_agent_exists?: boolean;
   configured_agent_version?: string | null;
   voice_id?: string | null;
   responsiveness?: number | null;
@@ -70,6 +73,17 @@ type CallAttempt = {
     recording_url?: string | null;
     objections?: unknown[];
     extracted_fields?: Record<string, unknown>;
+    sales_score?: number | null;
+    sales_score_details?: {
+      target?: number;
+      passed?: boolean;
+      stage_scores?: Record<string, boolean>;
+      critical_failures?: string[];
+      missed_questions?: string[];
+      objection_detected?: string | null;
+      close_attempted?: boolean;
+      improvement_recommendation?: string;
+    };
   } | null;
   disposition?: {
     disposition?: string | null;
@@ -110,6 +124,14 @@ export type CallingWorkspace = {
     };
   };
   warnings?: string[];
+  agent_migration?: {
+    legacy_agent_id: string;
+    successor_agent_id: string;
+    conversation_flow_id: string;
+    cutover_at?: string | null;
+    rollback_status: string;
+    test_result?: Record<string, unknown>;
+  } | null;
   attempts: CallAttempt[];
   campaign_cost?: { amount?: number; currency?: string; scope?: string };
 };
@@ -241,6 +263,8 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="Provider status">
         <CheckRow label="Retell API authenticated" ok={workspace.health?.api_authenticated} />
         <CheckRow label="Voice agent configured" ok={workspace.health?.agent_exists} />
+        <CheckRow label="Conversation Flow active" ok={workspace.health?.response_engine?.type === 'conversation-flow'} />
+        <CheckRow label="Legacy agent preserved" ok={workspace.health?.legacy_agent_id_configured && workspace.health?.legacy_agent_exists} />
         <CheckRow label="Outbound number assigned" ok={workspace.health?.outbound_agent_correctly_assigned} />
         <CheckRow label="Webhook signature ready" ok={workspace.health?.webhook_signature_key_configured} />
         <CheckRow label="Tool token configured" ok={workspace.health?.tool_token_configured} />
@@ -308,7 +332,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
         </div>
         <div className="mt-4 flex flex-wrap gap-2">
           <button type="button" className="btn-secondary" disabled={!localPhoneValid || busy} onClick={() => void allowNumber()}>Allowlist internal test number</button>
-          <button type="button" className="btn" disabled={!canPlaceCall} onClick={() => void placeCall()}>Place Final Sales Internal Test Call</button>
+          <button type="button" className="btn" disabled={!canPlaceCall} onClick={() => void placeCall()}>Place Conversation-Flow Internal Test Call</button>
         </div>
         <div className="mt-3 text-xs text-zinc-500">Allowlisted numbers: {(workspace.settings?.internal_test_numbers_masked || []).join(', ') || 'none'}</div>
         {!localPhoneValid && phoneNumber ? <div className="mt-2 text-sm text-amber-300">Use US/Canada E.164 format, for example +14165551234.</div> : null}
@@ -320,7 +344,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
         <SectionCard title="Eligible leads">Phone-ready leads require valid phone, consent tied to that number, automated-call consent, no DNC/suppression and campaign approval. Current prospect-ready count: 0.</SectionCard>
         <SectionCard title="Call queue">Automated queue and schedules remain disabled during internal testing. Current queued calls: 0.</SectionCard>
-        <SectionCard title="Scripts">Ava uses the refined Allstate appointment script with truthful automation disclosure and consent-safe language.</SectionCard>
+        <SectionCard title="Conversation flow">Ava uses a structured Allstate sales flow with explicit renewal, objection, callback, appointment, disclosure and DNC stages.</SectionCard>
         <SectionCard title="Consent and compliance">Prospect calling is disabled until consent, DNC, calling window and provider checks pass.</SectionCard>
       </section>
 
@@ -372,6 +396,16 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
             <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Cost / connected minute</div>{money(selectedAttempt.cost?.per_connected_minute, selectedAttempt.cost?.currency)}</div>
           </div>
           {selectedAttempt.transcript?.summary ? <p className="mt-3 text-sm text-zinc-300">{selectedAttempt.transcript.summary}</p> : null}
+          <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
+            <div className="flex items-center justify-between"><span className="font-semibold">Sales quality</span><span className={(selectedAttempt.transcript?.sales_score || 0) >= 8 ? 'text-emerald-300' : 'text-amber-300'}>{selectedAttempt.transcript?.sales_score ?? '-'} / 10</span></div>
+            <div className="mt-2 grid gap-2 md:grid-cols-2">
+              {Object.entries(selectedAttempt.transcript?.sales_score_details?.stage_scores || {}).map(([stage, passed]) => <div key={stage} className="flex justify-between rounded border border-zinc-900 px-2 py-1"><span>{stage.replaceAll('_', ' ')}</span><span>{passed ? 'Pass' : 'Missed'}</span></div>)}
+            </div>
+            {selectedAttempt.transcript?.sales_score_details?.missed_questions?.length ? <p className="mt-2 text-amber-300">Missed: {selectedAttempt.transcript.sales_score_details.missed_questions.join(', ')}</p> : null}
+            {selectedAttempt.transcript?.sales_score_details?.critical_failures?.length ? <p className="mt-2 text-red-300">Critical: {selectedAttempt.transcript.sales_score_details.critical_failures.join(', ')}</p> : null}
+            <p className="mt-2 text-zinc-400">Objection: {selectedAttempt.transcript?.sales_score_details?.objection_detected || 'none'} / Close attempted: {selectedAttempt.transcript?.sales_score_details?.close_attempted ? 'yes' : 'no'}</p>
+            <p className="mt-1 text-zinc-400">{selectedAttempt.transcript?.sales_score_details?.improvement_recommendation || 'No score available.'}</p>
+          </div>
           <details className="mt-3 rounded border border-zinc-800 p-3">
             <summary className="cursor-pointer text-sm font-semibold">Transcript and speaker segments</summary>
             {selectedAttempt.transcript?.transcript ? <pre className="mt-3 max-h-72 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-300">{selectedAttempt.transcript.transcript}</pre> : <p className="mt-2 text-sm text-zinc-400">No transcript stored.</p>}

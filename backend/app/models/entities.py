@@ -453,6 +453,8 @@ class CallTranscript(Base):
     sentiment: Mapped[str|None]=mapped_column(String, nullable=True)
     objections: Mapped[list]=mapped_column(JSON, default=list)
     extracted_fields: Mapped[dict]=mapped_column(JSON, default=dict)
+    sales_score: Mapped[int|None]=mapped_column(Integer, nullable=True)
+    sales_score_details: Mapped[dict]=mapped_column(JSON, default=dict)
     provider_artifacts: Mapped[dict]=mapped_column(JSON, default=dict)
     created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
@@ -500,3 +502,18 @@ class RetellWebhookEvent(Base):
     processing_status: Mapped[str]=mapped_column(String, default='received', index=True)
     error: Mapped[str|None]=mapped_column(Text, nullable=True)
     payload_redacted: Mapped[dict]=mapped_column(JSON, default=dict)
+
+class RetellAgentMigration(Base):
+    __tablename__='retell_agent_migrations'
+    id: Mapped[str]=mapped_column(String, primary_key=True, default=uid)
+    legacy_agent_id: Mapped[str]=mapped_column(String, index=True)
+    successor_agent_id: Mapped[str]=mapped_column(String, unique=True, index=True)
+    conversation_flow_id: Mapped[str]=mapped_column(String)
+    cutover_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    user_authorization: Mapped[str]=mapped_column(Text)
+    old_number_assignment: Mapped[dict]=mapped_column(JSON, default=dict)
+    new_number_assignment: Mapped[dict]=mapped_column(JSON, default=dict)
+    rollback_status: Mapped[str]=mapped_column(String, default='not_required', index=True)
+    test_result: Mapped[dict]=mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
