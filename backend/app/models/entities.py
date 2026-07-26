@@ -556,6 +556,9 @@ class CallScriptVersion(Base):
     retell_flow_version: Mapped[int|None]=mapped_column(Integer, nullable=True)
     rollback_from_version: Mapped[int|None]=mapped_column(Integer, nullable=True)
     change_summary: Mapped[str|None]=mapped_column(Text, nullable=True)
+    publish_state: Mapped[dict]=mapped_column(JSON, default=dict)
+    failure_stage: Mapped[str|None]=mapped_column(String, nullable=True)
+    recovery_action: Mapped[str|None]=mapped_column(Text, nullable=True)
 
 class CallScriptAudit(Base):
     __tablename__='call_script_audits'
@@ -589,12 +592,33 @@ class CallComplianceItem(Base):
     updated_by: Mapped[str|None]=mapped_column(ForeignKey('users.id'), nullable=True)
     updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
 
+class ConsentSourceProfile(Base):
+    __tablename__='consent_source_profiles'
+    __table_args__=(UniqueConstraint('campaign_id','name'),)
+    id: Mapped[str]=mapped_column(String, primary_key=True, default=uid)
+    company_id: Mapped[str]=mapped_column(ForeignKey('companies.id'), index=True)
+    campaign_id: Mapped[str]=mapped_column(ForeignKey('campaigns.id'), index=True)
+    name: Mapped[str]=mapped_column(String)
+    approved_consent_language: Mapped[str]=mapped_column(Text)
+    organization_authorized: Mapped[bool]=mapped_column(Boolean, default=False)
+    automated_call_permission: Mapped[bool]=mapped_column(Boolean, default=False)
+    consent_proof_method: Mapped[str]=mapped_column(String)
+    default_province: Mapped[str]=mapped_column(String, default='Ontario')
+    default_timezone: Mapped[str]=mapped_column(String, default='America/Toronto')
+    source_approval_evidence: Mapped[str]=mapped_column(Text)
+    approval_date: Mapped[datetime]=mapped_column(DateTime)
+    expires_at: Mapped[datetime|None]=mapped_column(DateTime, nullable=True)
+    created_by: Mapped[str|None]=mapped_column(ForeignKey('users.id'), nullable=True)
+    created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+
 class ConsentedCallingLead(Base):
     __tablename__='consented_calling_leads'
     __table_args__=(UniqueConstraint('campaign_id','phone_number'),)
     id: Mapped[str]=mapped_column(String, primary_key=True, default=uid)
     company_id: Mapped[str]=mapped_column(ForeignKey('companies.id'), index=True)
     campaign_id: Mapped[str]=mapped_column(ForeignKey('campaigns.id'), index=True)
+    source_profile_id: Mapped[str|None]=mapped_column(ForeignKey('consent_source_profiles.id'), nullable=True, index=True)
     first_name: Mapped[str]=mapped_column(String)
     last_name: Mapped[str|None]=mapped_column(String, nullable=True)
     phone_number: Mapped[str]=mapped_column(String, index=True)
@@ -626,6 +650,7 @@ class ConsentedCallingLead(Base):
     created_by: Mapped[str|None]=mapped_column(ForeignKey('users.id'), nullable=True)
     created_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
     updated_at: Mapped[datetime]=mapped_column(DateTime, default=datetime.utcnow)
+    is_test: Mapped[bool]=mapped_column(Boolean, default=False, index=True)
 
 class PilotCallEntry(Base):
     __tablename__='pilot_call_entries'

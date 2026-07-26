@@ -32,6 +32,24 @@ export async function api(path: string, init: RequestInit = {}) {
   }
   return res.json();
 }
+export async function downloadApi(path: string, filename: string) {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
+  const res = await fetch(`${API}/api${path}`, {
+    credentials: 'include',
+    headers: token ? { Authorization: `Bearer ${token}` } : {},
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(errorMessage('GET', path, res.status, body));
+  }
+  const url = URL.createObjectURL(await res.blob());
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(url);
+}
 export function authHeaders() {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
   return { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}) };

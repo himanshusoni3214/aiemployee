@@ -1,7 +1,7 @@
 'use client';
 
 import { useMemo, useState } from 'react';
-import { api } from '../lib/api';
+import { api, downloadApi } from '../lib/api';
 import { LocalTime } from './LocalTime';
 
 type ScriptVersion = {
@@ -27,13 +27,23 @@ type ScriptVersion = {
   published_at?: string | null;
   retell_agent_version?: number | null;
   retell_flow_version?: number | null;
+  publish_state?: Record<string, any>;
+  failure_stage?: string | null;
+  recovery_action?: string | null;
 };
 
 type Studio = {
   published_version: ScriptVersion;
+  current_draft?: ScriptVersion | null;
+  live_retell_preview?: Record<string, any>;
+  draft_preview?: ScriptVersion | null;
   versions: ScriptVersion[];
   compliance_items: Array<Record<string, any>>;
   compliance_blockers: string[];
+  compliance_blocker_details?: Array<Record<string, any>>;
+  compliance_packages?: Array<Record<string, any>>;
+  automatic_system_checks?: Array<Record<string, any>>;
+  consent_source_profiles?: Array<Record<string, any>>;
   consented_leads: Array<Record<string, any>>;
   eligible_lead_count: number;
   pilot_queue: Array<Record<string, any>>;
@@ -66,7 +76,7 @@ function Field({ label, value, onChange, limit = 1000, rows = 3 }: { label: stri
 
 export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh: () => Promise<void> }) {
   const [tab, setTab] = useState<(typeof TABS)[number]>('Script');
-  const selected = useMemo(() => studio?.versions.find((item) => ['draft', 'testing', 'approved', 'failed'].includes(item.status)) || studio?.published_version, [studio]);
+  const selected = useMemo(() => studio?.current_draft || studio?.versions.find((item) => ['draft', 'testing', 'approved', 'failed', 'failed_recoverable'].includes(item.status)) || studio?.published_version, [studio]);
   const [draft, setDraft] = useState<ScriptVersion | null>(null);
   const active = draft?.id === selected?.id ? draft : selected;
   const [busy, setBusy] = useState(false);
@@ -74,6 +84,21 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
   const [error, setError] = useState('');
   const [lockedProposal, setLockedProposal] = useState('');
   const [complianceReason, setComplianceReason] = useState('');
+  const [showIncomplete, setShowIncomplete] = useState(true);
+  const [selectedProfileId, setSelectedProfileId] = useState('');
+  const [csvPreview, setCsvPreview] = useState<Record<string, any> | null>(null);
+  const [profileForm, setProfileForm] = useState<Record<string, any>>({
+    name: '',
+    approved_consent_language: '',
+    organization_authorized: false,
+    automated_call_permission: false,
+    consent_proof_method: '',
+    default_province: 'Ontario',
+    default_timezone: 'America/Toronto',
+    source_approval_evidence: '',
+    approval_date: '',
+    expires_at: '',
+  });
   const [leadForm, setLeadForm] = useState<Record<string, any>>({
     first_name: '',
     last_name: '',
@@ -97,6 +122,10 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
 
   function mutate(update: Partial<ScriptVersion>) {
     setDraft({ ...active, ...update });
+  }
+
+  function updateProfile(update: Record<string, unknown>) {
+    setProfileForm((current) => ({ ...current, ...update }));
   }
 
   async function action(fn: () => Promise<any>, success: string) {
@@ -142,6 +171,27 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
     });
   }
 
+  async function saveAndTest() {
+    const target = await ensureDraft();
+    const source = draft || active;
+    return api(`/calling/allstate/script-versions/${target.id}/save-and-test`, {
+      method: 'POST',
+      body: JSON.stringify({
+        name: source.name,
+        opening_internal: source.opening_internal,
+        opening_consented: source.opening_consented,
+        purpose_statement: source.purpose_statement,
+        discovery_content: source.discovery_content,
+        objection_library: source.objection_library,
+        closing_library: source.closing_library,
+        voicemail_content: source.voicemail_content,
+        voice_settings: source.voice_settings,
+        talking_points: source.talking_points,
+        change_summary: source.change_summary || 'Script Studio edit',
+      }),
+    });
+  }
+
   async function proposeLockedChange() {
     if (!lockedProposal.trim()) throw new Error('Describe the proposed locked-section change');
     const target = await ensureDraft();
@@ -154,11 +204,27 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
     });
   }
 
-  async function importCsv(file?: File) {
+  async function previewCsv(file?: File) {
     if (!file) return;
+    if (!selectedProfileId) {
+      setError('Select a Consent Source Profile before uploading a simple CSV.');
+      return;
+    }
     const form = new FormData();
+    form.append('profile_id', selectedProfileId);
     form.append('file', file);
-    await action(() => api('/calling/allstate/consented-leads/import-csv', { method: 'POST', body: form }), 'CSV reviewed and imported. Eligibility was recalculated.');
+    setBusy(true);
+    setError('');
+    setMessage('');
+    try {
+      const result = await api('/calling/allstate/consented-leads/preview-csv', { method: 'POST', body: form });
+      setCsvPreview(result.preview);
+      setMessage('CSV preview complete. No rows were imported.');
+    } catch (err: any) {
+      setError(err?.message || 'CSV preview failed');
+    } finally {
+      setBusy(false);
+    }
   }
 
   const test = active.test_result || {};
@@ -173,7 +239,8 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
           <p className="text-sm text-zinc-400">Versioned sales language, compliance evidence and individually approved consented-lead pilot controls.</p>
         </div>
         <div className="text-right text-sm">
-          <div>Published: v{studio.published_version.version_number}</div>
+          <div>Live: v{studio.published_version.version_number}</div>
+          <div className="text-zinc-500">Retell agent {studio.live_retell_preview?.agent_version ?? '-'} / flow {studio.live_retell_preview?.flow_version ?? '-'}</div>
           <div className="text-zinc-500">Live {projection.live_model} / post-call {projection.post_call_model}</div>
         </div>
       </div>
@@ -186,11 +253,30 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
 
       {message ? <div className="mt-4"><Notice tone="ok">{message}</Notice></div> : null}
       {error ? <div className="mt-4"><Notice tone="error">{error}</Notice></div> : null}
+      {active.status === 'failed' || active.status === 'failed_recoverable' ? (
+        <div className="mt-4"><Notice tone="error">Your changes are saved but are not live. Production is still using v{studio.published_version.version_number}. Failure stage: {active.failure_stage || 'provider publish'}. {active.recovery_action || 'Retry publish or return to editing.'}</Notice></div>
+      ) : null}
 
       {tab === 'Script' ? (
         <div className="mt-4 space-y-4">
-          <div className="grid gap-3 md:grid-cols-3">
-            <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Editing</div>v{active.version_number} / {active.status}</div>
+          <div className="grid gap-3 lg:grid-cols-2">
+            <div className="rounded border border-emerald-900 bg-emerald-950/20 p-3 text-sm" data-live-retell-card>
+              <div className="text-xs font-semibold text-emerald-300">LIVE IN RETELL</div>
+              <div className="mt-2">Voryx v{studio.published_version.version_number} / Retell agent {studio.live_retell_preview?.agent_version ?? '-'} / flow {studio.live_retell_preview?.flow_version ?? '-'}</div>
+              <div className="mt-1 text-xs text-zinc-500">Published <LocalTime value={studio.published_version.published_at} /></div>
+              <p className="mt-2 text-zinc-300">{studio.live_retell_preview?.opening_consented || studio.published_version.opening_consented}</p>
+              <div className={`mt-2 text-xs ${studio.live_retell_preview?.node_text_verified ? 'text-emerald-300' : 'text-amber-300'}`}>{studio.live_retell_preview?.node_text_verified ? 'Exact Retell node text verified' : studio.live_retell_preview?.verification_error || 'Retell text verification pending'}</div>
+            </div>
+            <div className="rounded border border-zinc-700 p-3 text-sm" data-current-draft-card>
+              <div className="text-xs font-semibold text-zinc-300">CURRENT DRAFT</div>
+              <div className="mt-1 text-xs text-zinc-500">DRAFT PREVIEW</div>
+              <div className="mt-2">Voryx v{active.version_number} / {active.status}</div>
+              <div className="mt-1 text-xs text-zinc-500">{active.node_changes?.length || 0} changed fields / {active.test_result?.passed ? 'tests passed' : 'not tested'}</div>
+              <p className="mt-2 text-zinc-300">{active.opening_consented}</p>
+              {active.id !== studio.published_version.id ? <div className="mt-2 text-xs text-amber-300">Not live until Retell publish and exact verification complete.</div> : <div className="mt-2 text-xs text-emerald-300">This version is live.</div>}
+            </div>
+          </div>
+          <div className="grid gap-3 md:grid-cols-2">
             <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Estimated prompt</div>{active.estimated_prompt_tokens} tokens</div>
             <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Maximum call</div>4 minutes / no retry / concurrency 1</div>
           </div>
@@ -214,11 +300,21 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
             </div>
           </details>
           <div className="flex flex-wrap gap-2">
-            <button type="button" className="btn" disabled={busy} onClick={() => void action(saveDraft, 'Draft saved. Retell production was not changed.')}>Save draft</button>
-            <button type="button" className="btn-secondary" disabled={busy || active.status === 'published'} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/test`, { method: 'POST' }), 'All 15 draft scenarios were evaluated.')}>Test draft</button>
-            <button type="button" className="btn-secondary" disabled={busy || !test.passed} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/request-approval`, { method: 'POST' }), 'Script approved for publishing.')}>Request approval</button>
-            <button type="button" className="btn-secondary" disabled={busy || active.status !== 'approved'} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/publish`, { method: 'POST' }), 'Published to the existing Retell Conversation Flow.')}>Publish in place</button>
+            <button type="button" className="btn" disabled={busy} onClick={() => void action(saveAndTest, 'Draft saved, tested and approved for publish in one step.')}>Save and test</button>
+            <button type="button" className="btn-secondary" disabled={busy || !test.passed || active.status === 'published'} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/publish`, { method: 'POST' }), 'Published and verified against the existing Retell agent, flow and number.')}>{active.status === 'failed' || active.status === 'failed_recoverable' ? 'Retry publish' : 'Publish'}</button>
+            {(active.status === 'failed' || active.status === 'failed_recoverable') ? <>
+              <button type="button" className="btn-secondary" disabled={busy} onClick={() => setDraft({ ...active, status: 'draft' })}>Return to editing</button>
+              <button type="button" className="btn-secondary" disabled={busy} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/discard`, { method: 'POST' }), 'Failed draft discarded. Live production was not changed.')}>Discard failed draft</button>
+            </> : null}
           </div>
+          <details className="rounded border border-zinc-800 p-3">
+            <summary className="cursor-pointer text-sm font-semibold">Advanced actions</summary>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button type="button" className="btn-secondary" disabled={busy} onClick={() => void action(saveDraft, 'Draft saved. Retell production was not changed.')}>Save draft only</button>
+              <button type="button" className="btn-secondary" disabled={busy || active.status === 'published'} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/test`, { method: 'POST' }), 'All 15 deterministic draft scenarios were evaluated.')}>Test only</button>
+              <button type="button" className="btn-secondary" disabled={busy || !test.passed} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/request-approval`, { method: 'POST' }), 'Script approved for publishing.')}>Request approval only</button>
+            </div>
+          </details>
           {test.required_scenarios_total ? <Notice tone={test.passed ? 'ok' : 'error'}>{test.required_scenarios_passed}/{test.required_scenarios_total} scenarios passed. Sales score {test.sales_score}/10. Missing variables: {(test.missing_dynamic_variables || []).join(', ') || 'none'}. Missing tools: {(test.missing_retell_tools || []).join(', ') || 'none'}.</Notice> : null}
           {active.node_changes?.length ? (
             <details className="rounded border border-zinc-800 p-3">
@@ -250,26 +346,79 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
 
       {tab === 'Compliance' ? (
         <div className="mt-4 space-y-4">
-          <Notice tone={studio.compliance_blockers.length ? 'error' : 'ok'}>{studio.compliance_blockers.length ? `${studio.compliance_blockers.length} mandatory compliance items remain incomplete. Prospect calls are blocked.` : 'All mandatory evidence is current.'}</Notice>
+          <Notice tone={studio.compliance_blockers.length ? 'error' : 'ok'}>
+            {studio.compliance_blockers.length ? <div>
+              <div className="font-semibold">{studio.compliance_blockers.length} mandatory compliance items remain incomplete. Prospect calls are blocked.</div>
+              <ol className="mt-2 list-decimal space-y-1 pl-5">
+                {(studio.compliance_blocker_details || []).map((item) => <li key={item.item_key}><span className="font-medium">{item.label}</span> — Missing: {(item.missing_fields || []).join(', ')}</li>)}
+              </ol>
+            </div> : 'All mandatory evidence is current.'}
+          </Notice>
+          <div className="grid gap-3 lg:grid-cols-2">
+            {(studio.compliance_packages || []).map((item) => <CompliancePackage key={item.package_key} item={item} busy={busy} run={action} />)}
+          </div>
+          <div className="rounded border border-zinc-800 p-3">
+            <div className="font-semibold">Automatic Voryx system checks</div>
+            <div className="mt-2 grid gap-2 text-sm md:grid-cols-2">
+              {(studio.automatic_system_checks || []).map((item) => <div key={item.key} className="flex items-center justify-between border-b border-zinc-900 py-1"><span>{item.label}</span><span className={item.passed ? 'text-emerald-300' : 'text-red-300'}>{item.passed ? 'Verified' : 'Blocked'}</span></div>)}
+            </div>
+          </div>
           <div className="rounded border border-zinc-800 p-3">
             <div className="flex items-center gap-2 font-semibold"><span aria-hidden="true">🔒</span> Compliance-locked script rules</div>
             <div className="mt-2 grid gap-2 text-sm md:grid-cols-2">{Object.entries(active.compliance_content || {}).filter(([key]) => key !== 'proposed_change').map(([key, value]) => <div key={key} className="flex justify-between border-b border-zinc-900 py-1"><span>{key.replaceAll('_', ' ')}</span><span>{String(value)}</span></div>)}</div>
             <div className="mt-3 grid gap-2 md:grid-cols-[1fr_auto]"><input className={INPUT_CLASS} placeholder="Describe a locked-section change proposal" value={lockedProposal} onChange={(event) => setLockedProposal(event.target.value)} /><button className="btn-secondary" type="button" disabled={busy} onClick={() => void action(proposeLockedChange, 'Locked change recorded as a draft. Separate compliance approval is required.')}>Propose change</button></div>
             {active.compliance_content?.proposed_change ? <div className="mt-3 grid gap-2 md:grid-cols-[1fr_1fr_auto]"><div className="rounded border border-amber-800 p-2 text-sm text-amber-200">{active.compliance_content.proposed_change}</div><input className={INPUT_CLASS} placeholder="Separate compliance approval reason" value={complianceReason} onChange={(event) => setComplianceReason(event.target.value)} /><button type="button" className="btn-secondary" disabled={busy || !complianceReason.trim()} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/compliance-approval`, { method: 'POST', body: JSON.stringify({ reason: complianceReason }) }), 'Locked-section change separately approved and audited.')}>Approve locked change</button></div> : null}
           </div>
-          <div className="table-wrap">
-            <table className="ops-table"><thead><tr><th>Requirement</th><th>Status</th><th>Approver</th><th>Evidence</th><th>Effective</th><th>Action</th></tr></thead>
-              <tbody>{studio.compliance_items.map((item) => <ComplianceRow key={item.item_key} item={item} busy={busy} run={action} />)}</tbody>
-            </table>
-          </div>
+          <details className="rounded border border-zinc-800 p-3" open>
+            <summary className="cursor-pointer font-semibold">Detailed 19-record audit</summary>
+            <label className="mt-3 flex items-center gap-2 text-sm"><input type="checkbox" checked={showIncomplete} onChange={(event) => setShowIncomplete(event.target.checked)} /> Show only incomplete</label>
+            <div className="mt-3 table-wrap">
+              <table className="ops-table"><thead><tr><th>Requirement</th><th>Status</th><th>Approver</th><th>Evidence</th><th>Effective</th><th>Action</th></tr></thead>
+                <tbody>{studio.compliance_items.filter((item) => !showIncomplete || item.status !== 'approved').map((item) => <ComplianceRow key={item.item_key} item={item} busy={busy} run={action} />)}</tbody>
+              </table>
+            </div>
+          </details>
         </div>
       ) : null}
 
       {tab === 'Consented leads' ? (
         <div className="mt-4 space-y-4">
           <Notice tone="info">Consent is never inferred. Exact-number automated-call consent, documentary proof, DNCL, internal DNC, suppression, approved script and recipient-local calling hours are all required.</Notice>
+          <div className="rounded border border-zinc-800 p-3">
+            <div className="font-semibold">Consent Source Profile</div>
+            <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+              <label className="space-y-1 text-sm"><span>Selected profile</span><select className={INPUT_CLASS} value={selectedProfileId} onChange={(event) => setSelectedProfileId(event.target.value)}><option value="">Select profile</option>{(studio.consent_source_profiles || []).map((profile) => <option value={profile.id} key={profile.id}>{profile.name}</option>)}</select></label>
+              <label className="space-y-1 text-sm"><span>Source name</span><input className={INPUT_CLASS} value={profileForm.name} onChange={(event) => updateProfile({ name: event.target.value })} /></label>
+              <label className="space-y-1 text-sm"><span>Consent proof method</span><input className={INPUT_CLASS} value={profileForm.consent_proof_method} onChange={(event) => updateProfile({ consent_proof_method: event.target.value })} /></label>
+              <label className="space-y-1 text-sm md:col-span-2 xl:col-span-3"><span>Exact approved consent language</span><textarea className={INPUT_CLASS} rows={3} value={profileForm.approved_consent_language} onChange={(event) => updateProfile({ approved_consent_language: event.target.value })} /></label>
+              <label className="space-y-1 text-sm"><span>Source approval evidence</span><input className={INPUT_CLASS} value={profileForm.source_approval_evidence} onChange={(event) => updateProfile({ source_approval_evidence: event.target.value })} /></label>
+              <label className="space-y-1 text-sm"><span>Approval date</span><input className={INPUT_CLASS} type="datetime-local" value={profileForm.approval_date} onInput={(event) => updateProfile({ approval_date: event.currentTarget.value })} onChange={(event) => updateProfile({ approval_date: event.target.value })} /></label>
+              <label className="space-y-1 text-sm"><span>Expiry, if applicable</span><input className={INPUT_CLASS} type="datetime-local" value={profileForm.expires_at} onInput={(event) => updateProfile({ expires_at: event.currentTarget.value })} onChange={(event) => updateProfile({ expires_at: event.target.value })} /></label>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={profileForm.organization_authorized} onChange={(event) => updateProfile({ organization_authorized: event.target.checked })} /> Organization authorized</label>
+              <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={profileForm.automated_call_permission} onChange={(event) => updateProfile({ automated_call_permission: event.target.checked })} /> Automated/synthesized-call permission</label>
+            </div>
+            <button type="button" className="btn-secondary mt-3" disabled={busy} onClick={() => void action(async () => {
+              const result = await api('/calling/allstate/consent-source-profiles', { method: 'POST', body: JSON.stringify(profileForm) });
+              setSelectedProfileId(result.profile.id);
+              return result;
+            }, 'Consent Source Profile saved and selected.')}>Save Consent Source Profile</button>
+          </div>
+          <div className="rounded border border-zinc-800 p-3">
+            <div className="font-semibold">CSV import</div>
+            <div className="mt-3 flex flex-wrap gap-2">
+              <button type="button" className="btn-secondary" onClick={() => void action(() => downloadApi('/calling/allstate/consented-leads/template.csv?mode=simple', 'allstate-consented-leads-simple.csv'), 'Simple CSV template downloaded.')}>Download simple CSV template</button>
+              <button type="button" className="btn-secondary" onClick={() => void action(() => downloadApi('/calling/allstate/consented-leads/template.csv?mode=advanced', 'allstate-consented-leads-advanced.csv'), 'Advanced CSV template downloaded.')}>Download advanced CSV template</button>
+              <label className="btn-secondary cursor-pointer">Preview simple CSV<input className="sr-only" type="file" accept=".csv,text/csv" onChange={(event) => void previewCsv(event.target.files?.[0])} /></label>
+            </div>
+            <div className="mt-2 text-xs text-zinc-500">Simple required columns: first_name, phone_number, consent_timestamp, consent_reference. Imported consent remains under review.</div>
+            {csvPreview ? <div className="mt-3 space-y-3">
+              <div className="grid gap-2 text-sm md:grid-cols-4"><div>Total {csvPreview.total_rows}</div><div className="text-emerald-300">Valid {csvPreview.valid_rows}</div><div className="text-amber-300">Needs review {csvPreview.rows_needing_review}</div><div>Duplicates {csvPreview.duplicate_numbers}</div></div>
+              <div className="table-wrap"><table className="ops-table"><thead><tr><th>Row</th><th>Normalized phone</th><th>Result</th><th>Blocked reason</th></tr></thead><tbody>{(csvPreview.rows || []).map((row: Record<string, any>) => <tr key={row.row}><td>{row.row}</td><td>{row.normalized_phone}</td><td>{row.valid ? 'Valid' : 'Review'}</td><td>{(row.reasons || []).join('; ') || '-'}</td></tr>)}</tbody></table></div>
+              <button type="button" className="btn" disabled={busy || !csvPreview.valid_rows} onClick={() => void action(() => api('/calling/allstate/consented-leads/import', { method: 'POST', body: JSON.stringify({ rows: csvPreview.import_rows }) }), 'Valid rows imported under review. Invalid rows were not imported.')}>Import valid rows</button>
+            </div> : null}
+          </div>
           <details className="rounded border border-zinc-800 p-3">
-            <summary className="cursor-pointer font-semibold">Import consented calling leads</summary>
+            <summary className="cursor-pointer font-semibold">Advanced manual lead entry</summary>
             <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
               {['first_name', 'last_name', 'phone_number', 'timezone', 'province', 'product_interest', 'consent_status', 'consent_type', 'consent_source', 'consent_timestamp', 'consented_number', 'consent_proof'].map((key) => <label className="space-y-1 text-sm" key={key}><span>{key.replaceAll('_', ' ')}</span><input className={INPUT_CLASS} value={leadForm[key] || ''} onChange={(event) => setLeadForm({ ...leadForm, [key]: event.target.value })} /></label>)}
               <label className="space-y-1 text-sm md:col-span-2 xl:col-span-3"><span>Exact consent text</span><textarea className={INPUT_CLASS} rows={3} value={leadForm.consent_text || ''} onChange={(event) => setLeadForm({ ...leadForm, consent_text: event.target.value })} /></label>
@@ -279,7 +428,6 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
             </div>
             <div className="mt-3 flex flex-wrap gap-2">
               <button type="button" className="btn" disabled={busy} onClick={() => void action(() => api('/calling/allstate/consented-leads/import', { method: 'POST', body: JSON.stringify(leadForm) }), 'Lead imported and eligibility evaluated.')}>Add manual lead</button>
-              <label className="btn-secondary cursor-pointer">Upload CSV<input className="sr-only" type="file" accept=".csv,text/csv" onChange={(event) => void importCsv(event.target.files?.[0])} /></label>
             </div>
           </details>
           <div className="text-sm">Fully eligible uploaded leads: <strong>{studio.eligible_lead_count}</strong></div>
@@ -326,6 +474,23 @@ function ComplianceRow({ item, busy, run }: { item: Record<string, any>; busy: b
   const [evidence, setEvidence] = useState(item.evidence || '');
   const [effectiveAt, setEffectiveAt] = useState(item.effective_at ? String(item.effective_at).slice(0, 16) : '');
   return <tr><td>{item.label}<div className="text-xs text-zinc-500">{item.category}</div></td><td><select className={INPUT_CLASS} value={status} onChange={(event) => setStatus(event.target.value)}><option>incomplete</option><option>under_review</option><option>approved</option><option>rejected</option><option>expired</option></select></td><td><input className={INPUT_CLASS} value={approver} onChange={(event) => setApprover(event.target.value)} /></td><td><input className={INPUT_CLASS} value={evidence} onChange={(event) => setEvidence(event.target.value)} /></td><td><input className={INPUT_CLASS} type="datetime-local" value={effectiveAt} onChange={(event) => setEffectiveAt(event.target.value)} /></td><td><button type="button" className="btn-secondary text-xs" disabled={busy} onClick={() => void run(() => api(`/calling/allstate/compliance/${item.item_key}`, { method: 'PATCH', body: JSON.stringify({ status, approver, evidence, effective_at: effectiveAt || null }) }), `${item.label} updated.`)}>Save</button></td></tr>;
+}
+
+function CompliancePackage({ item, busy, run }: { item: Record<string, any>; busy: boolean; run: (fn: () => Promise<any>, success: string) => Promise<void> }) {
+  const existing = (item.items || []).find((entry: Record<string, any>) => entry.evidence || entry.approver || entry.effective_at) || {};
+  const [approver, setApprover] = useState(existing.approver || '');
+  const [evidence, setEvidence] = useState(existing.evidence || '');
+  const [effectiveAt, setEffectiveAt] = useState(existing.effective_at ? String(existing.effective_at).slice(0, 16) : '');
+  return <div className="rounded border border-zinc-800 p-3 text-sm">
+    <div className="flex items-start justify-between gap-2"><div className="font-semibold">{item.label}</div><div className={item.approved_count === item.total_count ? 'text-emerald-300' : 'text-amber-300'}>{item.approved_count}/{item.total_count}</div></div>
+    <div className="mt-2 text-xs text-zinc-500">{(item.items || []).map((entry: Record<string, any>) => entry.label).join(' · ')}</div>
+    {item.external_evidence_required ? <div className="mt-3 space-y-2">
+      <input className={INPUT_CLASS} placeholder="Approver" value={approver} onChange={(event) => setApprover(event.target.value)} />
+      <input className={INPUT_CLASS} placeholder="Approval evidence" value={evidence} onChange={(event) => setEvidence(event.target.value)} />
+      <input className={INPUT_CLASS} type="datetime-local" value={effectiveAt} onChange={(event) => setEffectiveAt(event.target.value)} />
+      <button type="button" className="btn-secondary" disabled={busy || !approver || !evidence || !effectiveAt} onClick={() => void run(() => api(`/calling/allstate/compliance-packages/${item.package_key}`, { method: 'POST', body: JSON.stringify({ approver, evidence, effective_at: effectiveAt }) }), `${item.label} saved across its underlying audit records.`)}>Save approval package</button>
+    </div> : <div className="mt-3 text-xs text-zinc-400">{item.package_key === 'system' ? 'Verified automatically from the running system.' : 'Evaluated separately for each uploaded lead.'}</div>}
+  </div>;
 }
 
 function PilotRow({ item, busy, run }: { item: Record<string, any>; busy: boolean; run: (fn: () => Promise<any>, success: string) => Promise<void> }) {

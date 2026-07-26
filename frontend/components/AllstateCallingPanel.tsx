@@ -190,6 +190,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   const blockers = useMemo(() => workspace.health?.blockers || [], [workspace.health]);
   const warnings = workspace.warnings || [];
   const preview = workspace.preview || {};
+  const livePreview = workspace.script_studio?.live_retell_preview || {};
   const selectedAttempt = (workspace.attempts || []).find((attempt) => attempt.id === selectedAttemptId) || null;
 
   async function allowNumber() {
@@ -278,10 +279,10 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
       <CallScriptStudio studio={workspace.script_studio} refresh={refresh} />
 
       <section className="card">
-        <h2 className="text-lg font-semibold">Retell Call Preview</h2>
+        <h2 className="text-lg font-semibold">LIVE RETELL PREVIEW</h2>
         <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
           <SectionCard title="Expected agent"><span className="font-mono text-xs text-zinc-200">{preview.expected_agent_name || workspace.health?.agent_name || '-'}</span></SectionCard>
-          <SectionCard title="Agent ID / version"><span className="font-mono text-xs text-zinc-200">{workspace.health?.agent_id || preview.override_agent_id || '-'} / {workspace.health?.configured_agent_version || preview.override_agent_version || workspace.health?.agent_version || '-'}</span></SectionCard>
+          <SectionCard title="Agent ID / version"><span className="font-mono text-xs text-zinc-200">{workspace.health?.agent_id || preview.override_agent_id || '-'} / {livePreview.agent_version ?? workspace.health?.configured_agent_version ?? preview.override_agent_version ?? workspace.health?.agent_version ?? '-'}</span></SectionCard>
           <SectionCard title="Provider health">{workspace.health?.internal_test_ready ? 'Internal test ready' : 'Blocked'}</SectionCard>
           <SectionCard title="Recording disclosure">{preview.recording_disclosure_enabled ? 'Enabled' : 'Disabled'}</SectionCard>
           <SectionCard title="Voice tuning">{preview.voice?.voice_name || workspace.health?.voice_id || '-'} / responsiveness {preview.voice?.responsiveness ?? workspace.health?.responsiveness ?? '-'}</SectionCard>
@@ -289,11 +290,11 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
         </div>
         <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
           <div className="text-zinc-500">Internal-test opening</div>
-          <p className="mt-1 text-zinc-200">{preview.begin_message || '-'}</p>
+          <p className="mt-1 text-zinc-200">{livePreview.opening_internal || preview.begin_message || '-'}</p>
         </div>
         <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
           <div className="text-zinc-500">Consented-prospect opening</div>
-          <p className="mt-1 text-zinc-200">{preview.consented_prospect_begin_message || '-'}</p>
+          <p className="mt-1 text-zinc-200">{livePreview.opening_consented || preview.consented_prospect_begin_message || '-'}</p>
         </div>
         <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
           <div className="text-zinc-500">Recording/transcription disclosure</div>
@@ -301,7 +302,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
         </div>
         <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
           <div className="text-zinc-500">Business purpose</div>
-          <p className="mt-1 text-zinc-200">{preview.business_purpose || '-'}</p>
+          <p className="mt-1 text-zinc-200">{livePreview.purpose_statement || preview.business_purpose || '-'}</p>
         </div>
         <details className="mt-3 rounded border border-zinc-800 p-3">
           <summary className="cursor-pointer text-sm font-semibold">Voice, pronunciation and dynamic variables</summary>

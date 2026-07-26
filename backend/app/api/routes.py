@@ -110,9 +110,16 @@ from app.services.call_script_studio import (
     PILOT_CONFIRMATION,
     approve_locked_content,
     approve_pilot_lead,
+    apply_compliance_package,
+    automatic_system_checks,
+    compliance_blocker_details,
     compliance_blockers,
+    compliance_package_payload,
     compliance_payload,
+    consent_csv_template,
+    consent_source_profile_payload,
     cost_projection,
+    create_consent_source_profile,
     create_draft,
     ensure_compliance_items,
     ensure_script_studio,
@@ -123,10 +130,12 @@ from app.services.call_script_studio import (
     pilot_payload,
     place_approved_pilot_call,
     publish_script,
+    preview_simple_consent_rows,
     request_script_approval,
     run_draft_tests,
     script_payload,
     update_draft,
+    verify_retell_node_texts,
 )
 
 router = APIRouter()
@@ -2091,6 +2100,37 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
         .order_by(CallScriptVersion.version_number.desc())
     ).all()
     compliance_items = ensure_compliance_items(db)
+    draft_script = next(
+        (item for item in script_versions if item.status in {'draft', 'testing', 'approved', 'failed', 'failed_recoverable'}),
+        None,
+    )
+    live_retell_preview = {
+        'label': 'LIVE RETELL PREVIEW',
+        'script_version': published_script.version_number,
+        'agent_version': published_script.retell_agent_version,
+        'flow_version': published_script.retell_flow_version,
+        'published_at': published_script.published_at,
+        'opening_internal': published_script.opening_internal,
+        'opening_consented': published_script.opening_consented,
+        'purpose_statement': published_script.purpose_statement,
+        'node_text_verified': False,
+        'verification_error': None,
+    }
+    try:
+        live_flow = await provider.get_conversation_flow(
+            published_script.conversation_flow_id,
+            published_script.retell_flow_version,
+        )
+        live_verification = verify_retell_node_texts(published_script, live_flow)
+        live_retell_preview['node_text_verified'] = live_verification['passed']
+        live_retell_preview['node_verification'] = live_verification
+    except Exception as exc:
+        live_retell_preview['verification_error'] = str(exc)
+    source_profiles = db.scalars(
+        select(ConsentSourceProfile)
+        .where(ConsentSourceProfile.campaign_id == ALLSTATE_CAMPAIGN_ID)
+        .order_by(ConsentSourceProfile.created_at.desc())
+    ).all()
     consented_leads = db.scalars(
         select(ConsentedCallingLead)
         .where(ConsentedCallingLead.campaign_id == ALLSTATE_CAMPAIGN_ID)
@@ -2148,9 +2188,16 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
         },
         'script_studio': {
             'published_version': script_payload(published_script),
+            'current_draft': script_payload(draft_script) if draft_script else None,
+            'live_retell_preview': live_retell_preview,
+            'draft_preview': script_payload(draft_script) if draft_script else None,
             'versions': [script_payload(item) for item in script_versions],
             'compliance_items': [compliance_payload(item) for item in compliance_items],
             'compliance_blockers': compliance_blockers(compliance_items),
+            'compliance_blocker_details': compliance_blocker_details(compliance_items),
+            'compliance_packages': compliance_package_payload(compliance_items),
+            'automatic_system_checks': automatic_system_checks(health, published_script),
+            'consent_source_profiles': [consent_source_profile_payload(item) for item in source_profiles],
             'consented_leads': [lead_payload(item) for item in consented_leads],
             'eligible_lead_count': sum(1 for item in consented_leads if item.eligibility_status == 'Ready for pilot'),
             'pilot_queue': [
@@ -2204,6 +2251,31 @@ def update_allstate_script_draft(script_id: str, payload: dict=Body(...), db: Se
     db.refresh(row)
     return {'ok': True, 'script': script_payload(row)}
 
+@router.post('/calling/allstate/script-versions/{script_id}/save-and-test')
+async def save_and_test_allstate_script(script_id: str, payload: dict=Body(default={}), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    row = db.get(CallScriptVersion, script_id)
+    if not row or row.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Script version not found')
+    try:
+        if payload:
+            update_draft(db, row, payload, user)
+        result = run_draft_tests(db, row, user.id)
+        provider_agent = await calling_provider().get_agent(row.retell_agent_id)
+        result = {
+            **result,
+            'retell_provider_reachable': provider_agent.get('agent_id') == row.retell_agent_id,
+            'retell_agent_id': provider_agent.get('agent_id'),
+            'retell_playground_required_after_publish': True,
+        }
+        row.test_result = result
+        if result['passed'] and result['retell_provider_reachable']:
+            request_script_approval(db, row, user)
+        db.commit()
+        return {'ok': result['passed'], 'test_result': result, 'script': script_payload(row)}
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+
 @router.post('/calling/allstate/script-versions/{script_id}/test')
 def test_allstate_script_draft(script_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
     row = db.get(CallScriptVersion, script_id)
@@ -2247,15 +2319,38 @@ async def publish_allstate_script(script_id: str, db: Session=Depends(get_db), u
     if not row or row.campaign_id != ALLSTATE_CAMPAIGN_ID:
         raise HTTPException(404, 'Script version not found')
     try:
+        if row.status == 'testing' and (row.test_result or {}).get('passed'):
+            request_script_approval(db, row, user)
         result = await publish_script(db, row, user)
     except ValueError as exc:
         raise HTTPException(409, str(exc)) from exc
     except Exception as exc:
-        row.status = 'failed'
-        db.commit()
         raise HTTPException(502, f'Retell in-place publish failed: {exc}') from exc
     db.commit()
     return {'ok': True, 'retell': result, 'script': script_payload(row)}
+
+@router.post('/calling/allstate/script-versions/{script_id}/discard')
+def discard_allstate_script(script_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    row = db.get(CallScriptVersion, script_id)
+    if not row or row.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Script version not found')
+    if row.status == 'published':
+        raise HTTPException(409, 'The live published script cannot be discarded')
+    row.status = 'discarded'
+    row.recovery_action = None
+    db.add(CallScriptAudit(
+        script_version_id=row.id,
+        action='draft_discarded',
+        actor=user.id,
+        timestamp=datetime.utcnow(),
+        before_value={},
+        after_value={'status': 'discarded'},
+        reason='Discarded from Script Studio',
+        retell_result={},
+        test_result=row.test_result or {},
+    ))
+    db.commit()
+    return {'ok': True, 'script': script_payload(row)}
 
 @router.post('/calling/allstate/script-versions/{version_number}/rollback')
 async def rollback_allstate_script(version_number: int, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
@@ -2317,6 +2412,77 @@ def update_allstate_calling_compliance(item_key: str, payload: dict=Body(...), d
     item.updated_at = datetime.utcnow()
     db.commit()
     return {'ok': True, 'item': compliance_payload(item)}
+
+@router.post('/calling/allstate/compliance-packages/{package_key}')
+def save_allstate_compliance_package(package_key: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    if user.role != Role.admin:
+        raise HTTPException(403, 'Admin role is required for compliance evidence')
+    try:
+        items = apply_compliance_package(db, package_key, payload, user)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    return {'ok': True, 'items': [compliance_payload(item) for item in items]}
+
+@router.post('/calling/allstate/consent-source-profiles')
+def save_allstate_consent_source_profile(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    if user.role != Role.admin:
+        raise HTTPException(403, 'Admin role is required for consent source approval')
+    try:
+        profile = create_consent_source_profile(db, payload, user)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    return {'ok': True, 'profile': consent_source_profile_payload(profile)}
+
+@router.get('/calling/allstate/consented-leads/template.csv')
+def download_allstate_consented_lead_template(mode: str=Query(default='simple', pattern='^(simple|advanced)$'), user: User=Depends(current_user)):
+    content = consent_csv_template(mode)
+    return Response(
+        content=content,
+        media_type='text/csv',
+        headers={'Content-Disposition': f'attachment; filename=\"allstate-consented-leads-{mode}.csv\"'},
+    )
+
+@router.post('/calling/allstate/consented-leads/preview')
+def preview_allstate_consented_leads(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    profile_id = str(payload.get('profile_id') or '')
+    profile = db.get(ConsentSourceProfile, profile_id)
+    if not profile or profile.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(400, 'Select a valid Consent Source Profile')
+    rows = payload.get('rows')
+    if not isinstance(rows, list):
+        raise HTTPException(400, 'Rows must be a list')
+    return {'ok': True, 'preview': preview_simple_consent_rows(db, rows, profile)}
+
+@router.post('/calling/allstate/consented-leads/preview-csv')
+async def preview_allstate_consented_leads_csv(
+    profile_id: str=Form(...),
+    file: UploadFile=File(...),
+    db: Session=Depends(get_db),
+    user: User=Depends(require_write),
+):
+    profile = db.get(ConsentSourceProfile, profile_id)
+    if not profile or profile.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(400, 'Select a valid Consent Source Profile')
+    if not str(file.filename or '').lower().endswith('.csv'):
+        raise HTTPException(400, 'Upload a CSV file')
+    content = (await file.read()).decode('utf-8-sig')
+    return {'ok': True, 'preview': preview_simple_consent_rows(db, parse_csv_rows(content), profile)}
+
+@router.post('/calling/allstate/consented-leads/import-valid')
+def import_valid_allstate_consented_leads(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    profile_id = str(payload.get('profile_id') or '')
+    profile = db.get(ConsentSourceProfile, profile_id)
+    if not profile or profile.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(400, 'Select a valid Consent Source Profile')
+    rows = payload.get('rows')
+    if not isinstance(rows, list):
+        raise HTTPException(400, 'Rows must be a list')
+    preview = preview_simple_consent_rows(db, rows, profile)
+    result = import_consented_leads(db, preview['import_rows'], user.id)
+    db.commit()
+    return {'ok': not result['errors'], 'preview': preview, **result}
 
 @router.post('/calling/allstate/consented-leads/import')
 def import_allstate_consented_leads(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):

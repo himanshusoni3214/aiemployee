@@ -4,6 +4,7 @@ import unittest
 from datetime import datetime
 from unittest.mock import AsyncMock, patch
 
+import httpx
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
 
@@ -31,6 +32,69 @@ from app.services.calling import (
 
 
 class CallingRetellTests(unittest.TestCase):
+    def provider_request(self, response: httpx.Response):
+        provider = RetellCallingProvider(api_key='secret-test-key')
+        with patch('app.services.calling.httpx.AsyncClient') as client_class:
+            client = client_class.return_value.__aenter__.return_value
+            client.request = AsyncMock(return_value=response)
+            return __import__('asyncio').run(provider._request('POST', '/test'))
+
+    def test_retell_request_parses_json_success(self):
+        response = httpx.Response(
+            200,
+            json={'ok': True},
+            headers={'content-type': 'application/json'},
+            request=httpx.Request('POST', 'https://api.retellai.com/test'),
+        )
+        self.assertEqual(self.provider_request(response), {'ok': True})
+
+    def test_retell_request_accepts_empty_200(self):
+        response = httpx.Response(
+            200,
+            content=b'',
+            request=httpx.Request('POST', 'https://api.retellai.com/test'),
+        )
+        self.assertEqual(self.provider_request(response), {})
+
+    def test_retell_request_accepts_empty_204(self):
+        response = httpx.Response(
+            204,
+            content=b'',
+            request=httpx.Request('POST', 'https://api.retellai.com/test'),
+        )
+        self.assertEqual(self.provider_request(response), {})
+
+    def test_retell_request_returns_safe_text_success(self):
+        response = httpx.Response(
+            200,
+            text='published',
+            headers={'content-type': 'text/plain'},
+            request=httpx.Request('POST', 'https://api.retellai.com/test'),
+        )
+        result = self.provider_request(response)
+        self.assertEqual(result['status_code'], 200)
+        self.assertEqual(result['response_text'], 'published')
+
+    def test_retell_request_preserves_json_error(self):
+        response = httpx.Response(
+            400,
+            json={'error': 'invalid version'},
+            headers={'content-type': 'application/json'},
+            request=httpx.Request('POST', 'https://api.retellai.com/test'),
+        )
+        with self.assertRaisesRegex(Exception, 'invalid version'):
+            self.provider_request(response)
+
+    def test_retell_request_preserves_non_json_error(self):
+        response = httpx.Response(
+            500,
+            text='upstream unavailable',
+            headers={'content-type': 'text/plain'},
+            request=httpx.Request('POST', 'https://api.retellai.com/test'),
+        )
+        with self.assertRaisesRegex(Exception, 'upstream unavailable'):
+            self.provider_request(response)
+
     def test_normalizes_us_canada_number(self):
         self.assertEqual(normalize_phone('(416) 555-1234'), '+14165551234')
         self.assertEqual(normalize_phone('1-647-555-9999'), '+16475559999')

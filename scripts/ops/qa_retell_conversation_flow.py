@@ -144,7 +144,7 @@ def standard_scenarios(last_two_calls: list[dict]) -> list[dict]:
             'starting_node': 'objection_classifier',
             'messages': [{'role': 'user', 'content': 'I already have insurance.'}],
             'expected_nodes': {'soft_reframe'},
-            'required_terms': {'second opinion', 'review', 'cancel'},
+            'required_terms': {'coverage', 'coverages', 'review', 'second opinion'},
             'critical': True,
         },
         {
@@ -214,7 +214,7 @@ def standard_scenarios(last_two_calls: list[dict]) -> list[dict]:
                 {'role': 'user', 'content': 'No, I am definitely not interested.'},
             ],
             'expected_nodes': {'end'},
-            'required_terms': {'thank'},
+            'required_terms': {'himanshu', 'contact', 'thank'},
             'critical': True,
         },
         {

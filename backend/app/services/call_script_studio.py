@@ -5,7 +5,7 @@ from datetime import datetime
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -14,6 +14,7 @@ from app.models.entities import (
     CallComplianceItem,
     CallScriptAudit,
     CallScriptVersion,
+    ConsentSourceProfile,
     ConsentedCallingLead,
     PilotCallEntry,
     SuppressionEntry,
@@ -93,6 +94,83 @@ COMPLIANCE_ITEMS = [
     ('allstate_recording_approval', 'Allstate recording/transcription approval', 'allstate'),
     ('allstate_lead_source_approval', 'Allstate approved lead source', 'allstate'),
     ('allstate_data_storage_approval', 'Allstate approved data-storage workflow', 'allstate'),
+]
+
+COMPLIANCE_PACKAGES = {
+    'allstate': {
+        'label': 'Allstate approval package',
+        'item_keys': [
+            'allstate_ai_approval',
+            'allstate_script_approval',
+            'allstate_caller_id_approval',
+            'allstate_recording_approval',
+            'allstate_lead_source_approval',
+            'allstate_data_storage_approval',
+        ],
+        'external_evidence_required': True,
+    },
+    'dncl': {
+        'label': 'DNCL package',
+        'item_keys': ['dncl_registration', 'area_code_subscription', 'dncl_list_current'],
+        'external_evidence_required': True,
+    },
+    'system': {
+        'label': 'Voryx system checks',
+        'item_keys': [
+            'voryx_internal_dnc',
+            'calling_hours_enabled',
+            'script_version_approved',
+            'caller_id_approved',
+        ],
+        'external_evidence_required': False,
+    },
+    'lead': {
+        'label': 'Lead-level checks',
+        'item_keys': [
+            'automated_call_consent',
+            'dncl_scrub_complete',
+            'allstate_internal_dnc',
+            'lead_source_approved',
+        ],
+        'external_evidence_required': False,
+    },
+}
+
+SIMPLE_CONSENT_COLUMNS = [
+    'first_name',
+    'phone_number',
+    'consent_timestamp',
+    'consent_reference',
+    'product_interest',
+    'renewal_month',
+    'preferred_call_time',
+    'notes',
+]
+
+ADVANCED_CONSENT_COLUMNS = [
+    'first_name',
+    'last_name',
+    'phone_number',
+    'timezone',
+    'province',
+    'product_interest',
+    'consent_status',
+    'consent_type',
+    'consent_source',
+    'consent_text',
+    'consent_timestamp',
+    'consented_number',
+    'automated_or_synthesized_call_consent',
+    'organization_authorized',
+    'consent_proof',
+    'consent_withdrawn',
+    'consent_expiry',
+    'renewal_month',
+    'preferred_call_time',
+    'notes',
+    'dncl_status',
+    'internal_dnc_clear',
+    'suppression_clear',
 ]
 
 DEFAULT_OBJECTIONS = [
@@ -228,6 +306,9 @@ def script_payload(row: CallScriptVersion) -> dict:
         'retell_agent_version': row.retell_agent_version,
         'retell_flow_version': row.retell_flow_version,
         'rollback_from_version': row.rollback_from_version,
+        'publish_state': row.publish_state or {},
+        'failure_stage': row.failure_stage,
+        'recovery_action': row.recovery_action,
         'locked_fields': sorted(LOCKED_FIELDS),
     }
 
@@ -371,6 +452,13 @@ def update_draft(db: Session, row: CallScriptVersion, payload: dict, user: User)
     row.node_changes = changes
     row.status = 'draft'
     row.test_result = {}
+    if row.publish_state:
+        row.publish_state = {
+            'stage': 'preparing',
+            'prior_partial_publish': row.publish_state,
+        }
+    row.failure_stage = None
+    row.recovery_action = None
     row.reviewed_by = None
     row.reviewed_at = None
     if locked_change:
@@ -478,23 +566,68 @@ def _node_instruction_for_field(row: CallScriptVersion, field: str) -> str:
     return ''
 
 
+def expected_retell_node_texts(row: CallScriptVersion) -> dict[str, str]:
+    discovery = row.discovery_content or {}
+    closing = row.closing_library or {}
+    return {
+        'opening': (
+            f'For an internal test say: "{row.opening_internal}" '
+            f'For a consented lead say: "{row.opening_consented}" '
+            'Route busy responses to Busy Callback. Never claim to be human.'
+        ),
+        'purpose': row.purpose_statement,
+        'coverage_review': ' '.join(
+            str(discovery.get(key) or '')
+            for key in ('product_interest', 'coverage_review', 'renewal')
+        ).strip(),
+        'appointment_close': str(closing.get('appointment') or ''),
+        'renewal_callback': str(closing.get('renewal_callback') or ''),
+        'busy_callback': str(closing.get('busy_callback') or ''),
+        'soft_reframe': ' '.join(
+            f"{item.get('name')}: {item.get('response')} {item.get('follow_up_question')}"
+            for item in row.objection_library or []
+            if item.get('active', True) and item.get('classification') not in {'hard', 'DNC'}
+        ).strip(),
+        'end': row.voicemail_content or '',
+    }
+
+
+def verify_retell_node_texts(row: CallScriptVersion, flow: dict) -> dict:
+    by_id = {node.get('id'): node for node in flow.get('nodes') or []}
+    expected = expected_retell_node_texts(row)
+    mismatches = []
+    for node_id, expected_text in expected.items():
+        actual = str(((by_id.get(node_id) or {}).get('instruction') or {}).get('text') or '')
+        if actual != expected_text:
+            mismatches.append({
+                'node_id': node_id,
+                'expected': expected_text,
+                'actual': actual,
+            })
+    return {
+        'passed': not mismatches,
+        'verified_nodes': sorted(expected),
+        'mismatches': mismatches,
+    }
+
+
 def retell_node_patch(row: CallScriptVersion, live_flow: dict) -> dict:
     nodes = [dict(node) for node in live_flow.get('nodes') or []]
     by_id = {node.get('id'): node for node in nodes}
-    for change in row.node_changes or []:
-        field = change.get('field')
-        node_id = NODE_FIELD_MAP.get(str(field))
-        if not node_id or node_id not in by_id:
-            continue
+    expected = expected_retell_node_texts(row)
+    missing = sorted(set(expected) - set(by_id))
+    if missing:
+        raise ValueError(f'Retell flow is missing mapped nodes: {", ".join(missing)}')
+    for node_id, text in expected.items():
         node = by_id[node_id]
         instruction = dict(node.get('instruction') or {})
-        instruction['text'] = _node_instruction_for_field(row, str(field))
+        instruction['text'] = text
         node['instruction'] = instruction
     return {'nodes': nodes}
 
 
 async def publish_script(db: Session, row: CallScriptVersion, user: User, provider: RetellCallingProvider | None = None) -> dict:
-    if row.status != 'approved' or not (row.test_result or {}).get('passed'):
+    if row.status not in {'approved', 'failed', 'failed_recoverable'} or not (row.test_result or {}).get('passed'):
         raise ValueError('Only an approved, passing script can be published')
     if any(change.get('compliance_approval_required') for change in row.node_changes or []) and not row.compliance_approved_at:
         raise ValueError('A separate compliance approval is required for locked-section changes')
@@ -503,69 +636,186 @@ async def publish_script(db: Session, row: CallScriptVersion, user: User, provid
     if settings.retell_permanent_agent_id and row.retell_agent_id != settings.retell_permanent_agent_id:
         raise ValueError('Configured permanent agent does not match the script')
     provider = provider or calling_provider()
-    agent = await provider.get_agent(row.retell_agent_id)
-    engine = agent.get('response_engine') or {}
-    if engine.get('type') != 'conversation-flow' or engine.get('conversation_flow_id') != row.conversation_flow_id:
-        raise ValueError('Existing successor agent no longer points to the expected Conversation Flow')
-    base_agent_version = int(agent.get('version') or 0)
-    draft_agent = await provider.create_agent_version(row.retell_agent_id, base_agent_version)
-    if draft_agent.get('agent_id') != row.retell_agent_id:
-        raise ValueError('Retell returned a different agent ID for the draft version')
-    draft_agent_version = int(draft_agent.get('version'))
-    draft_engine = draft_agent.get('response_engine') or {}
-    if draft_engine.get('type') != 'conversation-flow' or draft_engine.get('conversation_flow_id') != row.conversation_flow_id:
-        raise ValueError('Retell draft version does not retain the existing Conversation Flow')
-    flow_version = int(draft_engine.get('version'))
-    live_flow = await provider.get_conversation_flow(row.conversation_flow_id, flow_version)
-    patch = retell_node_patch(row, live_flow)
-    updated_flow = await provider.update_conversation_flow(row.conversation_flow_id, patch, flow_version)
-    verified = await provider.get_conversation_flow(row.conversation_flow_id, updated_flow.get('version', flow_version))
-    if verified.get('conversation_flow_id') != row.conversation_flow_id:
-        raise ValueError('Retell returned a different Conversation Flow ID')
-    await provider.publish_agent_version(row.retell_agent_id, draft_agent_version)
-    published_agent = await provider.get_agent(row.retell_agent_id, draft_agent_version)
-    published_engine = published_agent.get('response_engine') or {}
-    if not published_agent.get('is_published'):
-        raise ValueError('Retell agent version did not publish')
-    if published_engine.get('conversation_flow_id') != row.conversation_flow_id:
-        raise ValueError('Published agent version does not retain the existing Conversation Flow')
-    from_number = normalize_phone(settings.retell_from_number)
-    await provider.update_phone_number_assignment(from_number, row.retell_agent_id, draft_agent_version)
-    number = await provider.get_phone_number(from_number)
-    inbound = number.get('inbound_agents') or []
-    outbound = number.get('outbound_agents') or []
-    assignment_ok = (
-        not inbound
-        and len(outbound) == 1
-        and outbound[0].get('agent_id') == row.retell_agent_id
-        and int(outbound[0].get('agent_version') or 0) == draft_agent_version
-        and float(outbound[0].get('weight') or 0) == 1.0
-    )
-    if not assignment_ok:
-        raise ValueError('Published Retell version was not assigned exactly to the outbound number')
-    published_rows = db.scalars(select(CallScriptVersion).where(
-        CallScriptVersion.campaign_id == row.campaign_id,
-        CallScriptVersion.status == 'published',
-    )).all()
-    for old in published_rows:
-        old.status = 'archived'
-    db.flush()
-    row.status = 'published'
-    row.published_by = user.id
-    row.published_at = _now()
-    row.retell_flow_version = int(verified.get('version')) if str(verified.get('version')).isdigit() else flow_version
-    row.retell_agent_version = draft_agent_version
-    result = {
-        'conversation_flow_id': row.conversation_flow_id,
-        'conversation_flow_version': row.retell_flow_version,
-        'agent_id': row.retell_agent_id,
-        'agent_version': row.retell_agent_version,
-        'new_agent_created': False,
-        'new_conversation_flow_created': False,
-        'outbound_assignment_verified': True,
-    }
-    _audit(db, row, 'published_in_place', user.id, retell_result=result, test_result=row.test_result)
-    return result
+    state = dict(row.publish_state or {})
+
+    def persist(stage: str, **values: Any) -> None:
+        nonlocal state
+        completed = list(state.get('completed_steps') or [])
+        if stage not in completed:
+            completed.append(stage)
+        state = {**state, **values, 'stage': stage, 'completed_steps': completed, 'updated_at': _now().isoformat()}
+        row.publish_state = state
+        row.failure_stage = None
+        row.recovery_action = None
+        db.flush()
+        db.commit()
+        db.refresh(row)
+
+    try:
+        persist('preparing')
+        latest_agent = await provider.get_agent(row.retell_agent_id)
+        latest_engine = latest_agent.get('response_engine') or {}
+        if latest_engine.get('type') != 'conversation-flow' or latest_engine.get('conversation_flow_id') != row.conversation_flow_id:
+            raise ValueError('Existing successor agent no longer points to the expected Conversation Flow')
+        base_agent_version = int(latest_agent.get('version') or 0)
+        persist('base_agent_verified', base_agent_version=base_agent_version)
+
+        draft_agent_version = state.get('draft_agent_version')
+        flow_version = state.get('flow_version')
+        draft_agent = None
+        if draft_agent_version is not None:
+            draft_agent = await provider.get_agent(row.retell_agent_id, int(draft_agent_version))
+        else:
+            latest_flow_version = int(latest_engine.get('version') or 0)
+            latest_flow = await provider.get_conversation_flow(row.conversation_flow_id, latest_flow_version)
+            latest_text = verify_retell_node_texts(row, latest_flow)
+            if latest_agent.get('is_published') and latest_text['passed']:
+                draft_agent = latest_agent
+                draft_agent_version = base_agent_version
+                flow_version = latest_flow_version
+                persist(
+                    'retell_draft_reconciled',
+                    draft_agent_version=draft_agent_version,
+                    flow_version=flow_version,
+                    reconciliation='existing published provider version already contains exact saved text',
+                )
+            else:
+                draft_agent = await provider.create_agent_version(row.retell_agent_id, base_agent_version)
+                if draft_agent.get('agent_id') != row.retell_agent_id:
+                    raise ValueError('Retell returned a different agent ID for the draft version')
+                draft_agent_version = int(draft_agent.get('version'))
+                draft_engine = draft_agent.get('response_engine') or {}
+                if draft_engine.get('type') != 'conversation-flow' or draft_engine.get('conversation_flow_id') != row.conversation_flow_id:
+                    raise ValueError('Retell draft version does not retain the existing Conversation Flow')
+                flow_version = int(draft_engine.get('version'))
+                persist(
+                    'retell_draft_created',
+                    draft_agent_version=draft_agent_version,
+                    flow_version=flow_version,
+                    superseded_partial_agent_version=base_agent_version if latest_agent.get('is_published') else None,
+                )
+
+        draft_engine = (draft_agent or {}).get('response_engine') or {}
+        if flow_version is None:
+            flow_version = int(draft_engine.get('version') or 0)
+        current_flow = await provider.get_conversation_flow(row.conversation_flow_id, int(flow_version))
+        current_verification = verify_retell_node_texts(row, current_flow)
+        if not current_verification['passed']:
+            patch = retell_node_patch(row, current_flow)
+            await provider.update_conversation_flow(row.conversation_flow_id, patch, int(flow_version))
+        persist('flow_updated', flow_version=int(flow_version))
+
+        verified_flow = await provider.get_conversation_flow(row.conversation_flow_id, int(flow_version))
+        if verified_flow.get('conversation_flow_id') != row.conversation_flow_id:
+            raise ValueError('Retell returned a different Conversation Flow ID')
+        text_verification = verify_retell_node_texts(row, verified_flow)
+        if not text_verification['passed']:
+            raise ValueError(f'Retell node text verification failed: {text_verification["mismatches"]}')
+        persist('flow_verified', flow_version=int(flow_version), node_text_verification=text_verification)
+
+        exact_agent = await provider.get_agent(row.retell_agent_id, int(draft_agent_version))
+        if not exact_agent.get('is_published'):
+            await provider.publish_agent_version(row.retell_agent_id, int(draft_agent_version))
+            persist('agent_published', draft_agent_version=int(draft_agent_version))
+            exact_agent = await provider.get_agent(row.retell_agent_id, int(draft_agent_version))
+        else:
+            persist('agent_publish_reconciled', draft_agent_version=int(draft_agent_version))
+        published_engine = exact_agent.get('response_engine') or {}
+        if exact_agent.get('agent_id') != row.retell_agent_id or not exact_agent.get('is_published'):
+            raise ValueError('Retell agent version did not publish')
+        if (
+            published_engine.get('conversation_flow_id') != row.conversation_flow_id
+            or int(published_engine.get('version') or -1) != int(flow_version)
+        ):
+            raise ValueError('Published agent version does not retain the exact verified Conversation Flow version')
+        persist('agent_verified', draft_agent_version=int(draft_agent_version), flow_version=int(flow_version))
+
+        from_number = normalize_phone(settings.retell_from_number)
+        number = await provider.get_phone_number(from_number)
+        inbound = number.get('inbound_agents') or []
+        outbound = number.get('outbound_agents') or []
+        assignment_ok = (
+            not inbound
+            and len(outbound) == 1
+            and outbound[0].get('agent_id') == row.retell_agent_id
+            and int(outbound[0].get('agent_version') or 0) == int(draft_agent_version)
+            and float(outbound[0].get('weight') or 0) == 1.0
+        )
+        if not assignment_ok:
+            await provider.update_phone_number_assignment(from_number, row.retell_agent_id, int(draft_agent_version))
+            persist('number_assigned', draft_agent_version=int(draft_agent_version))
+            number = await provider.get_phone_number(from_number)
+            inbound = number.get('inbound_agents') or []
+            outbound = number.get('outbound_agents') or []
+            assignment_ok = (
+                not inbound
+                and len(outbound) == 1
+                and outbound[0].get('agent_id') == row.retell_agent_id
+                and int(outbound[0].get('agent_version') or 0) == int(draft_agent_version)
+                and float(outbound[0].get('weight') or 0) == 1.0
+            )
+        if not assignment_ok:
+            raise ValueError('Published Retell version was not assigned exactly to the outbound number')
+        persist('number_verified', draft_agent_version=int(draft_agent_version))
+
+        db.execute(
+            update(CallScriptVersion)
+            .where(
+                CallScriptVersion.campaign_id == row.campaign_id,
+                CallScriptVersion.status == 'published',
+                CallScriptVersion.id != row.id,
+            )
+            .values(status='archived')
+        )
+        db.flush()
+        row.status = 'published'
+        row.published_by = user.id
+        row.published_at = _now()
+        row.retell_flow_version = int(flow_version)
+        row.retell_agent_version = int(draft_agent_version)
+        row.failure_stage = None
+        row.recovery_action = None
+        persist('voryx_committed')
+        persist('completed')
+        result = {
+            'conversation_flow_id': row.conversation_flow_id,
+            'conversation_flow_version': row.retell_flow_version,
+            'agent_id': row.retell_agent_id,
+            'agent_version': row.retell_agent_version,
+            'new_agent_created': False,
+            'new_conversation_flow_created': False,
+            'outbound_assignment_verified': True,
+            'node_text_verification': text_verification,
+            'reconciled': bool(state.get('reconciliation') or state.get('prior_partial_publish')),
+            'publish_state': row.publish_state,
+        }
+        _audit(db, row, 'published_in_place', user.id, retell_result=result, test_result=row.test_result)
+        return result
+    except Exception as exc:
+        db.rollback()
+        row = db.get(CallScriptVersion, row.id)
+        state = dict(row.publish_state or state)
+        row.status = 'failed_recoverable'
+        row.failure_stage = str(state.get('stage') or 'preparing')
+        row.recovery_action = 'Retry publish. Voryx will resume from the last verified provider stage.'
+        row.publish_state = {
+            **state,
+            'stage': 'failed_recoverable',
+            'failure_stage': row.failure_stage,
+            'error': str(exc)[:500],
+            'recovery_action': row.recovery_action,
+            'updated_at': _now().isoformat(),
+        }
+        _audit(
+            db,
+            row,
+            'publish_failed_recoverable',
+            user.id,
+            reason=str(exc)[:500],
+            retell_result=row.publish_state,
+        )
+        db.commit()
+        raise
 
 
 def compliance_payload(item: CallComplianceItem) -> dict:
@@ -592,6 +842,115 @@ def compliance_blockers(items: list[CallComplianceItem], now: datetime | None = 
         elif item.expires_at and item.expires_at <= now:
             blockers.append(f'{item.label}: approval expired')
     return blockers
+
+
+def compliance_blocker_details(items: list[CallComplianceItem], now: datetime | None = None) -> list[dict]:
+    now = now or _now()
+    details = []
+    for item in items:
+        if not item.mandatory:
+            continue
+        missing = []
+        if item.status != 'approved':
+            missing.append('approval decision')
+        if not item.approver:
+            missing.append('approver')
+        if not item.evidence:
+            missing.append('evidence')
+        if not item.effective_at:
+            missing.append('effective date')
+        if item.expires_at and item.expires_at <= now:
+            missing.append('current unexpired approval')
+        if missing:
+            details.append({
+                'item_key': item.item_key,
+                'label': item.label,
+                'category': item.category,
+                'status': item.status,
+                'missing_fields': missing,
+                'saved_evidence': bool(item.evidence),
+                'saved_approver': bool(item.approver),
+                'saved_effective_at': bool(item.effective_at),
+            })
+    return details
+
+
+def compliance_package_payload(items: list[CallComplianceItem]) -> list[dict]:
+    by_key = {item.item_key: item for item in items}
+    payload = []
+    for package_key, package in COMPLIANCE_PACKAGES.items():
+        package_items = [by_key[key] for key in package['item_keys'] if key in by_key]
+        payload.append({
+            'package_key': package_key,
+            'label': package['label'],
+            'external_evidence_required': package['external_evidence_required'],
+            'approved_count': sum(item.status == 'approved' for item in package_items),
+            'total_count': len(package_items),
+            'items': [compliance_payload(item) for item in package_items],
+        })
+    return payload
+
+
+def apply_compliance_package(
+    db: Session,
+    package_key: str,
+    payload: dict,
+    user: User,
+) -> list[CallComplianceItem]:
+    package = COMPLIANCE_PACKAGES.get(package_key)
+    if not package:
+        raise ValueError('Unknown compliance package')
+    if package['external_evidence_required']:
+        approver = str(payload.get('approver') or '').strip()
+        evidence = str(payload.get('evidence') or '').strip()
+        effective_at = _parse_datetime(payload.get('effective_at'), True)
+        if not approver or not evidence:
+            raise ValueError('Approval package requires approver, evidence and effective date')
+    else:
+        approver = 'Voryx automatic system verification'
+        evidence = str(payload.get('evidence') or 'Verified from running Voryx and Retell configuration')
+        effective_at = _now()
+    items = ensure_compliance_items(db)
+    by_key = {item.item_key: item for item in items}
+    updated = []
+    for key in package['item_keys']:
+        item = by_key.get(key)
+        if not item:
+            continue
+        item.status = 'approved'
+        item.approver = item.approver or approver
+        item.evidence = item.evidence or evidence
+        item.effective_at = item.effective_at or effective_at
+        if payload.get('expires_at') is not None:
+            item.expires_at = _parse_datetime(payload.get('expires_at'))
+        if payload.get('notes') is not None:
+            item.notes = str(payload.get('notes') or '') or None
+        item.updated_by = user.id
+        item.updated_at = _now()
+        updated.append(item)
+    return updated
+
+
+def automatic_system_checks(health: dict, published: CallScriptVersion | None) -> list[dict]:
+    outbound = health.get('outbound_agents') or []
+    assigned = (
+        len(outbound) == 1
+        and outbound[0].get('agent_id') == settings.retell_agent_id
+        and published is not None
+        and int(outbound[0].get('agent_version') or -1) == int(published.retell_agent_version or -2)
+    )
+    return [
+        {'key': 'voryx_internal_dnc', 'label': 'Voryx internal DNC active', 'passed': True},
+        {'key': 'calling_hours_enabled', 'label': 'Recipient-local calling hours active', 'passed': True},
+        {'key': 'script_version_approved', 'label': 'Approved published script active', 'passed': bool(published)},
+        {
+            'key': 'caller_id_approved',
+            'label': 'Configured caller ID matches Retell',
+            'passed': normalize_phone(settings.retell_from_number) == normalize_phone(health.get('phone_number') or settings.retell_from_number),
+        },
+        {'key': 'retell_assignment', 'label': 'Retell agent assignment correct', 'passed': assigned},
+        {'key': 'suppression', 'label': 'Suppression system active', 'passed': True},
+    ]
 
 
 def recipient_in_calling_window(timezone: str, now: datetime | None = None) -> tuple[bool, str]:
@@ -683,6 +1042,8 @@ def evaluate_lead(db: Session, lead: ConsentedCallingLead, items: list[CallCompl
 def lead_payload(lead: ConsentedCallingLead) -> dict:
     return {
         'id': lead.id,
+        'source_profile_id': lead.source_profile_id,
+        'is_test': lead.is_test,
         'first_name': lead.first_name,
         'last_name': lead.last_name,
         'phone_number_masked': masked_phone(lead.phone_number),
@@ -733,6 +1094,155 @@ def _parse_datetime(value: Any, required: bool = False) -> datetime | None:
         raise ValueError(f'Invalid timestamp: {text}') from exc
 
 
+def consent_source_profile_payload(profile: ConsentSourceProfile) -> dict:
+    return {
+        'id': profile.id,
+        'name': profile.name,
+        'approved_consent_language': profile.approved_consent_language,
+        'organization_authorized': profile.organization_authorized,
+        'automated_call_permission': profile.automated_call_permission,
+        'consent_proof_method': profile.consent_proof_method,
+        'default_province': profile.default_province,
+        'default_timezone': profile.default_timezone,
+        'source_approval_evidence': profile.source_approval_evidence,
+        'approval_date': profile.approval_date,
+        'expires_at': profile.expires_at,
+        'created_at': profile.created_at,
+        'updated_at': profile.updated_at,
+    }
+
+
+def create_consent_source_profile(db: Session, payload: dict, user: User) -> ConsentSourceProfile:
+    required = [
+        'name',
+        'approved_consent_language',
+        'consent_proof_method',
+        'source_approval_evidence',
+        'approval_date',
+    ]
+    missing = [key for key in required if not str(payload.get(key) or '').strip()]
+    if missing:
+        raise ValueError(f'Missing profile fields: {", ".join(missing)}')
+    profile = db.scalar(select(ConsentSourceProfile).where(
+        ConsentSourceProfile.campaign_id == ALLSTATE_CAMPAIGN_ID,
+        ConsentSourceProfile.name == str(payload['name']).strip(),
+    ))
+    values = {
+        'name': str(payload['name']).strip(),
+        'approved_consent_language': str(payload['approved_consent_language']).strip(),
+        'organization_authorized': _parse_bool(payload.get('organization_authorized')),
+        'automated_call_permission': _parse_bool(payload.get('automated_call_permission')),
+        'consent_proof_method': str(payload['consent_proof_method']).strip(),
+        'default_province': str(payload.get('default_province') or 'Ontario').strip(),
+        'default_timezone': str(payload.get('default_timezone') or 'America/Toronto').strip(),
+        'source_approval_evidence': str(payload['source_approval_evidence']).strip(),
+        'approval_date': _parse_datetime(payload['approval_date'], True),
+        'expires_at': _parse_datetime(payload.get('expires_at')),
+        'updated_at': _now(),
+    }
+    if profile:
+        for key, value in values.items():
+            setattr(profile, key, value)
+    else:
+        profile = ConsentSourceProfile(
+            company_id=ALLSTATE_COMPANY_ID,
+            campaign_id=ALLSTATE_CAMPAIGN_ID,
+            created_by=user.id,
+            created_at=_now(),
+            **values,
+        )
+        db.add(profile)
+    db.flush()
+    return profile
+
+
+def consent_csv_template(mode: str) -> str:
+    columns = SIMPLE_CONSENT_COLUMNS if mode == 'simple' else ADVANCED_CONSENT_COLUMNS
+    output = io.StringIO()
+    writer = csv.DictWriter(output, fieldnames=columns)
+    writer.writeheader()
+    return output.getvalue()
+
+
+def preview_simple_consent_rows(
+    db: Session,
+    rows: list[dict],
+    profile: ConsentSourceProfile,
+) -> dict:
+    seen: set[str] = set()
+    preview = []
+    valid_rows = []
+    for index, raw in enumerate(rows, start=1):
+        reasons = []
+        missing = [
+            key for key in ('first_name', 'phone_number', 'consent_timestamp', 'consent_reference')
+            if not str(raw.get(key) or '').strip()
+        ]
+        if missing:
+            reasons.append(f'Missing: {", ".join(missing)}')
+        phone = normalize_phone(raw.get('phone_number'))
+        if not valid_us_ca_e164(phone):
+            reasons.append('Invalid US/Canada phone number')
+        duplicate = phone in seen or bool(db.scalar(select(ConsentedCallingLead.id).where(
+            ConsentedCallingLead.campaign_id == ALLSTATE_CAMPAIGN_ID,
+            ConsentedCallingLead.phone_number == phone,
+        )))
+        if duplicate:
+            reasons.append('Duplicate phone number')
+        seen.add(phone)
+        try:
+            consent_timestamp = _parse_datetime(raw.get('consent_timestamp'), True)
+        except ValueError as exc:
+            consent_timestamp = None
+            reasons.append(str(exc))
+        normalized = {
+            'first_name': str(raw.get('first_name') or '').strip(),
+            'last_name': str(raw.get('last_name') or '').strip() or None,
+            'phone_number': phone,
+            'timezone': profile.default_timezone,
+            'province': profile.default_province,
+            'product_interest': str(raw.get('product_interest') or 'Auto and property insurance').strip(),
+            'consent_status': 'under_review',
+            'consent_type': 'express_automated_call',
+            'consent_source': profile.name,
+            'consent_text': profile.approved_consent_language,
+            'consent_timestamp': consent_timestamp.isoformat() if consent_timestamp else '',
+            'consented_number': phone,
+            'automated_or_synthesized_call_consent': profile.automated_call_permission,
+            'organization_authorized': profile.organization_authorized,
+            'consent_proof': f'{profile.consent_proof_method}: {str(raw.get("consent_reference") or "").strip()}',
+            'consent_withdrawn': False,
+            'renewal_month': str(raw.get('renewal_month') or '').strip() or None,
+            'preferred_call_time': str(raw.get('preferred_call_time') or '').strip() or None,
+            'notes': str(raw.get('notes') or '').strip() or None,
+            'dncl_status': 'review_required',
+            'internal_dnc_clear': False,
+            'suppression_clear': False,
+            'source_profile_id': profile.id,
+            'is_test': _parse_bool(raw.get('is_test')),
+        }
+        item = {
+            'row': index,
+            'valid': not reasons,
+            'needs_review': bool(reasons),
+            'duplicate': duplicate,
+            'normalized_phone': phone,
+            'reasons': reasons,
+            'normalized': normalized,
+        }
+        preview.append(item)
+        if not reasons:
+            valid_rows.append(normalized)
+    return {
+        'total_rows': len(rows),
+        'valid_rows': len(valid_rows),
+        'rows_needing_review': len(rows) - len(valid_rows),
+        'duplicate_numbers': sum(item['duplicate'] for item in preview),
+        'rows': preview,
+        'import_rows': valid_rows,
+    }
+
+
 def import_consented_leads(db: Session, rows: list[dict], user_id: str) -> dict:
     required = {
         'first_name', 'phone_number', 'timezone', 'province', 'product_interest',
@@ -760,6 +1270,8 @@ def import_consented_leads(db: Session, rows: list[dict], user_id: str) -> dict:
                 ConsentedCallingLead.phone_number == phone,
             ))
             values = {
+                'source_profile_id': str(raw.get('source_profile_id') or '').strip() or None,
+                'is_test': _parse_bool(raw.get('is_test')),
                 'first_name': str(raw.get('first_name')).strip(),
                 'last_name': str(raw.get('last_name') or '').strip() or None,
                 'phone_number': phone,

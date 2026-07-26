@@ -321,15 +321,36 @@ class RetellCallingProvider:
                 response = await client.request(method, f'{RETELL_BASE_URL}{path}', headers=self._headers(), json=payload, params=params)
         except httpx.HTTPError as exc:
             raise CallingProviderError(f'Retell request failed: {exc}') from exc
+        content_type = str(response.headers.get('content-type') or '').lower()
+        text = response.text or ''
+        safe_text = text[:500]
+        if self.api_key:
+            safe_text = safe_text.replace(self.api_key, '[REDACTED]')
         if response.status_code >= 400:
-            detail = response.text[:300]
+            detail = safe_text
+            if 'application/json' in content_type:
+                try:
+                    parsed = response.json()
+                    detail = json.dumps(parsed, separators=(',', ':'))[:500]
+                except ValueError:
+                    pass
             if response.status_code in {401, 403}:
                 raise CallingProviderError('Retell API authentication failed')
             raise CallingProviderError(f'Retell API returned {response.status_code}: {detail}')
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise CallingProviderError('Retell API returned invalid JSON') from exc
+        if response.status_code == 204 or not text.strip():
+            return {}
+        if 'application/json' in content_type:
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise CallingProviderError(
+                    f'Retell API returned malformed JSON with status {response.status_code}'
+                ) from exc
+        return {
+            'status_code': response.status_code,
+            'response_text': safe_text,
+            'content_type': content_type or None,
+        }
 
     async def get_agent(self, agent_id: str, version: int | None = None) -> dict:
         params = {'version': version} if version is not None else None
