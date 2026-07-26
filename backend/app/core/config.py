@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     retell_permanent_agent_id: str = ""
     retell_legacy_agent_id: str = ""
     retell_agent_version: str = "latest_published"
+    retell_conversation_flow_id: str = "conversation_flow_dc4d1d5f9959"
     retell_from_number: str = "+14377475010"
     retell_tool_token: str = ""
     retell_internal_test_mode: bool = False

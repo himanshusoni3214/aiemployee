@@ -366,12 +366,19 @@ def score_results(results: list[dict]) -> int:
 def run_model(client: httpx.Client, receipt: dict, model: str, scenarios: list[dict]) -> dict:
     flow_id = receipt['conversation_flow_id']
     flow_version = receipt['conversation_flow_version']
-    update = client.patch(
-        f'/update-conversation-flow/{flow_id}',
+    current_flow = client.get(
+        f'/get-conversation-flow/{flow_id}',
         params={'version': flow_version},
-        json={'model_choice': {'type': 'cascading', 'model': model, 'high_priority': False}},
     )
-    update.raise_for_status()
+    current_flow.raise_for_status()
+    current_model = ((current_flow.json().get('model_choice') or {}).get('model'))
+    if current_model != model:
+        update = client.patch(
+            f'/update-conversation-flow/{flow_id}',
+            params={'version': flow_version},
+            json={'model_choice': {'type': 'cascading', 'model': model, 'high_priority': False}},
+        )
+        update.raise_for_status()
     results = []
     for scenario in scenarios:
         shared_payload = {
@@ -480,12 +487,19 @@ def main() -> None:
         selected = next((result for result in passing if result['model'] == 'gpt-4.1-mini'), None)
         selected = selected or (passing[0] if passing else None)
         if selected:
-            final_update = client.patch(
-                f"/update-conversation-flow/{receipt['conversation_flow_id']}",
+            current_flow = client.get(
+                f"/get-conversation-flow/{receipt['conversation_flow_id']}",
                 params={'version': receipt['conversation_flow_version']},
-                json={'model_choice': {'type': 'cascading', 'model': selected['model'], 'high_priority': False}},
             )
-            final_update.raise_for_status()
+            current_flow.raise_for_status()
+            current_model = ((current_flow.json().get('model_choice') or {}).get('model'))
+            if current_model != selected['model']:
+                final_update = client.patch(
+                    f"/update-conversation-flow/{receipt['conversation_flow_id']}",
+                    params={'version': receipt['conversation_flow_version']},
+                    json={'model_choice': {'type': 'cascading', 'model': selected['model'], 'high_priority': False}},
+                )
+                final_update.raise_for_status()
     result = {
         'passed': bool(selected),
         'selected_model': selected['model'] if selected else None,

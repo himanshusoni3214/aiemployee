@@ -236,7 +236,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                         </div>
                         <dl className="mt-3 grid grid-cols-2 gap-2 text-xs text-zinc-400">
                           <div><dt>Phone-ready leads</dt><dd className="text-lg text-zinc-100">0</dd></div>
-                          <div><dt>Consent verified</dt><dd className="text-lg text-zinc-100">{campaign.id === 'campaign-allstate-quote-calling' ? 1 : 0}</dd></div>
+                          <div><dt>Pilot eligible</dt><dd className="text-lg text-zinc-100">{campaign.id === 'campaign-allstate-quote-calling' ? (allstateCallingWorkspace?.script_studio?.eligible_lead_count || 0) : 0}</dd></div>
                           <div><dt>Approved</dt><dd className="text-lg text-zinc-100">0</dd></div>
                           <div><dt>Ready to call</dt><dd className="text-lg text-zinc-100">0</dd></div>
                           <div><dt>Calls completed</dt><dd className="text-lg text-zinc-100">{campaign.id === 'campaign-allstate-quote-calling' ? (allstateCallingWorkspace?.attempts || []).filter((attempt) => ['ended', 'analyzed'].includes(attempt.status)).length : 0}</dd></div>

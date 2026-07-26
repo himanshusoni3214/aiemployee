@@ -4,7 +4,7 @@ from datetime import datetime, date, timedelta
 from pathlib import Path
 from urllib.parse import quote
 from typing import Any
-from fastapi import APIRouter, Body, Depends, Form, HTTPException, Query, Request, Response
+from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.security import OAuth2PasswordBearer
 from jose import jwt, JWTError
@@ -105,6 +105,28 @@ from app.services.calling import (
     update_internal_test_number,
     validate_tool_token,
     valid_us_ca_e164,
+)
+from app.services.call_script_studio import (
+    PILOT_CONFIRMATION,
+    approve_locked_content,
+    approve_pilot_lead,
+    compliance_blockers,
+    compliance_payload,
+    cost_projection,
+    create_draft,
+    ensure_compliance_items,
+    ensure_script_studio,
+    evaluate_lead,
+    import_consented_leads,
+    lead_payload,
+    parse_csv_rows,
+    pilot_payload,
+    place_approved_pilot_call,
+    publish_script,
+    request_script_approval,
+    run_draft_tests,
+    script_payload,
+    update_draft,
 )
 
 router = APIRouter()
@@ -2046,7 +2068,8 @@ def provision_allstate_calling(db: Session=Depends(get_db), user: User=Depends(r
 
 @router.get('/calling/allstate')
 async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Depends(current_user)):
-    health = await calling_provider().health()
+    published_script = ensure_script_studio(db, user.id)
+    health = await calling_provider().health(published_script.retell_agent_version)
     row = call_settings(db)
     row.provider_connected = bool(health.get('api_authenticated') and health.get('agent_exists') and health.get('number_exists'))
     row.provider_agent_id = settings.retell_agent_id or row.provider_agent_id
@@ -2061,7 +2084,27 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
                 await sync_call_attempt_from_retell(db, attempt, provider)
             except Exception:
                 pass
-    preview = internal_test_preview_payload(call_settings_row=row)
+    preview = internal_test_preview_payload(call_settings_row=row, agent_version=published_script.retell_agent_version)
+    script_versions = db.scalars(
+        select(CallScriptVersion)
+        .where(CallScriptVersion.campaign_id == ALLSTATE_CAMPAIGN_ID)
+        .order_by(CallScriptVersion.version_number.desc())
+    ).all()
+    compliance_items = ensure_compliance_items(db)
+    consented_leads = db.scalars(
+        select(ConsentedCallingLead)
+        .where(ConsentedCallingLead.campaign_id == ALLSTATE_CAMPAIGN_ID)
+        .order_by(ConsentedCallingLead.created_at.desc())
+        .limit(100)
+    ).all()
+    for consented_lead in consented_leads:
+        evaluate_lead(db, consented_lead, compliance_items)
+    pilot_entries = db.scalars(
+        select(PilotCallEntry)
+        .where(PilotCallEntry.campaign_id == ALLSTATE_CAMPAIGN_ID)
+        .order_by(PilotCallEntry.created_at.desc())
+    ).all()
+    leads_by_id = {item.id: item for item in consented_leads}
     migration = db.scalar(
         select(RetellAgentMigration)
         .order_by(RetellAgentMigration.created_at.desc())
@@ -2103,11 +2146,234 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
             'currency': 'USD',
             'scope': 'latest 20 calls stored in Voryx',
         },
+        'script_studio': {
+            'published_version': script_payload(published_script),
+            'versions': [script_payload(item) for item in script_versions],
+            'compliance_items': [compliance_payload(item) for item in compliance_items],
+            'compliance_blockers': compliance_blockers(compliance_items),
+            'consented_leads': [lead_payload(item) for item in consented_leads],
+            'eligible_lead_count': sum(1 for item in consented_leads if item.eligibility_status == 'Ready for pilot'),
+            'pilot_queue': [
+                pilot_payload(item, leads_by_id[item.lead_id])
+                for item in pilot_entries
+                if item.lead_id in leads_by_id
+            ],
+            'pilot_settings': {
+                'maximum_pilot_leads': 5,
+                'maximum_calls_per_day': 5,
+                'concurrency': 1,
+                'automatic_retry': False,
+                'voicemail_retry': False,
+                'batch_launch': False,
+                'calling_schedule': False,
+                'individual_approval_required': True,
+                'confirmation_required': PILOT_CONFIRMATION,
+            },
+            'cost_projection': cost_projection(db),
+            'prospect_calling_globally_enabled': False,
+            'automatic_queue_enabled': False,
+        },
     }
 
 @router.get('/calling/retell/health')
-async def retell_health(user: User=Depends(current_user)):
-    return await calling_provider().health()
+async def retell_health(db: Session=Depends(get_db), user: User=Depends(current_user)):
+    published = ensure_script_studio(db, user.id)
+    db.commit()
+    return await calling_provider().health(published.retell_agent_version)
+
+@router.post('/calling/allstate/script-versions/draft')
+def create_allstate_script_draft(payload: dict=Body(default={}), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    try:
+        row = create_draft(db, user.id, payload.get('source_version'))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    db.refresh(row)
+    return {'ok': True, 'script': script_payload(row)}
+
+@router.patch('/calling/allstate/script-versions/{script_id}')
+def update_allstate_script_draft(script_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    row = db.get(CallScriptVersion, script_id)
+    if not row or row.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Script version not found')
+    try:
+        update_draft(db, row, payload, user)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    db.commit()
+    db.refresh(row)
+    return {'ok': True, 'script': script_payload(row)}
+
+@router.post('/calling/allstate/script-versions/{script_id}/test')
+def test_allstate_script_draft(script_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    row = db.get(CallScriptVersion, script_id)
+    if not row or row.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Script version not found')
+    result = run_draft_tests(db, row, user.id)
+    db.commit()
+    return {'ok': result['passed'], 'test_result': result, 'script': script_payload(row)}
+
+@router.post('/calling/allstate/script-versions/{script_id}/request-approval')
+def request_allstate_script_approval(script_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    row = db.get(CallScriptVersion, script_id)
+    if not row or row.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Script version not found')
+    try:
+        request_script_approval(db, row, user)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    db.commit()
+    return {'ok': True, 'script': script_payload(row)}
+
+@router.post('/calling/allstate/script-versions/{script_id}/compliance-approval')
+def approve_allstate_locked_script(script_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    if user.role != Role.admin:
+        raise HTTPException(403, 'Admin role is required for compliance approval')
+    row = db.get(CallScriptVersion, script_id)
+    if not row or row.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Script version not found')
+    try:
+        approve_locked_content(db, row, user, str(payload.get('reason') or ''))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    return {'ok': True, 'script': script_payload(row)}
+
+@router.post('/calling/allstate/script-versions/{script_id}/publish')
+async def publish_allstate_script(script_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    if user.role != Role.admin:
+        raise HTTPException(403, 'Admin role is required to publish')
+    row = db.get(CallScriptVersion, script_id)
+    if not row or row.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Script version not found')
+    try:
+        result = await publish_script(db, row, user)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    except Exception as exc:
+        row.status = 'failed'
+        db.commit()
+        raise HTTPException(502, f'Retell in-place publish failed: {exc}') from exc
+    db.commit()
+    return {'ok': True, 'retell': result, 'script': script_payload(row)}
+
+@router.post('/calling/allstate/script-versions/{version_number}/rollback')
+async def rollback_allstate_script(version_number: int, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    if user.role != Role.admin:
+        raise HTTPException(403, 'Admin role is required to rollback')
+    source = db.scalar(select(CallScriptVersion).where(
+        CallScriptVersion.campaign_id == ALLSTATE_CAMPAIGN_ID,
+        CallScriptVersion.version_number == version_number,
+    ))
+    if not source:
+        raise HTTPException(404, 'Rollback source version not found')
+    row = create_draft(db, user.id, version_number)
+    row.rollback_from_version = version_number
+    row.change_summary = str(payload.get('reason') or f'Rollback to version {version_number}')
+    result = run_draft_tests(db, row, user.id)
+    if not result.get('passed'):
+        db.commit()
+        raise HTTPException(409, {'message': 'Rollback draft failed required tests', 'test_result': result})
+    request_script_approval(db, row, user)
+    approve_locked_content(db, row, user, row.change_summary)
+    try:
+        retell_result = await publish_script(db, row, user)
+    except Exception as exc:
+        row.status = 'failed'
+        db.commit()
+        raise HTTPException(502, f'Retell rollback failed: {exc}') from exc
+    db.commit()
+    return {'ok': True, 'retell': retell_result, 'script': script_payload(row)}
+
+@router.patch('/calling/allstate/compliance/{item_key}')
+def update_allstate_calling_compliance(item_key: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    if user.role != Role.admin:
+        raise HTTPException(403, 'Admin role is required for compliance evidence')
+    ensure_compliance_items(db)
+    item = db.scalar(select(CallComplianceItem).where(
+        CallComplianceItem.campaign_id == ALLSTATE_CAMPAIGN_ID,
+        CallComplianceItem.item_key == item_key,
+    ))
+    if not item:
+        raise HTTPException(404, 'Compliance item not found')
+    allowed_statuses = {'incomplete', 'under_review', 'approved', 'rejected', 'expired'}
+    status = str(payload.get('status') or item.status)
+    if status not in allowed_statuses:
+        raise HTTPException(400, 'Invalid compliance status')
+    for field in ('approver', 'evidence', 'notes'):
+        if field in payload:
+            setattr(item, field, str(payload.get(field) or '') or None)
+    for field in ('effective_at', 'expires_at'):
+        if field in payload:
+            value = str(payload.get(field) or '').strip()
+            try:
+                setattr(item, field, datetime.fromisoformat(value.replace('Z', '+00:00')).replace(tzinfo=None) if value else None)
+            except ValueError as exc:
+                raise HTTPException(400, f'Invalid {field}') from exc
+    if status == 'approved' and (not item.approver or not item.evidence or not item.effective_at):
+        raise HTTPException(400, 'Approved compliance items require approver, evidence and effective date')
+    item.status = status
+    item.updated_by = user.id
+    item.updated_at = datetime.utcnow()
+    db.commit()
+    return {'ok': True, 'item': compliance_payload(item)}
+
+@router.post('/calling/allstate/consented-leads/import')
+def import_allstate_consented_leads(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    rows = payload.get('rows')
+    if not isinstance(rows, list):
+        rows = [payload]
+    result = import_consented_leads(db, rows, user.id)
+    db.commit()
+    return {'ok': not result['errors'], **result}
+
+@router.post('/calling/allstate/consented-leads/import-csv')
+async def import_allstate_consented_leads_csv(file: UploadFile=File(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    if not str(file.filename or '').lower().endswith('.csv'):
+        raise HTTPException(400, 'Upload a CSV file')
+    content = (await file.read()).decode('utf-8-sig')
+    result = import_consented_leads(db, parse_csv_rows(content), user.id)
+    db.commit()
+    return {'ok': not result['errors'], **result}
+
+@router.post('/calling/allstate/consented-leads/{lead_id}/evaluate')
+def evaluate_allstate_consented_lead(lead_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    lead = db.get(ConsentedCallingLead, lead_id)
+    if not lead or lead.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Consented lead not found')
+    status, reasons = evaluate_lead(db, lead)
+    db.commit()
+    return {'ok': True, 'status': status, 'reasons': reasons, 'lead': lead_payload(lead)}
+
+@router.post('/calling/allstate/consented-leads/{lead_id}/approve-pilot')
+def approve_allstate_pilot_lead(lead_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    lead = db.get(ConsentedCallingLead, lead_id)
+    if not lead or lead.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Consented lead not found')
+    try:
+        entry = approve_pilot_lead(db, lead, user)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    db.commit()
+    return {'ok': True, 'pilot': pilot_payload(entry, lead)}
+
+@router.post('/calling/allstate/pilot/{entry_id}/place')
+async def place_allstate_pilot_call(entry_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    entry = db.get(PilotCallEntry, entry_id)
+    if not entry or entry.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Pilot entry not found')
+    lead = db.get(ConsentedCallingLead, entry.lead_id)
+    if not lead:
+        raise HTTPException(404, 'Consented lead not found')
+    try:
+        result = await place_approved_pilot_call(db, entry, lead, user, str(payload.get('confirmation_text') or ''))
+    except ValueError as exc:
+        db.commit()
+        raise HTTPException(409, str(exc)) from exc
+    db.commit()
+    if not result.get('ok'):
+        raise HTTPException(502, result)
+    return result
 
 @router.post('/calling/allstate/internal-test-number')
 def set_internal_test_number(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):

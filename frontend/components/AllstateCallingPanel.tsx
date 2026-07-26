@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { api } from '../lib/api';
 import { LocalTime } from './LocalTime';
+import { CallScriptStudio } from './CallScriptStudio';
 
 type CallingHealth = {
   api_authenticated?: boolean;
@@ -134,6 +135,7 @@ export type CallingWorkspace = {
   } | null;
   attempts: CallAttempt[];
   campaign_cost?: { amount?: number; currency?: string; scope?: string };
+  script_studio?: any;
 };
 
 function money(value?: number | null, currency = 'USD') {
@@ -239,7 +241,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
           <div>
             <p className="text-sm text-zinc-500">Sales Campaign &gt; Channels &gt; Calling</p>
             <h1 className="text-2xl font-semibold">Calling Channel Workspace</h1>
-            <p className="text-sm text-zinc-400">Outbound-only Retell test calling. Prospect calling, batch calling, queueing and schedules are disabled.</p>
+            <p className="text-sm text-zinc-400">Internal tests and individually approved consented-lead pilot controls. Automatic prospect calling, batch calling, queueing and schedules remain disabled.</p>
           </div>
           <div className="rounded border border-zinc-800 px-3 py-2 text-sm">
             <div>From: <span className="text-zinc-100">{workspace.settings?.from_number || 'not configured'}</span></div>
@@ -272,6 +274,8 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
         <CheckRow label="Prospect calling disabled" ok={!workspace.settings?.prospect_calling_enabled} />
         <CheckRow label="Batch queue disabled" ok={!workspace.settings?.automated_queue_enabled} />
       </section>
+
+      <CallScriptStudio studio={workspace.script_studio} refresh={refresh} />
 
       <section className="card">
         <h2 className="text-lg font-semibold">Retell Call Preview</h2>
@@ -342,8 +346,8 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
       </section>
 
       <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <SectionCard title="Eligible leads">Phone-ready leads require valid phone, consent tied to that number, automated-call consent, no DNC/suppression and campaign approval. Current prospect-ready count: 0.</SectionCard>
-        <SectionCard title="Call queue">Automated queue and schedules remain disabled during internal testing. Current queued calls: 0.</SectionCard>
+        <SectionCard title="Eligible leads">Phone-ready leads require exact-number automated-call consent, proof, DNCL, DNC, calling-window and script approval. Current ready count: {workspace.script_studio?.eligible_lead_count || 0}.</SectionCard>
+        <SectionCard title="Pilot approvals">Automatic queue and schedules remain disabled. Individually approved entries: {(workspace.script_studio?.pilot_queue || []).filter((item: any) => item.status === 'approved').length}.</SectionCard>
         <SectionCard title="Conversation flow">Ava uses a structured Allstate sales flow with explicit renewal, objection, callback, appointment, disclosure and DNC stages.</SectionCard>
         <SectionCard title="Consent and compliance">Prospect calling is disabled until consent, DNC, calling window and provider checks pass.</SectionCard>
       </section>

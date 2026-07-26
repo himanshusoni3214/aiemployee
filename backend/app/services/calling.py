@@ -18,6 +18,7 @@ from app.models.entities import (
     CallAttempt,
     CallCampaignSettings,
     CallDisposition,
+    CallScriptVersion,
     CallTranscript,
     Campaign,
     Company,
@@ -314,10 +315,10 @@ class RetellCallingProvider:
             raise CallingProviderError('RETELL_API_KEY is not configured')
         return {'Authorization': f'Bearer {self.api_key}', 'Content-Type': 'application/json'}
 
-    async def _request(self, method: str, path: str, payload: dict | None = None) -> dict:
+    async def _request(self, method: str, path: str, payload: dict | None = None, params: dict | None = None) -> dict:
         try:
             async with httpx.AsyncClient(timeout=20) as client:
-                response = await client.request(method, f'{RETELL_BASE_URL}{path}', headers=self._headers(), json=payload)
+                response = await client.request(method, f'{RETELL_BASE_URL}{path}', headers=self._headers(), json=payload, params=params)
         except httpx.HTTPError as exc:
             raise CallingProviderError(f'Retell request failed: {exc}') from exc
         if response.status_code >= 400:
@@ -330,8 +331,9 @@ class RetellCallingProvider:
         except ValueError as exc:
             raise CallingProviderError('Retell API returned invalid JSON') from exc
 
-    async def get_agent(self, agent_id: str) -> dict:
-        return await self._request('GET', f'/get-agent/{agent_id}')
+    async def get_agent(self, agent_id: str, version: int | None = None) -> dict:
+        params = {'version': version} if version is not None else None
+        return await self._request('GET', f'/get-agent/{agent_id}', params=params)
 
     async def get_phone_number(self, phone_number: str) -> dict:
         return await self._request('GET', f'/get-phone-number/{phone_number}')
@@ -339,7 +341,27 @@ class RetellCallingProvider:
     async def get_call(self, call_id: str) -> dict:
         return await self._request('GET', f'/v2/get-call/{call_id}')
 
-    async def health(self) -> dict:
+    async def get_conversation_flow(self, conversation_flow_id: str, version: int | None = None) -> dict:
+        params = {'version': version} if version is not None else None
+        return await self._request('GET', f'/get-conversation-flow/{conversation_flow_id}', params=params)
+
+    async def update_conversation_flow(self, conversation_flow_id: str, payload: dict, version: int | None = None) -> dict:
+        params = {'version': version} if version is not None else None
+        return await self._request('PATCH', f'/update-conversation-flow/{conversation_flow_id}', payload, params=params)
+
+    async def create_agent_version(self, agent_id: str, base_version: int) -> dict:
+        return await self._request('POST', f'/create-agent-version/{agent_id}', {'base_version': base_version})
+
+    async def publish_agent_version(self, agent_id: str, version: int) -> dict:
+        return await self._request('POST', f'/publish-agent-version/{agent_id}', {'version': version})
+
+    async def update_phone_number_assignment(self, phone_number: str, agent_id: str, version: int) -> dict:
+        return await self._request('PATCH', f'/update-phone-number/{phone_number}', {
+            'inbound_agents': [],
+            'outbound_agents': [{'agent_id': agent_id, 'agent_version': version, 'weight': 1}],
+        })
+
+    async def health(self, expected_agent_version: int | None = None) -> dict:
         blockers: list[str] = []
         api_authenticated = False
         agent_exists = False
@@ -351,7 +373,7 @@ class RetellCallingProvider:
         agent_payload: dict = {}
         legacy_agent_payload: dict = {}
         number_payload: dict = {}
-        configured_agent_version = str(settings.retell_agent_version or 'latest_published')
+        configured_agent_version = str(expected_agent_version if expected_agent_version is not None else (settings.retell_agent_version or 'latest_published'))
 
         if not self.api_key:
             blockers.append('RETELL_API_KEY missing')
@@ -488,14 +510,14 @@ class RetellCallingProvider:
             'blockers': blockers,
         }
 
-    async def place_call(self, *, to_number: str, call_attempt_id: str, dynamic_variables: dict[str, str]) -> dict:
-        override_version = str(settings.retell_agent_version or 'latest_published')
+    async def place_call(self, *, to_number: str, call_attempt_id: str, dynamic_variables: dict[str, str], agent_version: int | None = None, mode: str = 'internal_test') -> dict:
+        override_version = str(agent_version if agent_version is not None else (settings.retell_agent_version or 'latest_published'))
         payload = {
             'from_number': normalize_phone(settings.retell_from_number),
             'to_number': normalize_phone(to_number),
             'override_agent_id': settings.retell_agent_id,
             'override_agent_version': int(override_version) if override_version.isdigit() else override_version,
-            'metadata': {'voryx_call_attempt_id': call_attempt_id, 'mode': 'internal_test', 'expected_agent_name': ALLSTATE_AGENT_NAME},
+            'metadata': {'voryx_call_attempt_id': call_attempt_id, 'mode': mode, 'expected_agent_name': ALLSTATE_AGENT_NAME},
             'retell_llm_dynamic_variables': {key: str(value) for key, value in dynamic_variables.items()},
         }
         result = await self._request('POST', '/v2/create-phone-call', payload)
@@ -520,10 +542,10 @@ class MockCallingProvider:
     def __init__(self):
         self.calls: list[dict] = []
 
-    async def health(self) -> dict:
+    async def health(self, expected_agent_version: int | None = None) -> dict:
         return {'configured': True, 'api_authenticated': True, 'internal_test_ready': True, 'prospect_calling_ready': False, 'blockers': []}
 
-    async def place_call(self, *, to_number: str, call_attempt_id: str, dynamic_variables: dict[str, str]) -> dict:
+    async def place_call(self, *, to_number: str, call_attempt_id: str, dynamic_variables: dict[str, str], agent_version: int | None = None, mode: str = 'internal_test') -> dict:
         result = {'call_id': f'mock-call-{call_attempt_id}', 'to_number': masked_phone(to_number), 'metadata': dynamic_variables}
         self.calls.append(result)
         return result
@@ -678,6 +700,7 @@ def internal_test_preview_payload(
     call_attempt_id: str = '<created after click>',
     payload: dict | None = None,
     call_settings_row: CallCampaignSettings | None = None,
+    agent_version: int | None = None,
 ) -> dict:
     variables = internal_test_dynamic_variables(call_attempt_id, payload, call_settings_row=call_settings_row)
     missing = [key for key in REQUIRED_DYNAMIC_VARIABLES if not variables.get(key)]
@@ -691,7 +714,7 @@ def internal_test_preview_payload(
         'required_dynamic_variables': REQUIRED_DYNAMIC_VARIABLES,
         'missing_dynamic_variables': missing,
         'override_agent_id': settings.retell_agent_id,
-        'override_agent_version': str(settings.retell_agent_version or 'latest_published'),
+        'override_agent_version': str(agent_version if agent_version is not None else (settings.retell_agent_version or 'latest_published')),
         'from_number': normalize_phone(settings.retell_from_number),
         'expected_agent_name': ALLSTATE_AGENT_NAME,
         'voice': ALLSTATE_VOICE_SETTINGS,
@@ -734,7 +757,11 @@ async def authorize_internal_test_call(db: Session, user: User, phone_number: st
     active = db.scalars(select(CallAttempt).where(CallAttempt.campaign_id == ALLSTATE_CAMPAIGN_ID, CallAttempt.status.in_(CALL_ACTIVE_STATUSES))).first()
     if active:
         blockers.append('An internal test call is already active')
-    health = await provider.health()
+    published_script = db.scalar(select(CallScriptVersion).where(
+        CallScriptVersion.campaign_id == ALLSTATE_CAMPAIGN_ID,
+        CallScriptVersion.status == 'published',
+    ))
+    health = await provider.health(published_script.retell_agent_version if published_script else None)
     if not health.get('internal_test_ready'):
         blockers.extend([str(item) for item in health.get('blockers') or []])
     return not blockers, blockers, health
@@ -749,10 +776,15 @@ async def create_internal_test_call(db: Session, user: User, payload: dict, prov
         return {'ok': False, 'blocked': True, 'status': 'blocked', 'blockers': sorted(set(blockers)), 'health': health}
 
     now = _now()
+    published_script = db.scalar(select(CallScriptVersion).where(
+        CallScriptVersion.campaign_id == ALLSTATE_CAMPAIGN_ID,
+        CallScriptVersion.status == 'published',
+    ))
     attempt = CallAttempt(
         company_id=ALLSTATE_COMPANY_ID,
         campaign_id=ALLSTATE_CAMPAIGN_ID,
         provider='retell',
+        script_version_id=published_script.id if published_script else None,
         provider_agent_id=settings.retell_agent_id or None,
         from_number=normalize_phone(settings.retell_from_number),
         to_number=phone,
@@ -796,7 +828,13 @@ async def create_internal_test_call(db: Session, user: User, payload: dict, prov
         **internal_test_dynamic_variables(attempt.id, payload, now, call_settings(db)),
     }
     try:
-        receipt = await provider.place_call(to_number=phone, call_attempt_id=attempt.id, dynamic_variables=dynamic_variables)
+        receipt = await provider.place_call(
+            to_number=phone,
+            call_attempt_id=attempt.id,
+            dynamic_variables=dynamic_variables,
+            agent_version=published_script.retell_agent_version if published_script else None,
+            mode='internal_test',
+        )
     except Exception as exc:
         attempt.status = 'provider_failed'
         attempt.termination_reason = str(exc)

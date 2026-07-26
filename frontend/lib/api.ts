@@ -19,7 +19,8 @@ function errorMessage(method: string, path: string, status: number, body: string
 }
 export async function api(path: string, init: RequestInit = {}) {
   const token = typeof window !== 'undefined' ? localStorage.getItem('token') : null;
-  const res = await fetch(`${API}/api${path}`, { ...init, credentials: 'include', headers: { 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(init.headers || {}) }, cache: 'no-store' });
+  const contentHeaders = init.body instanceof FormData ? {} : { 'Content-Type': 'application/json' };
+  const res = await fetch(`${API}/api${path}`, { ...init, credentials: 'include', headers: { ...contentHeaders, ...(token ? { Authorization: `Bearer ${token}` } : {}), ...(init.headers || {}) }, cache: 'no-store' });
   if (res.status === 401 && typeof window !== 'undefined') {
     localStorage.removeItem('token');
     location.href = '/login?expired=1';
