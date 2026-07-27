@@ -1,5 +1,7 @@
 import csv
+import hashlib
 import io
+import json
 import re
 from datetime import datetime
 from typing import Any
@@ -45,6 +47,12 @@ PILOT_CONFIRMATION = 'PLACE APPROVED CONSENTED LEAD CALL'
 MAX_PILOT_LEADS = 5
 MAX_CALLS_PER_DAY = 5
 
+
+class ScriptValidationError(ValueError):
+    def __init__(self, field_errors: dict[str, list[str]]):
+        super().__init__('The script cannot be published.')
+        self.field_errors = field_errors
+
 EDITABLE_FIELDS = {
     'opening_internal',
     'opening_consented',
@@ -59,10 +67,37 @@ EDITABLE_FIELDS = {
     'change_summary',
 }
 LOCKED_FIELDS = {'compliance_content'}
+PUBLISHABLE_FIELDS = (
+    'opening_internal',
+    'opening_consented',
+    'purpose_statement',
+    'discovery_content',
+    'objection_library',
+    'closing_library',
+    'voicemail_content',
+    'voice_settings',
+    'talking_points',
+    'compliance_content',
+)
 REQUIRED_VARIABLES = {
     'customer_name', 'agent_name', 'product_interest', 'consent_source',
     'consent_date', 'renewal_month', 'slot_one', 'slot_two',
     'callback_date', 'callback_time',
+}
+KNOWN_TEMPLATE_VARIABLES = REQUIRED_VARIABLES | {
+    'assistant_name',
+    'agent_role',
+    'company_name',
+    'agency_location',
+    'campaign_name',
+    'call_purpose',
+    'insurance_interest',
+    'booking_timezone',
+    'internal_test',
+    'recording_disclosure_enabled',
+    'recording_disclosure',
+    'consent_validated_for_called_number',
+    'voryx_call_attempt_id',
 }
 NODE_FIELD_MAP = {
     'opening_internal': 'opening',
@@ -285,7 +320,91 @@ def _script_snapshot(row: CallScriptVersion) -> dict:
     }
 
 
+def publishable_script_values(source: CallScriptVersion | dict) -> dict:
+    if isinstance(source, dict):
+        return {field: source.get(field) for field in PUBLISHABLE_FIELDS}
+    return {field: getattr(source, field) for field in PUBLISHABLE_FIELDS}
+
+
+def script_content_hash(source: CallScriptVersion | dict) -> str:
+    canonical = json.dumps(
+        publishable_script_values(source),
+        ensure_ascii=False,
+        separators=(',', ':'),
+        sort_keys=True,
+    )
+    return hashlib.sha256(canonical.encode('utf-8')).hexdigest()
+
+
+def ensure_script_hashes(row: CallScriptVersion) -> str:
+    current_hash = script_content_hash(row)
+    row.content_hash = current_hash
+    if row.status == 'published':
+        row.tested_content_hash = row.tested_content_hash or current_hash
+        row.approved_content_hash = row.approved_content_hash or current_hash
+        row.published_content_hash = current_hash
+    return current_hash
+
+
+def validate_script_content(source: CallScriptVersion | dict) -> dict[str, list[str]]:
+    values = publishable_script_values(source)
+    errors: dict[str, list[str]] = {}
+
+    def add(field: str, message: str) -> None:
+        errors.setdefault(field, []).append(message)
+
+    for field in ('opening_internal', 'opening_consented'):
+        value = str(values.get(field) or '').strip()
+        label = 'Internal-test opening' if field == 'opening_internal' else 'Consented-lead opening'
+        if not value:
+            add(field, f'{label} is blank.')
+            continue
+        if len(value) > 1000:
+            add(field, f'{label} must be 1,000 characters or fewer.')
+        if value.count('?') > 1:
+            add(field, f'{label} must contain no more than one question.')
+        if value.count(')') > value.count('('):
+            add(field, f'{label} contains an extra closing parenthesis.')
+        valid_tokens = list(re.finditer(r'\{\{\s*([a-zA-Z0-9_]+)\s*\}\}', value))
+        names = [match.group(1) for match in valid_tokens]
+        if names.count('customer_name') != 1:
+            if re.search(r'(?<!\{)\{customer_name\}(?!\})', value):
+                add(field, 'Customer-name variable is malformed. Use {{customer_name}}, not {customer_name}.')
+            else:
+                add(field, 'Customer name is required exactly once as {{customer_name}}.')
+        remainder = re.sub(r'\{\{\s*[a-zA-Z0-9_]+\s*\}\}', '', value)
+        if '{' in remainder or '}' in remainder:
+            add(field, 'Use {{customer_name}} with two opening and two closing braces.')
+        for name in names:
+            if name not in KNOWN_TEMPLATE_VARIABLES:
+                add(field, f'Unknown variable: {name}.')
+
+    purpose = str(values.get('purpose_statement') or '').strip()
+    if not purpose:
+        add('purpose_statement', 'Reason for call is required.')
+    discovery = values.get('discovery_content') or {}
+    if not str(discovery.get('product_interest') or '').strip():
+        add('discovery_content.product_interest', 'Product-interest question is required.')
+    if not str(discovery.get('coverage_review') or '').strip():
+        add('discovery_content.coverage_review', 'Coverage-review question is required.')
+    closings = values.get('closing_library') or {}
+    for key, label in (
+        ('appointment', 'Appointment close'),
+        ('renewal_callback', 'Renewal callback close'),
+        ('busy_callback', 'Busy callback close'),
+    ):
+        if not str(closings.get(key) or '').strip():
+            add(f'closing_library.{key}', f'{label} is missing.')
+
+    all_text = json.dumps(values, ensure_ascii=False)
+    valid_variables = set(re.findall(r'\{\{\s*([a-zA-Z0-9_]+)\s*\}\}', all_text))
+    for name in sorted(valid_variables - KNOWN_TEMPLATE_VARIABLES):
+        add('template_variables', f'Unknown variable: {name}.')
+    return errors
+
+
 def script_payload(row: CallScriptVersion) -> dict:
+    ensure_script_hashes(row)
     snapshot = _script_snapshot(row)
     return {
         'id': row.id,
@@ -309,6 +428,10 @@ def script_payload(row: CallScriptVersion) -> dict:
         'publish_state': row.publish_state or {},
         'failure_stage': row.failure_stage,
         'recovery_action': row.recovery_action,
+        'content_hash': row.content_hash,
+        'tested_content_hash': row.tested_content_hash,
+        'approved_content_hash': row.approved_content_hash,
+        'published_content_hash': row.published_content_hash,
         'locked_fields': sorted(LOCKED_FIELDS),
     }
 
@@ -377,6 +500,7 @@ def ensure_script_studio(db: Session, user_id: str | None = None) -> CallScriptV
         **defaults,
     )
     row.estimated_prompt_tokens = _estimate_tokens(GLOBAL_PROMPT, defaults)
+    ensure_script_hashes(row)
     db.add(row)
     db.flush()
     _audit(db, row, 'baseline_imported', user_id, after_value={'version_number': 1, 'status': 'published'})
@@ -417,6 +541,10 @@ def create_draft(db: Session, user_id: str, source_version: int | None = None) -
         rollback_from_version=source.version_number if source.status != 'published' else None,
         **values,
     )
+    row.content_hash = script_content_hash(row)
+    row.tested_content_hash = None
+    row.approved_content_hash = None
+    row.published_content_hash = None
     db.add(row)
     db.flush()
     _audit(db, row, 'draft_created', user_id, after_value={'source_version': source.version_number})
@@ -424,7 +552,7 @@ def create_draft(db: Session, user_id: str, source_version: int | None = None) -
 
 
 def update_draft(db: Session, row: CallScriptVersion, payload: dict, user: User) -> CallScriptVersion:
-    if row.status not in {'draft', 'testing', 'failed'}:
+    if row.status not in {'draft', 'testing', 'failed', 'failed_recoverable'}:
         raise ValueError('Published or approved versions cannot be edited; create a draft')
     before = _script_snapshot(row)
     changes = []
@@ -452,6 +580,10 @@ def update_draft(db: Session, row: CallScriptVersion, payload: dict, user: User)
     row.node_changes = changes
     row.status = 'draft'
     row.test_result = {}
+    row.content_hash = script_content_hash(row)
+    row.tested_content_hash = None
+    row.approved_content_hash = None
+    row.published_content_hash = None
     if row.publish_state:
         row.publish_state = {
             'stage': 'preparing',
@@ -470,6 +602,8 @@ def update_draft(db: Session, row: CallScriptVersion, payload: dict, user: User)
 
 
 def run_draft_tests(db: Session, row: CallScriptVersion, actor: str | None) -> dict:
+    current_hash = ensure_script_hashes(row)
+    field_errors = validate_script_content(row)
     variables_text = ' '.join(str(value) for value in _script_snapshot(row).values())
     referenced_variables = set(re.findall(r'\{\{\s*([a-zA-Z0-9_]+)\s*\}\}', variables_text))
     missing_variables = sorted(referenced_variables - REQUIRED_VARIABLES)
@@ -503,6 +637,7 @@ def run_draft_tests(db: Session, row: CallScriptVersion, actor: str | None) -> d
     passed = bool(
         passed_count == len(results)
         and sales_score >= 8
+        and not field_errors
         and not missing_variables
         and not missing_tools
         and not missing_objections
@@ -520,17 +655,23 @@ def run_draft_tests(db: Session, row: CallScriptVersion, actor: str | None) -> d
         'missing_retell_tools': missing_tools,
         'missing_objections': missing_objections,
         'estimated_prompt_tokens': row.estimated_prompt_tokens,
+        'content_hash': current_hash,
+        'field_errors': field_errors,
     }
     row.test_result = result
+    row.tested_content_hash = current_hash if passed else None
+    row.approved_content_hash = None
     row.status = 'testing' if passed else 'failed'
     _audit(db, row, 'draft_tested', actor, test_result=result)
     return result
 
 
 def request_script_approval(db: Session, row: CallScriptVersion, user: User) -> None:
-    if not (row.test_result or {}).get('passed'):
+    current_hash = ensure_script_hashes(row)
+    if not (row.test_result or {}).get('passed') or row.tested_content_hash != current_hash:
         raise ValueError('All 15 required draft scenarios must pass before approval')
     row.status = 'approved'
+    row.approved_content_hash = current_hash
     row.reviewed_by = user.id
     row.reviewed_at = _now()
     _audit(db, row, 'approval_requested_and_reviewed', user.id, test_result=row.test_result)
@@ -626,8 +767,71 @@ def retell_node_patch(row: CallScriptVersion, live_flow: dict) -> dict:
     return {'nodes': nodes}
 
 
-async def publish_script(db: Session, row: CallScriptVersion, user: User, provider: RetellCallingProvider | None = None) -> dict:
-    if row.status not in {'approved', 'failed', 'failed_recoverable'} or not (row.test_result or {}).get('passed'):
+async def run_retell_opening_playground(
+    row: CallScriptVersion,
+    provider: RetellCallingProvider,
+    agent_version: int | None = None,
+) -> dict:
+    response = await provider.playground_completion(
+        row.retell_agent_id,
+        int(agent_version if agent_version is not None else (row.retell_agent_version or 0)),
+        {
+            'current_node_id': 'opening',
+            'dynamic_variables': {
+                'customer_name': 'Himanshu',
+                'assistant_name': 'Ava',
+                'agent_name': 'Himanshu Soni',
+                'agent_role': 'Allstate Sales Agent',
+                'company_name': 'Allstate',
+                'agency_location': 'Scarborough, Ontario',
+                'campaign_name': 'Allstate Quote Appointment Calling',
+                'call_purpose': 'Internal playground validation with no telephone call',
+                'insurance_interest': 'Auto and property insurance',
+                'consent_source': 'Internal self-test',
+                'consent_date': _now().date().isoformat(),
+                'booking_timezone': 'America/Toronto',
+                'internal_test': 'true',
+                'recording_disclosure_enabled': 'true',
+                'recording_disclosure': 'This internal test may be recorded and transcribed.',
+                'consent_validated_for_called_number': 'true',
+                'voryx_call_attempt_id': 'playground-no-phone-call',
+            },
+            'messages': [],
+            'tool_mocks': [],
+        },
+    )
+    messages = response.get('messages') or []
+    generated = ' '.join(
+        str(item.get('content') or '')
+        for item in messages
+        if isinstance(item, dict) and item.get('role') == 'agent'
+    ).strip()
+    passed = bool(generated and 'Himanshu' in generated and 'Ava' in generated)
+    return {
+        'passed': passed,
+        'mode': 'retell_agent_playground_no_phone_call',
+        'current_node_id': response.get('current_node_id'),
+        'generated_opening': generated[:500],
+        'real_phone_calls': 0,
+        'live_tools_executed': 0,
+    }
+
+
+async def publish_script(
+    db: Session,
+    row: CallScriptVersion,
+    user: User,
+    provider: RetellCallingProvider | None = None,
+    *,
+    require_playground: bool = False,
+) -> dict:
+    current_hash = ensure_script_hashes(row)
+    if (
+        row.status not in {'approved', 'failed', 'failed_recoverable'}
+        or not (row.test_result or {}).get('passed')
+        or row.tested_content_hash != current_hash
+        or row.approved_content_hash != current_hash
+    ):
         raise ValueError('Only an approved, passing script can be published')
     if any(change.get('compliance_approval_required') for change in row.node_changes or []) and not row.compliance_approved_at:
         raise ValueError('A separate compliance approval is required for locked-section changes')
@@ -713,6 +917,17 @@ async def publish_script(db: Session, row: CallScriptVersion, user: User, provid
             raise ValueError(f'Retell node text verification failed: {text_verification["mismatches"]}')
         persist('flow_verified', flow_version=int(flow_version), node_text_verification=text_verification)
 
+        playground = None
+        if require_playground:
+            playground = await run_retell_opening_playground(
+                row,
+                provider,
+                agent_version=int(draft_agent_version),
+            )
+            if not playground.get('passed'):
+                raise ValueError('Retell playground did not generate the verified internal-test opening.')
+            persist('playground_verified', playground_validation=playground)
+
         exact_agent = await provider.get_agent(row.retell_agent_id, int(draft_agent_version))
         if not exact_agent.get('is_published'):
             await provider.publish_agent_version(row.retell_agent_id, int(draft_agent_version))
@@ -773,6 +988,8 @@ async def publish_script(db: Session, row: CallScriptVersion, user: User, provid
         row.published_at = _now()
         row.retell_flow_version = int(flow_version)
         row.retell_agent_version = int(draft_agent_version)
+        row.content_hash = current_hash
+        row.published_content_hash = current_hash
         row.failure_stage = None
         row.recovery_action = None
         persist('voryx_committed')
@@ -786,6 +1003,7 @@ async def publish_script(db: Session, row: CallScriptVersion, user: User, provid
             'new_conversation_flow_created': False,
             'outbound_assignment_verified': True,
             'node_text_verification': text_verification,
+            'playground_validation': playground,
             'reconciled': bool(state.get('reconciliation') or state.get('prior_partial_publish')),
             'publish_state': row.publish_state,
         }
@@ -816,6 +1034,136 @@ async def publish_script(db: Session, row: CallScriptVersion, user: User, provid
         )
         db.commit()
         raise
+
+
+async def publish_script_changes(
+    db: Session,
+    user: User,
+    *,
+    base_published_version_id: str,
+    form_values: dict,
+    current_content_hash: str,
+    idempotency_key: str,
+    provider: RetellCallingProvider | None = None,
+) -> dict:
+    if not idempotency_key.strip():
+        raise ValueError('An idempotency key is required.')
+    if not re.fullmatch(r'[A-Za-z0-9._:-]{8,160}', idempotency_key):
+        raise ValueError('The idempotency key format is invalid.')
+
+    versions = db.scalars(
+        select(CallScriptVersion)
+        .where(CallScriptVersion.campaign_id == ALLSTATE_CAMPAIGN_ID)
+        .order_by(CallScriptVersion.version_number.desc())
+    ).all()
+    prior = next(
+        (
+            item for item in versions
+            if str((item.publish_state or {}).get('idempotency_key') or '') == idempotency_key
+        ),
+        None,
+    )
+    if prior and prior.status == 'published' and prior.published_content_hash == current_content_hash:
+        return {
+            'idempotent_replay': True,
+            'script': script_payload(prior),
+            'retell': {
+                'agent_id': prior.retell_agent_id,
+                'agent_version': prior.retell_agent_version,
+                'conversation_flow_id': prior.conversation_flow_id,
+                'conversation_flow_version': prior.retell_flow_version,
+                'node_text_verification': (prior.publish_state or {}).get('node_text_verification') or {},
+            },
+            'playground_validation': (prior.test_result or {}).get('retell_playground') or {},
+        }
+
+    published = next((item for item in versions if item.status == 'published'), None)
+    if not published:
+        raise ValueError('No live published script exists.')
+    if published.id != base_published_version_id and not prior:
+        raise ValueError(
+            f'The live script changed from v{published.version_number}. Refresh before publishing these edits.'
+        )
+
+    merged = {
+        **_script_snapshot(published),
+        **{key: value for key, value in form_values.items() if key in EDITABLE_FIELDS | LOCKED_FIELDS},
+    }
+    expected_hash = script_content_hash(merged)
+    if current_content_hash != expected_hash:
+        raise ValueError('The submitted content hash does not match the script fields. Refresh and retry.')
+    field_errors = validate_script_content(merged)
+    if field_errors:
+        raise ScriptValidationError(field_errors)
+    if expected_hash == ensure_script_hashes(published):
+        raise ValueError('Make a script change before publishing.')
+
+    row = prior
+    if row is None:
+        row = create_draft(db, user.id, published.version_number)
+    update_draft(db, row, merged, user)
+    row.content_hash = expected_hash
+    row.publish_state = {
+        **(row.publish_state or {}),
+        'idempotency_key': idempotency_key,
+        'base_published_version_id': published.id,
+        'requested_content_hash': expected_hash,
+        'stage': 'draft_saved',
+        'updated_at': _now().isoformat(),
+    }
+    db.flush()
+
+    result = run_draft_tests(db, row, user.id)
+    if not result.get('passed') or row.tested_content_hash != expected_hash:
+        raise ScriptValidationError(result.get('field_errors') or {'script': ['Required script tests failed.']})
+
+    provider = provider or calling_provider()
+    provider_agent = await provider.get_agent(row.retell_agent_id)
+    if provider_agent.get('agent_id') != row.retell_agent_id:
+        raise ValueError('Retell provider verification returned the wrong agent.')
+    row.test_result = {
+        **result,
+        'retell_provider_reachable': True,
+        'retell_agent_id': provider_agent.get('agent_id'),
+    }
+    request_script_approval(db, row, user)
+    if row.approved_content_hash != expected_hash:
+        raise ValueError('Approval does not match the tested script content.')
+
+    retell_result = await publish_script(
+        db,
+        row,
+        user,
+        provider,
+        require_playground=True,
+    )
+    playground = retell_result.get('playground_validation') or {}
+    if not playground.get('passed'):
+        raise ValueError('Retell playground did not generate the verified internal-test opening.')
+    row.test_result = {**(row.test_result or {}), 'retell_playground': playground}
+    row.publish_state = {
+        **(row.publish_state or {}),
+        'idempotency_key': idempotency_key,
+        'playground_validation': playground,
+        'stage': 'completed',
+    }
+    db.commit()
+    db.refresh(row)
+    return {
+        'idempotent_replay': False,
+        'script': script_payload(row),
+        'retell': retell_result,
+        'playground_validation': playground,
+        'warnings': [],
+        'publish_stages': row.publish_state or {},
+        'live_preview': {
+            'opening_internal': row.opening_internal,
+            'opening_consented': row.opening_consented,
+            'agent_version': row.retell_agent_version,
+            'flow_version': row.retell_flow_version,
+            'node_text_verified': bool((retell_result.get('node_text_verification') or {}).get('passed')),
+        },
+    }
 
 
 def compliance_payload(item: CallComplianceItem) -> dict:

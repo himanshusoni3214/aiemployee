@@ -33,13 +33,16 @@ from app.services.call_script_studio import (
     evaluate_lead,
     import_consented_leads,
     preview_simple_consent_rows,
+    publish_script_changes,
     publish_script,
     recipient_in_calling_window,
     retell_node_patch,
     expected_retell_node_texts,
     verify_retell_node_texts,
     run_draft_tests,
+    script_content_hash,
     update_draft,
+    validate_script_content,
 )
 
 
@@ -140,6 +143,163 @@ class CallScriptStudioTests(unittest.TestCase):
             self.assertEqual(result['missing_retell_tools'], [])
             self.assertEqual(result['missing_dynamic_variables'], [])
 
+    def test_content_hash_is_deterministic_and_changes_with_publishable_text(self):
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
+            user = self.seed(db)
+            published = ensure_script_studio(db, user.id)
+            first = script_content_hash(published)
+            second = script_content_hash(published)
+            values = {
+                field: getattr(published, field)
+                for field in (
+                    'opening_internal', 'opening_consented', 'purpose_statement',
+                    'discovery_content', 'objection_library', 'closing_library',
+                    'voicemail_content', 'voice_settings', 'talking_points',
+                    'compliance_content',
+                )
+            }
+            values['opening_internal'] = (
+                'Hi {{customer_name}}, this is Ava calling for an internal test. '
+                'Do you have thirty seconds?'
+            )
+            self.assertEqual(first, second)
+            self.assertNotEqual(first, script_content_hash(values))
+
+    def test_edit_invalidates_stale_test_and_approval_hashes(self):
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
+            user = self.seed(db)
+            ensure_script_studio(db, user.id)
+            draft = create_draft(db, user.id)
+            result = run_draft_tests(db, draft, user.id)
+            self.assertTrue(result['passed'])
+            tested_hash = draft.tested_content_hash
+            draft.approved_content_hash = tested_hash
+            update_draft(db, draft, {
+                'opening_internal': (
+                    'Hi {{customer_name}}, this is Ava calling for an internal test. '
+                    'Is this a good time for a brief check?'
+                ),
+            }, user)
+            self.assertNotEqual(draft.content_hash, tested_hash)
+            self.assertIsNone(draft.tested_content_hash)
+            self.assertIsNone(draft.approved_content_hash)
+            self.assertEqual(draft.test_result, {})
+            self.assertEqual(draft.status, 'draft')
+
+    def test_malformed_customer_name_placeholder_is_a_field_error(self):
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
+            user = self.seed(db)
+            published = ensure_script_studio(db, user.id)
+            values = {
+                field: getattr(published, field)
+                for field in (
+                    'opening_internal', 'opening_consented', 'purpose_statement',
+                    'discovery_content', 'objection_library', 'closing_library',
+                    'voicemail_content', 'voice_settings', 'talking_points',
+                    'compliance_content',
+                )
+            }
+            values['opening_internal'] = 'Hi {customer_name}, this is Ava calling.)'
+            errors = validate_script_content(values)
+            self.assertIn('opening_internal', errors)
+            self.assertIn(
+                'Customer-name variable is malformed. Use {{customer_name}}, not {customer_name}.',
+                errors['opening_internal'],
+            )
+            self.assertIn(
+                'Internal-test opening contains an extra closing parenthesis.',
+                errors['opening_internal'],
+            )
+
+    def test_one_click_publish_is_idempotent_for_exact_content_hash(self):
+        with self.Session() as db, \
+             patch.object(settings, 'retell_agent_id', 'agent-fixed'), \
+             patch.object(settings, 'retell_permanent_agent_id', 'agent-fixed'):
+            user = self.seed(db)
+            published = ensure_script_studio(db, user.id)
+            values = {
+                field: getattr(published, field)
+                for field in (
+                    'opening_internal', 'opening_consented', 'purpose_statement',
+                    'discovery_content', 'objection_library', 'closing_library',
+                    'voicemail_content', 'voice_settings', 'talking_points',
+                    'compliance_content',
+                )
+            }
+            values['opening_internal'] = (
+                'Hi {{customer_name}}, this is Ava calling on behalf of Himanshu Soni '
+                'for an internal workflow test. Do you have thirty seconds?'
+            )
+            expected_hash = script_content_hash(values)
+            provider = AsyncMock()
+            provider.get_agent.return_value = {'agent_id': 'agent-fixed'}
+
+            async def fake_publish(session, row, actor, selected_provider, **kwargs):
+                self.assertTrue(kwargs.get('require_playground'))
+                session.execute(
+                    __import__('sqlalchemy').update(CallScriptVersion)
+                    .where(
+                        CallScriptVersion.campaign_id == row.campaign_id,
+                        CallScriptVersion.status == 'published',
+                        CallScriptVersion.id != row.id,
+                    )
+                    .values(status='archived')
+                )
+                row.status = 'published'
+                row.retell_agent_version = 4
+                row.retell_flow_version = 4
+                row.published_content_hash = row.content_hash
+                row.publish_state = {
+                    **(row.publish_state or {}),
+                    'node_text_verification': {'passed': True},
+                }
+                session.commit()
+                return {
+                    'agent_id': row.retell_agent_id,
+                    'agent_version': 4,
+                    'conversation_flow_id': row.conversation_flow_id,
+                    'conversation_flow_version': 4,
+                    'node_text_verification': {'passed': True},
+                    'playground_validation': playground,
+                }
+
+            playground = {
+                'passed': True,
+                'mode': 'retell_agent_playground_no_phone_call',
+                'real_phone_calls': 0,
+            }
+            with patch(
+                'app.services.call_script_studio.publish_script',
+                new=AsyncMock(side_effect=fake_publish),
+            ) as publish_mock:
+                first = asyncio.run(publish_script_changes(
+                    db,
+                    user,
+                    base_published_version_id=published.id,
+                    form_values=values,
+                    current_content_hash=expected_hash,
+                    idempotency_key='qa-publish-idempotency-0001',
+                    provider=provider,
+                ))
+                second = asyncio.run(publish_script_changes(
+                    db,
+                    user,
+                    base_published_version_id=published.id,
+                    form_values=values,
+                    current_content_hash=expected_hash,
+                    idempotency_key='qa-publish-idempotency-0001',
+                    provider=provider,
+                ))
+            self.assertFalse(first['idempotent_replay'])
+            self.assertTrue(second['idempotent_replay'])
+            self.assertEqual(publish_mock.await_count, 1)
+            self.assertEqual(
+                len(db.scalars(select(CallScriptVersion).where(
+                    CallScriptVersion.status == 'published',
+                )).all()),
+                1,
+            )
+
     def test_locked_change_requires_separate_compliance_approval(self):
         with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
             user = self.seed(db)
@@ -159,6 +319,8 @@ class CallScriptStudioTests(unittest.TestCase):
             draft = create_draft(db, user.id)
             update_draft(db, draft, {'purpose_statement': 'Changed purpose'}, user)
             draft.test_result = {'passed': True}
+            draft.tested_content_hash = draft.content_hash
+            draft.approved_content_hash = draft.content_hash
             draft.status = 'approved'
             provider = AsyncMock()
             provider.get_agent.side_effect = [
@@ -214,6 +376,8 @@ class CallScriptStudioTests(unittest.TestCase):
             draft = create_draft(db, user.id)
             update_draft(db, draft, {'purpose_statement': 'Recovered purpose'}, user)
             draft.test_result = {'passed': True}
+            draft.tested_content_hash = draft.content_hash
+            draft.approved_content_hash = draft.content_hash
             draft.status = 'failed_recoverable'
             draft.publish_state = {'draft_agent_version': 1, 'flow_version': 1, 'stage': 'agent_published'}
             provider = AsyncMock()

@@ -138,6 +138,39 @@ export type CallingWorkspace = {
   script_studio?: any;
 };
 
+type ReadinessCheck = {
+  code: string;
+  field?: string | null;
+  label: string;
+  ready: boolean;
+  message: string;
+};
+
+type InternalTestReadiness = {
+  ready: boolean;
+  blockers: Array<{ code: string; field?: string | null; message: string }>;
+  checks: ReadinessCheck[];
+};
+
+function normalizeReadiness(value: any): InternalTestReadiness {
+  if (
+    value
+    && typeof value.ready === 'boolean'
+    && Array.isArray(value.blockers)
+    && Array.isArray(value.checks)
+  ) {
+    return value;
+  }
+  return {
+    ready: false,
+    blockers: [{
+      code: 'READINESS_RESPONSE_INVALID',
+      message: 'The readiness service returned no usable result. Refresh and try again.',
+    }],
+    checks: [],
+  };
+}
+
 function money(value?: number | null, currency = 'USD') {
   if (value == null) return '-';
   return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(value);
@@ -170,6 +203,8 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
   const [busy, setBusy] = useState(false);
+  const [hasUnpublishedScriptChanges, setHasUnpublishedScriptChanges] = useState(Boolean(initialWorkspace.script_studio?.current_draft));
+  const [readiness, setReadiness] = useState<InternalTestReadiness>({ ready: false, blockers: [], checks: [] });
   const [selectedAttemptId, setSelectedAttemptId] = useState<string | null>(null);
 
   async function refresh() {
@@ -185,13 +220,33 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   }, []);
 
   const localPhoneValid = /^\+1[2-9]\d{9}$/.test(phoneNumber.trim());
-  const confirmationValid = confirmation === workspace.confirmation_required;
-  const canPlaceCall = Boolean(workspace.health?.internal_test_ready && localPhoneValid && confirmationValid && !busy);
+  const canPlaceCall = Boolean(readiness.ready && !busy);
   const blockers = useMemo(() => workspace.health?.blockers || [], [workspace.health]);
   const warnings = workspace.warnings || [];
   const preview = workspace.preview || {};
   const livePreview = workspace.script_studio?.live_retell_preview || {};
   const selectedAttempt = (workspace.attempts || []).find((attempt) => attempt.id === selectedAttemptId) || null;
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      const params = new URLSearchParams({
+        phone_number: phoneNumber,
+        confirmation_text: confirmation,
+        has_unpublished_changes: String(hasUnpublishedScriptChanges),
+      });
+      void api(`/calling/allstate/internal-test-readiness?${params.toString()}`)
+        .then((result) => setReadiness(normalizeReadiness(result)))
+        .catch((err) => {
+          console.error('Internal-test readiness failed', err);
+          setReadiness({
+            ready: false,
+            blockers: [{ code: 'READINESS_UNAVAILABLE', message: err?.message || 'Readiness could not be evaluated.' }],
+            checks: [],
+          });
+        });
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [phoneNumber, confirmation, hasUnpublishedScriptChanges, workspace.script_studio?.published_version?.id]);
 
   async function allowNumber() {
     setBusy(true);
@@ -224,6 +279,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
           insurance_interest: insuranceInterest,
           booking_timezone: 'America/Toronto',
           confirmation_text: confirmation,
+          has_unpublished_changes: hasUnpublishedScriptChanges,
         }),
       });
       setMessage(`Retell call created: ${result.retell_call_id}`);
@@ -276,7 +332,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
         <CheckRow label="Batch queue disabled" ok={!workspace.settings?.automated_queue_enabled} />
       </section>
 
-      <CallScriptStudio studio={workspace.script_studio} refresh={refresh} />
+      <CallScriptStudio studio={workspace.script_studio} refresh={refresh} onDirtyChange={setHasUnpublishedScriptChanges} />
 
       <section className="card">
         <h2 className="text-lg font-semibold">LIVE RETELL PREVIEW</h2>
@@ -331,17 +387,23 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
         <p className="mt-1 text-sm text-zinc-400">Use only your own approved test number. The exact confirmation is required before Voryx asks Retell to place a real phone call.</p>
         <div className="mt-4 grid gap-3 md:grid-cols-2">
           <label className="space-y-1 text-sm">Test recipient name<input className="input" value={recipientName} onChange={(event) => setRecipientName(event.target.value)} /></label>
-          <label className="space-y-1 text-sm">Test phone number<input className="input" placeholder="+14165551234" value={phoneNumber} onChange={(event) => setPhoneNumber(event.target.value)} /></label>
+          <label className="space-y-1 text-sm" htmlFor="internal-test-phone">Test phone number<input id="internal-test-phone" className="input" aria-invalid={readiness.blockers.some((item) => item.field === 'phone_number') ? 'true' : 'false'} aria-describedby="internal-test-phone-errors" placeholder="+14165551234" value={phoneNumber} onChange={(event) => setPhoneNumber(event.target.value)} />{readiness.blockers.filter((item) => item.field === 'phone_number').length ? <span id="internal-test-phone-errors" className="block text-xs text-red-300">{readiness.blockers.filter((item) => item.field === 'phone_number').map((item) => item.message).join(' ')}</span> : null}</label>
           <label className="space-y-1 text-sm">Insurance interest<input className="input" value={insuranceInterest} onChange={(event) => setInsuranceInterest(event.target.value)} /></label>
-          <label className="space-y-1 text-sm">Confirmation<input className="input" placeholder={workspace.confirmation_required} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
+          <label className="space-y-1 text-sm" htmlFor="internal-test-confirmation">Confirmation<input id="internal-test-confirmation" className="input" aria-invalid={readiness.blockers.some((item) => item.field === 'confirmation_text') ? 'true' : 'false'} aria-describedby="internal-test-confirmation-errors" placeholder={workspace.confirmation_required} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} />{readiness.blockers.filter((item) => item.field === 'confirmation_text').length ? <span id="internal-test-confirmation-errors" className="block text-xs text-red-300">{readiness.blockers.filter((item) => item.field === 'confirmation_text').map((item) => item.message).join(' ')}</span> : null}</label>
         </div>
-        <div className="mt-4 flex flex-wrap gap-2">
-          <button type="button" className="btn-secondary" disabled={!localPhoneValid || busy} onClick={() => void allowNumber()}>Allowlist internal test number</button>
-          <button type="button" className="btn" disabled={!canPlaceCall} onClick={() => void placeCall()}>Place Conversation-Flow Internal Test Call</button>
+        <div className="mt-4 grid gap-2 md:grid-cols-2">
+          {(readiness.checks || []).map((item) => <div className="rounded border border-zinc-800 px-3 py-2 text-sm" key={item.code}><div className="flex items-start justify-between gap-3"><span>{item.label}</span><span className={item.ready ? 'text-emerald-300' : 'text-red-300'}>{item.ready ? 'Ready' : `Blocked — ${item.message}`}</span></div></div>)}
         </div>
+        <div className="mt-4 space-y-2">
+          <button type="button" className="btn" disabled={!canPlaceCall} aria-describedby="internal-test-button-reasons" title={readiness.ready ? 'Ready to place one internal test call.' : readiness.blockers.map((item) => item.message).join(' ')} onClick={() => void placeCall()}>Place internal test call</button>
+          <div id="internal-test-button-reasons" className="text-sm text-zinc-400">{busy ? 'One internal test request is in progress.' : readiness.ready ? 'Ready. The valid number will be allowlisted atomically and only one call will be requested.' : readiness.blockers.map((item) => item.message).join(' ') || 'Checking readiness.'}</div>
+        </div>
+        <details className="mt-3 rounded border border-zinc-800 p-3">
+          <summary className="cursor-pointer text-sm font-semibold">Advanced internal-test controls</summary>
+          <button type="button" className="btn-secondary mt-3" disabled={!localPhoneValid || busy} aria-describedby="allowlist-only-reason" title={!localPhoneValid ? 'Enter a valid +1 phone number first.' : 'Add this number without placing a call.'} onClick={() => void allowNumber()}>Allowlist internal test number only</button>
+          <div id="allowlist-only-reason" className="mt-2 text-xs text-zinc-500">{!localPhoneValid ? 'Enter a valid +1 phone number first.' : 'This advanced action updates only the internal-test allowlist.'}</div>
+        </details>
         <div className="mt-3 text-xs text-zinc-500">Allowlisted numbers: {(workspace.settings?.internal_test_numbers_masked || []).join(', ') || 'none'}</div>
-        {!localPhoneValid && phoneNumber ? <div className="mt-2 text-sm text-amber-300">Use US/Canada E.164 format, for example +14165551234.</div> : null}
-        {phoneNumber && localPhoneValid && !confirmationValid ? <div className="mt-2 text-sm text-amber-300">Type {workspace.confirmation_required} exactly to enable the call button.</div> : null}
         {message ? <div className="mt-3 rounded border border-emerald-800 bg-emerald-950/30 p-3 text-sm text-emerald-200">{message}</div> : null}
         {error ? <div className="mt-3 rounded border border-red-800 bg-red-950/30 p-3 text-sm text-red-200">{error}</div> : null}
       </section>

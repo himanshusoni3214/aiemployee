@@ -376,6 +376,19 @@ class RetellCallingProvider:
     async def publish_agent_version(self, agent_id: str, version: int) -> dict:
         return await self._request('POST', f'/publish-agent-version/{agent_id}', {'version': version})
 
+    async def playground_completion(
+        self,
+        agent_id: str,
+        version: int,
+        payload: dict,
+    ) -> dict:
+        return await self._request(
+            'POST',
+            f'/agent-playground-completion/{agent_id}',
+            payload,
+            params={'version': version},
+        )
+
     async def update_phone_number_assignment(self, phone_number: str, agent_id: str, version: int) -> dict:
         return await self._request('PATCH', f'/update-phone-number/{phone_number}', {
             'inbound_agents': [],
@@ -571,6 +584,13 @@ class MockCallingProvider:
         self.calls.append(result)
         return result
 
+    async def playground_completion(self, agent_id: str, version: int, payload: dict) -> dict:
+        return {
+            'current_node_id': payload.get('current_node_id') or 'opening',
+            'messages': [{'role': 'agent', 'content': 'Hi Himanshu, this is Ava calling for the internal playground test.'}],
+            'call_ended': False,
+        }
+
     def verify_webhook(self, raw_body: bytes, signature: str | None) -> bool:
         return signature == 'test-valid'
 
@@ -757,7 +777,15 @@ def update_internal_test_number(db: Session, phone_number: str, allow: bool) -> 
     return {'internal_test_numbers': [masked_phone(item) for item in numbers], 'count': len(numbers)}
 
 
-async def authorize_internal_test_call(db: Session, user: User, phone_number: str, confirmation: str, provider: RetellCallingProvider | MockCallingProvider | None = None) -> tuple[bool, list[str], dict]:
+async def authorize_internal_test_call(
+    db: Session,
+    user: User,
+    phone_number: str,
+    confirmation: str,
+    provider: RetellCallingProvider | MockCallingProvider | None = None,
+    *,
+    allow_atomic_allowlist: bool = False,
+) -> tuple[bool, list[str], dict]:
     blockers: list[str] = []
     row = call_settings(db)
     provider = provider or calling_provider()
@@ -773,7 +801,7 @@ async def authorize_internal_test_call(db: Session, user: User, phone_number: st
     if not valid_us_ca_e164(phone):
         blockers.append('Phone number must be a valid US/Canada E.164 number')
     allowlist = {normalize_phone(item) for item in row.internal_test_numbers or []}
-    if phone and phone not in allowlist:
+    if phone and phone not in allowlist and not allow_atomic_allowlist:
         blockers.append('Phone number is not on the internal-test allowlist')
     active = db.scalars(select(CallAttempt).where(CallAttempt.campaign_id == ALLSTATE_CAMPAIGN_ID, CallAttempt.status.in_(CALL_ACTIVE_STATUSES))).first()
     if active:
@@ -792,11 +820,24 @@ async def create_internal_test_call(db: Session, user: User, payload: dict, prov
     phone = normalize_phone(payload.get('phone_number'))
     confirmation = str(payload.get('confirmation_text') or '')
     provider = provider or calling_provider()
-    allowed, blockers, health = await authorize_internal_test_call(db, user, phone, confirmation, provider)
+    allowed, blockers, health = await authorize_internal_test_call(
+        db,
+        user,
+        phone,
+        confirmation,
+        provider,
+        allow_atomic_allowlist=True,
+    )
     if not allowed:
         return {'ok': False, 'blocked': True, 'status': 'blocked', 'blockers': sorted(set(blockers)), 'health': health}
 
     now = _now()
+    settings_row = call_settings(db)
+    normalized_allowlist = {normalize_phone(item) for item in settings_row.internal_test_numbers or []}
+    allowlist_added = phone not in normalized_allowlist
+    if allowlist_added:
+        settings_row.internal_test_numbers = [*(settings_row.internal_test_numbers or []), phone]
+        settings_row.updated_at = now
     published_script = db.scalar(select(CallScriptVersion).where(
         CallScriptVersion.campaign_id == ALLSTATE_CAMPAIGN_ID,
         CallScriptVersion.status == 'published',
@@ -857,6 +898,11 @@ async def create_internal_test_call(db: Session, user: User, payload: dict, prov
             mode='internal_test',
         )
     except Exception as exc:
+        if allowlist_added:
+            settings_row.internal_test_numbers = [
+                item for item in settings_row.internal_test_numbers or []
+                if normalize_phone(item) != phone
+            ]
         attempt.status = 'provider_failed'
         attempt.termination_reason = str(exc)
         attempt.updated_at = _now()
@@ -868,6 +914,15 @@ async def create_internal_test_call(db: Session, user: User, payload: dict, prov
     attempt.status = 'initiated'
     attempt.provider_receipt = _redact_payload(receipt)
     attempt.updated_at = _now()
+    if allowlist_added:
+        db.add(ActivityLog(
+            company_id=ALLSTATE_COMPANY_ID,
+            user_id=user.id,
+            action='Allstate Internal Test Number Atomically Allowlisted',
+            entity_type='CallCampaignSettings',
+            entity_id=ALLSTATE_CAMPAIGN_ID,
+            metadata_json={'to_number': masked_phone(phone), 'call_attempt_id': attempt.id},
+        ))
     db.add(ActivityLog(company_id=ALLSTATE_COMPANY_ID, user_id=user.id, action='Retell Internal Test Call Initiated', entity_type='CallAttempt', entity_id=attempt.id, metadata_json={'provider_call_id': attempt.provider_call_id, 'to_number': masked_phone(phone)}))
     return {'ok': True, 'status': attempt.status, 'call_attempt_id': attempt.id, 'retell_call_id': attempt.provider_call_id, 'from_number': attempt.from_number, 'to_number': masked_phone(phone)}
 

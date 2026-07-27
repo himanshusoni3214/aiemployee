@@ -2,6 +2,7 @@ import csv
 import json
 from datetime import datetime, date, timedelta
 from pathlib import Path
+from uuid import uuid4
 from urllib.parse import quote
 from typing import Any
 from fastapi import APIRouter, Body, Depends, File, Form, HTTPException, Query, Request, Response, UploadFile
@@ -88,6 +89,7 @@ from app.services.calling import (
     ALLSTATE_CAMPAIGN_ID,
     ALLSTATE_COMPANY_ID,
     ALLSTATE_AGENT_NAME,
+    CALL_ACTIVE_STATUSES,
     CONVERSATION_FLOW_INTERNAL_CONFIRMATION,
     RetellCallingProvider,
     book_quote_appointment,
@@ -130,9 +132,11 @@ from app.services.call_script_studio import (
     pilot_payload,
     place_approved_pilot_call,
     publish_script,
+    publish_script_changes,
     preview_simple_consent_rows,
     request_script_approval,
     run_draft_tests,
+    ScriptValidationError,
     script_payload,
     update_draft,
     verify_retell_node_texts,
@@ -143,6 +147,30 @@ oauth2 = OAuth2PasswordBearer(tokenUrl='/api/auth/login', auto_error=False)
 HERMES_SYNCED_LABELS = {'companies', 'employees', 'campaigns', 'schedules'}
 TERMINAL_JOB_STATUSES = {JobStatus.completed, JobStatus.failed, JobStatus.blocked, JobStatus.cancelled, JobStatus.skipped, JobStatus.imported, JobStatus.synced}
 ACTION_LABELS = {'dry-run': 'Dry run', 'test-run': 'Test run', 'run': 'Run'}
+
+
+def structured_error(
+    code: str,
+    message: str,
+    *,
+    stage: str | None = None,
+    field_errors: dict[str, list[str]] | None = None,
+    blockers: list[dict] | None = None,
+    retryable: bool = False,
+    recommended_action: str | None = None,
+) -> dict:
+    return {
+        'error': {
+            'code': code,
+            'message': message,
+            'stage': stage,
+            'field_errors': field_errors or {},
+            'blockers': blockers or [],
+            'retryable': retryable,
+            'recommended_action': recommended_action,
+            'request_id': uuid4().hex,
+        },
+    }
 
 def current_user(request: Request, token: str|None = Depends(oauth2), db: Session = Depends(get_db)):
     token = token or request.cookies.get('voryx_token')
@@ -2238,6 +2266,70 @@ def create_allstate_script_draft(payload: dict=Body(default={}), db: Session=Dep
     db.refresh(row)
     return {'ok': True, 'script': script_payload(row)}
 
+
+@router.post('/calling/allstate/script-versions/publish-changes')
+async def publish_allstate_script_changes(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    if user.role != Role.admin:
+        raise HTTPException(403, detail=structured_error(
+            'ADMIN_REQUIRED',
+            'Admin role is required to publish script changes.',
+            stage='authorization',
+            recommended_action='Sign in with an admin account.',
+        ))
+    try:
+        result = await publish_script_changes(
+            db,
+            user,
+            base_published_version_id=str(payload.get('base_published_version_id') or ''),
+            form_values=payload.get('form_values') if isinstance(payload.get('form_values'), dict) else {},
+            current_content_hash=str(payload.get('current_content_hash') or ''),
+            idempotency_key=str(payload.get('idempotency_key') or ''),
+        )
+        return {'ok': True, **result}
+    except ScriptValidationError as exc:
+        db.rollback()
+        raise HTTPException(422, detail=structured_error(
+            'SCRIPT_VALIDATION_FAILED',
+            'The script cannot be published.',
+            stage='validation',
+            field_errors=exc.field_errors,
+            retryable=False,
+            recommended_action='Correct the highlighted script fields.',
+        )) from exc
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, detail=structured_error(
+            'SCRIPT_PUBLISH_BLOCKED',
+            str(exc),
+            stage='validation',
+            retryable=False,
+            recommended_action='Review the visible blocker, then retry.',
+        )) from exc
+    except Exception as exc:
+        db.rollback()
+        failed = db.scalar(
+            select(CallScriptVersion)
+            .where(
+                CallScriptVersion.campaign_id == ALLSTATE_CAMPAIGN_ID,
+                CallScriptVersion.status == 'failed_recoverable',
+            )
+            .order_by(CallScriptVersion.version_number.desc())
+            .limit(1)
+        )
+        raise HTTPException(502, detail=structured_error(
+            'RETELL_PUBLISH_FAILED',
+            'Retell could not complete the verified in-place publish.',
+            stage=failed.failure_stage if failed else 'provider_publish',
+            blockers=[{
+                'code': 'PROVIDER_PUBLISH_FAILED',
+                'message': str(exc)[:500],
+                'production_changed': False,
+            }],
+            retryable=True,
+            recommended_action=(failed.recovery_action if failed else 'Retry publish. The live version remains unchanged.'),
+        )) from exc
+
+
 @router.patch('/calling/allstate/script-versions/{script_id}')
 def update_allstate_script_draft(script_id: str, payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
     row = db.get(CallScriptVersion, script_id)
@@ -2553,16 +2645,191 @@ def set_internal_test_number(payload: dict=Body(...), db: Session=Depends(get_db
     db.commit()
     return {'ok': True, **result}
 
+
+async def _allstate_internal_test_readiness(
+    db: Session,
+    user: User,
+    *,
+    phone_number: str,
+    confirmation_text: str,
+    client_has_unpublished_changes: bool,
+) -> dict:
+    phone = normalize_phone(phone_number)
+    phone_valid = valid_us_ca_e164(phone)
+    confirmation_valid = confirmation_text == CONVERSATION_FLOW_INTERNAL_CONFIRMATION
+    published = db.scalar(select(CallScriptVersion).where(
+        CallScriptVersion.campaign_id == ALLSTATE_CAMPAIGN_ID,
+        CallScriptVersion.status == 'published',
+    ))
+    server_draft = db.scalar(select(CallScriptVersion).where(
+        CallScriptVersion.campaign_id == ALLSTATE_CAMPAIGN_ID,
+        CallScriptVersion.status.in_(['draft', 'testing', 'approved', 'failed', 'failed_recoverable']),
+    ))
+    provider = calling_provider()
+    health = await provider.health(published.retell_agent_version if published else None)
+    live_verified = False
+    verification_error = None
+    if published:
+        try:
+            flow = await provider.get_conversation_flow(
+                published.conversation_flow_id,
+                published.retell_flow_version,
+            )
+            live_verified = verify_retell_node_texts(published, flow).get('passed', False)
+        except Exception as exc:
+            verification_error = str(exc)[:500]
+    row = call_settings(db)
+    allowlisted = phone in {normalize_phone(item) for item in row.internal_test_numbers or []}
+    atomic_allowlist_ready = bool(phone_valid and confirmation_valid and user.role in {Role.admin, Role.manager})
+    active = db.scalars(select(CallAttempt).where(
+        CallAttempt.campaign_id == ALLSTATE_CAMPAIGN_ID,
+        CallAttempt.status.in_(CALL_ACTIVE_STATUSES),
+    )).first()
+    outbound = health.get('outbound_agents') or []
+    correct_version = bool(
+        published
+        and len(outbound) == 1
+        and outbound[0].get('agent_id') == published.retell_agent_id
+        and int(outbound[0].get('agent_version') or -1) == int(published.retell_agent_version or -2)
+    )
+    has_unpublished = bool(client_has_unpublished_changes or server_draft)
+
+    checks = [
+        {
+            'code': 'PHONE_REQUIRED' if not phone_number.strip() else 'PHONE_INVALID',
+            'field': 'phone_number',
+            'label': 'Valid +1 E.164 number',
+            'ready': phone_valid,
+            'message': 'Ready' if phone_valid else ('Enter a valid +1 phone number.' if not phone_number.strip() else 'Use +1 followed by ten digits.'),
+        },
+        {
+            'code': 'NUMBER_NOT_ALLOWLISTED',
+            'field': 'phone_number',
+            'label': 'Number allowlisted',
+            'ready': bool(allowlisted or atomic_allowlist_ready),
+            'message': 'Ready' if allowlisted else ('Ready — this number will be allowlisted atomically when the call is placed.' if atomic_allowlist_ready else 'Enter a valid number and exact confirmation to allowlist it atomically.'),
+        },
+        {
+            'code': 'CONFIRMATION_REQUIRED' if not confirmation_text else 'CONFIRMATION_INCORRECT',
+            'field': 'confirmation_text',
+            'label': 'Exact confirmation entered',
+            'ready': confirmation_valid,
+            'message': 'Ready' if confirmation_valid else (
+                f'Type {CONVERSATION_FLOW_INTERNAL_CONFIRMATION} exactly.'
+                if not confirmation_text
+                else f'Confirmation is incorrect. Type {CONVERSATION_FLOW_INTERNAL_CONFIRMATION} exactly.'
+            ),
+        },
+        {
+            'code': 'PROVIDER_UNAVAILABLE',
+            'field': None,
+            'label': 'Retell provider ready',
+            'ready': bool(health.get('api_authenticated') and health.get('agent_exists')),
+            'message': 'Ready' if health.get('api_authenticated') and health.get('agent_exists') else 'Retell provider or agent is unavailable.',
+        },
+        {
+            'code': 'WRONG_AGENT_VERSION',
+            'field': None,
+            'label': 'Correct agent/version assigned',
+            'ready': correct_version,
+            'message': 'Ready' if correct_version else 'The outbound number is not assigned to the exact live agent version.',
+        },
+        {
+            'code': 'LIVE_FLOW_NOT_VERIFIED',
+            'field': None,
+            'label': 'Live script verified',
+            'ready': live_verified,
+            'message': 'Ready' if live_verified else (verification_error or 'Exact live Retell node text is not verified.'),
+        },
+        {
+            'code': 'ACTIVE_CALL_EXISTS',
+            'field': None,
+            'label': 'No call already active',
+            'ready': active is None,
+            'message': 'Ready' if active is None else 'An internal test call is already active.',
+        },
+        {
+            'code': 'UNPUBLISHED_SCRIPT_CHANGES',
+            'field': None,
+            'label': 'No unpublished script changes',
+            'ready': not has_unpublished,
+            'message': 'Ready' if not has_unpublished else 'Publish or discard the current script changes before testing the live wording.',
+        },
+        {
+            'code': 'INTERNAL_TEST_DISABLED',
+            'field': None,
+            'label': 'Internal-test mode enabled',
+            'ready': bool(settings.retell_internal_test_mode and row.internal_test_enabled),
+            'message': 'Ready' if settings.retell_internal_test_mode and row.internal_test_enabled else 'Internal-test mode is disabled.',
+        },
+        {
+            'code': 'WEBHOOK_UNAVAILABLE',
+            'field': None,
+            'label': 'Webhook available',
+            'ready': bool(health.get('webhook_signature_key_configured')),
+            'message': 'Ready' if health.get('webhook_signature_key_configured') else 'Retell webhook verification is unavailable.',
+        },
+    ]
+    blockers = [
+        {
+            'code': item['code'],
+            'field': item['field'],
+            'message': item['message'],
+        }
+        for item in checks
+        if not item['ready']
+    ]
+    return {'ready': not blockers, 'blockers': blockers, 'checks': checks}
+
+
+@router.get('/calling/allstate/internal-test-readiness')
+async def get_allstate_internal_test_readiness(
+    phone_number: str=Query(default=''),
+    confirmation_text: str=Query(default=''),
+    has_unpublished_changes: bool=Query(default=False),
+    db: Session=Depends(get_db),
+    user: User=Depends(require_write),
+):
+    return await _allstate_internal_test_readiness(
+        db,
+        user,
+        phone_number=phone_number,
+        confirmation_text=confirmation_text,
+        client_has_unpublished_changes=has_unpublished_changes,
+    )
+
+
 @router.post('/calling/allstate/internal-test-call')
 async def place_allstate_internal_test_call(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
     phone = normalize_phone(payload.get('phone_number'))
-    if not valid_us_ca_e164(phone):
-        raise HTTPException(400, 'Use a valid US/Canada E.164 phone number such as +14165551234')
+    readiness = await _allstate_internal_test_readiness(
+        db,
+        user,
+        phone_number=phone,
+        confirmation_text=str(payload.get('confirmation_text') or ''),
+        client_has_unpublished_changes=bool(payload.get('has_unpublished_changes')),
+    )
+    if not readiness['ready']:
+        raise HTTPException(409, detail=structured_error(
+            'INTERNAL_TEST_NOT_READY',
+            'The internal test call is not ready.',
+            stage='readiness',
+            blockers=readiness['blockers'],
+            retryable=False,
+            recommended_action='Resolve every readiness blocker shown beside the call controls.',
+        ))
     result = await create_internal_test_call(db, user, payload)
     db.commit()
     if not result.get('ok'):
         status_code = 409 if result.get('blocked') else 502
-        raise HTTPException(status_code, result)
+        raise HTTPException(status_code, detail=structured_error(
+            'INTERNAL_TEST_CALL_BLOCKED' if result.get('blocked') else 'INTERNAL_TEST_PROVIDER_FAILED',
+            str(result.get('message') or 'The internal test call could not be placed.'),
+            stage='authorization' if result.get('blocked') else 'provider_call',
+            blockers=[{'code': 'CALL_BLOCKED', 'field': None, 'message': item} for item in result.get('blockers') or []],
+            retryable=not result.get('blocked'),
+            recommended_action='Resolve the listed blocker and retry once.',
+        ))
     return result
 
 @router.get('/calling/allstate/attempts')

@@ -10,6 +10,84 @@ def read_frontend(path: str) -> str:
 
 
 class FrontendRuntimeContractTests(unittest.TestCase):
+    def test_call_script_studio_separates_dirty_form_from_server_versions(self):
+        source = read_frontend("components/CallScriptStudio.tsx")
+
+        for contract in [
+            "basePublishedVersion",
+            "serverDraftVersion",
+            "formValues",
+            "isDirty",
+            "changedFields",
+            "currentContentHash",
+            "Unsaved changes — not tested or published.",
+            "No unpublished changes.",
+            "Testing required for these changes.",
+        ]:
+            self.assertIn(contract, source)
+        self.assertIn("Internal-test opening</div>", source)
+        self.assertIn("Consented-lead opening</div>", source)
+        self.assertNotIn("setDraft({ ...draft", source)
+
+    def test_call_script_studio_one_click_publish_and_visible_reasons(self):
+        source = read_frontend("components/CallScriptStudio.tsx")
+
+        self.assertIn("/calling/allstate/script-versions/publish-changes", source)
+        self.assertIn("Publish changes", source)
+        self.assertIn("Make a script change before publishing.", source)
+        self.assertIn("aria-describedby=\"publish-changes-reason\"", source)
+        self.assertIn("title={publishReason}", source)
+        self.assertIn("Advanced actions", source)
+
+    def test_call_script_studio_has_field_errors_and_unsaved_change_protection(self):
+        source = read_frontend("components/CallScriptStudio.tsx")
+
+        self.assertIn("Customer-name variable is malformed. Use {{customer_name}}, not {customer_name}.", source)
+        self.assertIn("aria-invalid={errors.length ? 'true' : 'false'}", source)
+        self.assertIn("document.getElementById(`script-${field.replaceAll('.', '-')}`)?.focus()", source)
+        self.assertIn("beforeunload", source)
+        self.assertIn("You have unpublished script changes.", source)
+        self.assertIn("Stay and continue editing", source)
+        self.assertIn("Discard changes", source)
+        self.assertIn("Save draft", source)
+
+    def test_calling_panel_renders_backend_readiness_checks_and_blockers(self):
+        source = read_frontend("components/AllstateCallingPanel.tsx")
+
+        self.assertIn("/calling/allstate/internal-test-readiness", source)
+        self.assertIn("function normalizeReadiness", source)
+        self.assertIn("READINESS_RESPONSE_INVALID", source)
+        self.assertIn('htmlFor="internal-test-phone"', source)
+        self.assertIn('id="internal-test-phone"', source)
+        self.assertIn('htmlFor="internal-test-confirmation"', source)
+        self.assertIn('id="internal-test-confirmation"', source)
+        self.assertIn("readiness.checks", source)
+        self.assertIn("Blocked —", source)
+        self.assertIn("has_unpublished_changes", source)
+        self.assertIn("<h2 className=\"text-lg font-semibold\">Internal Test</h2>", source)
+        self.assertIn("Advanced internal-test controls", source)
+
+    def test_publish_does_not_accept_empty_or_unverified_success(self):
+        source = read_frontend("components/CallScriptStudio.tsx")
+
+        self.assertIn("PUBLISH_VERIFICATION_MISSING", source)
+        self.assertIn("EMPTY_OR_UNVERIFIED_RESPONSE", source)
+        self.assertIn("The publish request returned no verified live result.", source)
+
+    def test_api_client_preserves_structured_errors_and_empty_successes(self):
+        source = read_frontend("lib/api.ts")
+
+        for contract in [
+            "class ApiError",
+            "fieldErrors",
+            "blockers",
+            "recommendedAction",
+            "requestId",
+            "res.status === 204",
+            "if (!body.trim())",
+        ]:
+            self.assertIn(contract, source)
+
     def test_crud_page_exposes_runtime_fallback_contract(self):
         source = read_frontend("components/CrudPage.tsx")
 
@@ -294,10 +372,10 @@ class FrontendRuntimeContractTests(unittest.TestCase):
     def test_api_errors_show_concise_detail_message(self):
         source = read_frontend("lib/api.ts")
 
-        self.assertIn("function errorMessage", source)
-        self.assertIn("detail?.detail?.message", source)
+        self.assertIn("function errorPayload", source)
+        self.assertIn("parsed?.detail?.error", source)
         self.assertIn("console.error('API request failed'", source)
-        self.assertIn("throw new Error(errorMessage", source)
+        self.assertIn("throw new ApiError(", source)
 
     def test_daily_report_route_uses_jobs_json_executor_with_receipt_evidence(self):
         source = (ROOT / "backend" / "app" / "api" / "routes.py").read_text(encoding="utf-8")

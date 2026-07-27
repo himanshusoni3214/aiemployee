@@ -559,6 +559,10 @@ class CallScriptVersion(Base):
     publish_state: Mapped[dict]=mapped_column(JSON, default=dict)
     failure_stage: Mapped[str|None]=mapped_column(String, nullable=True)
     recovery_action: Mapped[str|None]=mapped_column(Text, nullable=True)
+    content_hash: Mapped[str|None]=mapped_column(String(64), nullable=True, index=True)
+    tested_content_hash: Mapped[str|None]=mapped_column(String(64), nullable=True)
+    approved_content_hash: Mapped[str|None]=mapped_column(String(64), nullable=True)
+    published_content_hash: Mapped[str|None]=mapped_column(String(64), nullable=True)
 
 class CallScriptAudit(Base):
     __tablename__='call_script_audits'

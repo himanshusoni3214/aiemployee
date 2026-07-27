@@ -10,7 +10,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.models.base import Base
 from app.core.config import settings
-from app.models.entities import CallAppointment, CallAttempt, CallCampaignSettings, Company, Campaign
+from app.models.entities import CallAppointment, CallAttempt, CallCampaignSettings, Company, Campaign, Role, User
 from app.services.calling import (
     ALLSTATE_CAMPAIGN_ID,
     ALLSTATE_COMPANY_ID,
@@ -21,6 +21,7 @@ from app.services.calling import (
     REQUIRED_DYNAMIC_VARIABLES,
     MockCallingProvider,
     RetellCallingProvider,
+    authorize_internal_test_call,
     ensure_allstate_calling_campaign,
     internal_test_dynamic_variables,
     internal_test_preview_payload,
@@ -153,6 +154,53 @@ class CallingRetellTests(unittest.TestCase):
 
     def test_conversation_flow_confirmation_replaces_legacy_gate(self):
         self.assertEqual(CONVERSATION_FLOW_INTERNAL_CONFIRMATION, 'PLACE CONVERSATION-FLOW INTERNAL TEST CALL')
+
+    def test_atomic_allowlist_authorization_requires_exact_confirmation_without_placing_call(self):
+        engine = create_engine('sqlite://')
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        provider = MockCallingProvider()
+        with session_factory() as db, patch.object(settings, 'retell_internal_test_mode', True):
+            user = User(
+                id='admin',
+                email='admin@example.com',
+                password_hash='x',
+                role=Role.admin,
+            )
+            db.add(user)
+            ensure_allstate_calling_campaign(db, user.id)
+            db.flush()
+            blocked, blockers, _ = __import__('asyncio').run(authorize_internal_test_call(
+                db,
+                user,
+                '+14165550123',
+                'wrong confirmation',
+                provider,
+                allow_atomic_allowlist=True,
+            ))
+            allowed, allowed_blockers, _ = __import__('asyncio').run(authorize_internal_test_call(
+                db,
+                user,
+                '+14165550123',
+                CONVERSATION_FLOW_INTERNAL_CONFIRMATION,
+                provider,
+                allow_atomic_allowlist=True,
+            ))
+            not_allowlisted, allowlist_blockers, _ = __import__('asyncio').run(authorize_internal_test_call(
+                db,
+                user,
+                '+14165550123',
+                CONVERSATION_FLOW_INTERNAL_CONFIRMATION,
+                provider,
+                allow_atomic_allowlist=False,
+            ))
+            self.assertFalse(blocked)
+            self.assertIn('Confirmation must exactly match', ' '.join(blockers))
+            self.assertTrue(allowed)
+            self.assertEqual(allowed_blockers, [])
+            self.assertFalse(not_allowlisted)
+            self.assertIn('Phone number is not on the internal-test allowlist', allowlist_blockers)
+            self.assertEqual(db.scalars(select(CallAttempt)).all(), [])
 
     def test_provider_has_no_agent_creation_method(self):
         self.assertFalse(hasattr(RetellCallingProvider, 'create_agent'))

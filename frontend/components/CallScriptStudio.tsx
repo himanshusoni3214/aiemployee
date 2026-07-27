@@ -1,7 +1,7 @@
 'use client';
 
-import { useMemo, useState } from 'react';
-import { api, downloadApi } from '../lib/api';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { ApiError, api, downloadApi } from '../lib/api';
 import { LocalTime } from './LocalTime';
 
 type ScriptVersion = {
@@ -30,6 +30,10 @@ type ScriptVersion = {
   publish_state?: Record<string, any>;
   failure_stage?: string | null;
   recovery_action?: string | null;
+  content_hash?: string | null;
+  tested_content_hash?: string | null;
+  approved_content_hash?: string | null;
+  published_content_hash?: string | null;
 };
 
 type Studio = {
@@ -55,6 +59,97 @@ type Studio = {
 
 const TABS = ['Script', 'Objections', 'Compliance', 'Consented leads', 'Pilot', 'Versions'] as const;
 const INPUT_CLASS = 'input w-full';
+const PUBLISHABLE_FIELDS = [
+  'opening_internal',
+  'opening_consented',
+  'purpose_statement',
+  'discovery_content',
+  'objection_library',
+  'closing_library',
+  'voicemail_content',
+  'voice_settings',
+  'talking_points',
+  'compliance_content',
+] as const;
+
+type FormValues = Pick<ScriptVersion, (typeof PUBLISHABLE_FIELDS)[number]> & {
+  name: string;
+  change_summary?: string | null;
+};
+
+function formFromVersion(version?: ScriptVersion | null): FormValues {
+  return {
+    name: version?.name || '',
+    opening_internal: version?.opening_internal || '',
+    opening_consented: version?.opening_consented || '',
+    purpose_statement: version?.purpose_statement || '',
+    discovery_content: version?.discovery_content || {},
+    objection_library: version?.objection_library || [],
+    closing_library: version?.closing_library || {},
+    voicemail_content: version?.voicemail_content || '',
+    voice_settings: version?.voice_settings || {},
+    talking_points: version?.talking_points || [],
+    compliance_content: version?.compliance_content || {},
+    change_summary: version?.change_summary || 'Script Studio edit',
+  };
+}
+
+function stableValue(value: any): any {
+  if (Array.isArray(value)) return value.map(stableValue);
+  if (value && typeof value === 'object') {
+    return Object.fromEntries(Object.keys(value).sort().map((key) => [key, stableValue(value[key])]));
+  }
+  return value;
+}
+
+function stableString(value: any) {
+  return JSON.stringify(stableValue(value));
+}
+
+async function contentHash(values: FormValues) {
+  const publishable = Object.fromEntries(PUBLISHABLE_FIELDS.map((field) => [field, values[field]]));
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(stableString(publishable)));
+  return Array.from(new Uint8Array(digest)).map((item) => item.toString(16).padStart(2, '0')).join('');
+}
+
+function validateForm(values: FormValues): Record<string, string[]> {
+  const errors: Record<string, string[]> = {};
+  const add = (field: string, message: string) => {
+    errors[field] = [...(errors[field] || []), message];
+  };
+  for (const [field, label] of [
+    ['opening_internal', 'Internal-test opening'],
+    ['opening_consented', 'Consented-lead opening'],
+  ] as const) {
+    const value = values[field].trim();
+    if (!value) {
+      add(field, `${label} is blank.`);
+      continue;
+    }
+    if (value.length > 1000) add(field, `${label} must be 1,000 characters or fewer.`);
+    if ((value.match(/\?/g) || []).length > 1) add(field, `${label} must contain no more than one question.`);
+    if ((value.match(/\)/g) || []).length > (value.match(/\(/g) || []).length) add(field, `${label} contains an extra closing parenthesis.`);
+    const customerMatches = value.match(/\{\{\s*customer_name\s*\}\}/g) || [];
+    if (customerMatches.length !== 1) {
+      if (/(?<!\{)\{customer_name\}(?!\})/.test(value)) {
+        add(field, 'Customer-name variable is malformed. Use {{customer_name}}, not {customer_name}.');
+      } else {
+        add(field, 'Customer name is required exactly once as {{customer_name}}.');
+      }
+    }
+    const remainder = value.replace(/\{\{\s*[a-zA-Z0-9_]+\s*\}\}/g, '');
+    if (remainder.includes('{') || remainder.includes('}')) {
+      add(field, 'Use {{customer_name}} with two opening and two closing braces.');
+    }
+  }
+  if (!values.purpose_statement.trim()) add('purpose_statement', 'Reason for call is required.');
+  if (!String(values.discovery_content?.product_interest || '').trim()) add('discovery_content.product_interest', 'Product-interest question is required.');
+  if (!String(values.discovery_content?.coverage_review || '').trim()) add('discovery_content.coverage_review', 'Coverage-review question is required.');
+  if (!String(values.closing_library?.appointment || '').trim()) add('closing_library.appointment', 'Appointment close is missing.');
+  if (!String(values.closing_library?.renewal_callback || '').trim()) add('closing_library.renewal_callback', 'Renewal callback close is missing.');
+  if (!String(values.closing_library?.busy_callback || '').trim()) add('closing_library.busy_callback', 'Busy callback close is missing.');
+  return errors;
+}
 
 function Notice({ tone, children }: { tone: 'ok' | 'error' | 'info'; children: React.ReactNode }) {
   const style = tone === 'ok'
@@ -65,23 +160,32 @@ function Notice({ tone, children }: { tone: 'ok' | 'error' | 'info'; children: R
   return <div className={`rounded border p-3 text-sm ${style}`}>{children}</div>;
 }
 
-function Field({ label, value, onChange, limit = 1000, rows = 3 }: { label: string; value: string; onChange: (value: string) => void; limit?: number; rows?: number }) {
+function Field({ id, label, value, onChange, errors = [], limit = 1000, rows = 3 }: { id: string; label: string; value: string; onChange: (value: string) => void; errors?: string[]; limit?: number; rows?: number }) {
   return (
     <label className="block space-y-1 text-sm">
       <span className="flex justify-between text-zinc-300"><span>{label}</span><span className="text-xs text-zinc-500">{value.length}/{limit}</span></span>
-      <textarea className={INPUT_CLASS} rows={rows} maxLength={limit} value={value} onChange={(event) => onChange(event.target.value)} />
+      <textarea id={id} className={`${INPUT_CLASS} ${errors.length ? 'border-red-700' : ''}`} aria-invalid={errors.length ? 'true' : 'false'} aria-describedby={errors.length ? `${id}-errors` : undefined} rows={rows} maxLength={limit} value={value} onChange={(event) => onChange(event.target.value)} />
+      {errors.length ? <div id={`${id}-errors`} className="space-y-1 text-xs text-red-300">{errors.map((item) => <div key={item}>{item}</div>)}</div> : null}
     </label>
   );
 }
 
-export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh: () => Promise<void> }) {
+export function CallScriptStudio({ studio, refresh, onDirtyChange }: { studio?: Studio; refresh: () => Promise<void>; onDirtyChange?: (dirty: boolean) => void }) {
   const [tab, setTab] = useState<(typeof TABS)[number]>('Script');
-  const selected = useMemo(() => studio?.current_draft || studio?.versions.find((item) => ['draft', 'testing', 'approved', 'failed', 'failed_recoverable'].includes(item.status)) || studio?.published_version, [studio]);
-  const [draft, setDraft] = useState<ScriptVersion | null>(null);
-  const active = draft?.id === selected?.id ? draft : selected;
+  const basePublishedVersion = studio?.published_version;
+  const serverDraftVersion = studio?.current_draft || studio?.versions.find((item) => ['draft', 'testing', 'approved', 'failed', 'failed_recoverable'].includes(item.status)) || null;
+  const serverSource = serverDraftVersion || basePublishedVersion;
+  const [formValues, setFormValues] = useState<FormValues>(() => formFromVersion(serverSource));
+  const [formSourceId, setFormSourceId] = useState(serverSource?.id || '');
+  const [currentContentHash, setCurrentContentHash] = useState('');
+  const idempotencyKey = useRef(crypto.randomUUID());
   const [busy, setBusy] = useState(false);
+  const [publishingStep, setPublishingStep] = useState(0);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
+  const [apiFieldErrors, setApiFieldErrors] = useState<Record<string, string[]>>({});
+  const [failureDetails, setFailureDetails] = useState<ApiError | null>(null);
+  const [pendingTab, setPendingTab] = useState<(typeof TABS)[number] | null>(null);
   const [lockedProposal, setLockedProposal] = useState('');
   const [complianceReason, setComplianceReason] = useState('');
   const [showIncomplete, setShowIncomplete] = useState(true);
@@ -118,10 +222,63 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
     consent_withdrawn: false,
   });
 
-  if (!studio || !active) return null;
+  const baseForm = useMemo(() => formFromVersion(basePublishedVersion), [basePublishedVersion]);
+  const serverForm = useMemo(() => formFromVersion(serverSource), [serverSource]);
+  const changedFields = useMemo(
+    () => PUBLISHABLE_FIELDS.filter((field) => stableString(formValues[field]) !== stableString(baseForm[field])),
+    [formValues, baseForm],
+  );
+  const isDirty = useMemo(() => stableString(formValues) !== stableString(serverForm), [formValues, serverForm]);
+  const clientFieldErrors = useMemo(() => validateForm(formValues), [formValues]);
+  const fieldErrors = useMemo(() => ({ ...clientFieldErrors, ...apiFieldErrors }), [clientFieldErrors, apiFieldErrors]);
+  const hasWorkingChanges = Boolean(isDirty || serverDraftVersion);
+  const active = serverDraftVersion || basePublishedVersion;
+  const validTest = Boolean(
+    !isDirty
+    && serverDraftVersion
+    && serverDraftVersion.test_result?.passed
+    && serverDraftVersion.tested_content_hash
+    && serverDraftVersion.tested_content_hash === serverDraftVersion.content_hash,
+  );
 
-  function mutate(update: Partial<ScriptVersion>) {
-    setDraft({ ...active, ...update });
+  useEffect(() => {
+    if (!serverSource || serverSource.id === formSourceId) return;
+    setFormValues(formFromVersion(serverSource));
+    setFormSourceId(serverSource.id);
+    setApiFieldErrors({});
+    idempotencyKey.current = crypto.randomUUID();
+  }, [serverSource, formSourceId]);
+
+  useEffect(() => {
+    let cancelled = false;
+    void contentHash(formValues).then((value) => {
+      if (!cancelled) setCurrentContentHash(value);
+    });
+    return () => { cancelled = true; };
+  }, [formValues]);
+
+  useEffect(() => {
+    onDirtyChange?.(hasWorkingChanges);
+  }, [hasWorkingChanges, onDirtyChange]);
+
+  useEffect(() => {
+    const warn = (event: BeforeUnloadEvent) => {
+      if (!isDirty) return;
+      event.preventDefault();
+      event.returnValue = '';
+    };
+    window.addEventListener('beforeunload', warn);
+    return () => window.removeEventListener('beforeunload', warn);
+  }, [isDirty]);
+
+  if (!studio || !active || !basePublishedVersion) return null;
+
+  function mutate(update: Partial<FormValues>) {
+    setFormValues((current) => ({ ...current, ...update }));
+    setApiFieldErrors({});
+    setMessage('');
+    setFailureDetails(null);
+    idempotencyKey.current = crypto.randomUUID();
   }
 
   function updateProfile(update: Record<string, unknown>) {
@@ -135,61 +292,99 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
     try {
       await fn();
       setMessage(success);
-      setDraft(null);
       await refresh();
     } catch (err: any) {
       setError(err?.message || 'Request failed');
+      if (err instanceof ApiError) {
+        setApiFieldErrors(err.fieldErrors);
+        setFailureDetails(err);
+      }
     } finally {
       setBusy(false);
     }
   }
 
   async function ensureDraft() {
-    if (active.status !== 'published') return active;
-    const result = await api('/calling/allstate/script-versions/draft', { method: 'POST', body: JSON.stringify({ source_version: active.version_number }) });
+    if (serverDraftVersion) return serverDraftVersion;
+    const result = await api('/calling/allstate/script-versions/draft', { method: 'POST', body: JSON.stringify({ source_version: basePublishedVersion.version_number }) });
     return result.script as ScriptVersion;
   }
 
   async function saveDraft() {
     const target = await ensureDraft();
-    const source = draft || active;
     return api(`/calling/allstate/script-versions/${target.id}`, {
       method: 'PATCH',
       body: JSON.stringify({
-        name: source.name,
-        opening_internal: source.opening_internal,
-        opening_consented: source.opening_consented,
-        purpose_statement: source.purpose_statement,
-        discovery_content: source.discovery_content,
-        objection_library: source.objection_library,
-        closing_library: source.closing_library,
-        voicemail_content: source.voicemail_content,
-        voice_settings: source.voice_settings,
-        talking_points: source.talking_points,
-        change_summary: source.change_summary || 'Script Studio edit',
+        ...formValues,
+        change_summary: formValues.change_summary || 'Script Studio edit',
       }),
     });
   }
 
   async function saveAndTest() {
     const target = await ensureDraft();
-    const source = draft || active;
     return api(`/calling/allstate/script-versions/${target.id}/save-and-test`, {
       method: 'POST',
       body: JSON.stringify({
-        name: source.name,
-        opening_internal: source.opening_internal,
-        opening_consented: source.opening_consented,
-        purpose_statement: source.purpose_statement,
-        discovery_content: source.discovery_content,
-        objection_library: source.objection_library,
-        closing_library: source.closing_library,
-        voicemail_content: source.voicemail_content,
-        voice_settings: source.voice_settings,
-        talking_points: source.talking_points,
-        change_summary: source.change_summary || 'Script Studio edit',
+        ...formValues,
+        change_summary: formValues.change_summary || 'Script Studio edit',
       }),
     });
+  }
+
+  async function publishChanges() {
+    setBusy(true);
+    setPublishingStep(1);
+    setError('');
+    setMessage('');
+    setApiFieldErrors({});
+    setFailureDetails(null);
+    try {
+      setPublishingStep(2);
+      const result = await api('/calling/allstate/script-versions/publish-changes', {
+        method: 'POST',
+        body: JSON.stringify({
+          base_published_version_id: basePublishedVersion.id,
+          form_values: formValues,
+          current_content_hash: currentContentHash,
+          idempotency_key: idempotencyKey.current,
+        }),
+      });
+      const exactLiveResult = Boolean(
+        result?.script?.status === 'published'
+        && (
+          result?.live_preview?.node_text_verified
+          || result?.retell?.node_text_verification?.passed
+        ),
+      );
+      if (!exactLiveResult) {
+        throw new ApiError(502, {
+          code: 'PUBLISH_VERIFICATION_MISSING',
+          message: 'The publish request returned no verified live result.',
+          stage: 'live_verification',
+          blockers: [{
+            code: 'EMPTY_OR_UNVERIFIED_RESPONSE',
+            message: 'Voryx did not receive the published script and exact Retell node verification.',
+          }],
+          retryable: true,
+          recommended_action: 'Refresh the live preview before retrying. Production was not reported as changed.',
+        });
+      }
+      setPublishingStep(10);
+      setMessage('Your changes are live in Retell and exact node text was verified.');
+      await refresh();
+      idempotencyKey.current = crypto.randomUUID();
+      return result;
+    } catch (err: any) {
+      setError(err?.message || 'The script could not be published.');
+      if (err instanceof ApiError) {
+        setApiFieldErrors(err.fieldErrors);
+        setFailureDetails(err);
+      }
+    } finally {
+      setBusy(false);
+      setPublishingStep(0);
+    }
   }
 
   async function proposeLockedChange() {
@@ -227,8 +422,32 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
     }
   }
 
-  const test = active.test_result || {};
+  const test = validTest ? serverDraftVersion?.test_result || {} : {};
   const projection = studio.cost_projection || {};
+  const attentionCount = Object.values(fieldErrors).reduce((total, items) => total + items.length, 0);
+  const publishDisabled = Boolean(busy || !changedFields.length || attentionCount || !currentContentHash);
+  const publishReason = busy
+    ? `Publishing — step ${publishingStep || 1} of 10`
+    : !changedFields.length
+      ? 'Make a script change before publishing.'
+      : attentionCount
+        ? `${attentionCount} items need attention before publishing.`
+        : !currentContentHash
+          ? 'Preparing the exact content hash.'
+          : 'Ready to save, test, approve, publish and verify in one step.';
+  const workingLabel = isDirty
+    ? 'Unsaved changes — not tested or published.'
+    : serverDraftVersion
+      ? `Voryx v${serverDraftVersion.version_number} / ${serverDraftVersion.status} — ${serverDraftVersion.status === 'approved' ? 'ready to publish' : 'not live'}.`
+      : 'No unpublished changes.';
+
+  function requestTab(nextTab: (typeof TABS)[number]) {
+    if (isDirty && nextTab !== tab) {
+      setPendingTab(nextTab);
+      return;
+    }
+    setTab(nextTab);
+  }
 
   return (
     <section className="card" data-call-script-studio>
@@ -247,12 +466,15 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
 
       <div className="mt-4 flex flex-wrap gap-1 border-b border-zinc-800" role="tablist">
         {TABS.map((item) => (
-          <button key={item} type="button" role="tab" aria-selected={tab === item} className={`px-3 py-2 text-sm ${tab === item ? 'border-b-2 border-emerald-500 text-emerald-200' : 'text-zinc-400'}`} onClick={() => setTab(item)}>{item}</button>
+          <button key={item} type="button" role="tab" aria-selected={tab === item} className={`px-3 py-2 text-sm ${tab === item ? 'border-b-2 border-emerald-500 text-emerald-200' : 'text-zinc-400'}`} onClick={() => requestTab(item)}>{item}</button>
         ))}
       </div>
 
+      {pendingTab ? <div className="mt-4"><Notice tone="info"><div className="font-medium">You have unpublished script changes.</div><div className="mt-2 flex flex-wrap gap-2"><button type="button" className="btn-secondary" onClick={() => setPendingTab(null)}>Stay and continue editing</button><button type="button" className="btn-secondary" onClick={() => { setFormValues(formFromVersion(serverSource)); setPendingTab(null); setTab(pendingTab); }}>Discard changes</button><button type="button" className="btn" onClick={() => void action(async () => { await saveDraft(); setTab(pendingTab); setPendingTab(null); }, 'Draft saved. Retell production was not changed.')}>Save draft</button></div></Notice></div> : null}
       {message ? <div className="mt-4"><Notice tone="ok">{message}</Notice></div> : null}
       {error ? <div className="mt-4"><Notice tone="error">{error}</Notice></div> : null}
+      {failureDetails ? <div className="mt-4"><Notice tone="error"><div>Stage: {failureDetails.stage || 'request'}. {failureDetails.recommendedAction || ''}</div>{failureDetails.blockers.length ? <ul className="mt-2 list-disc pl-5">{failureDetails.blockers.map((item) => <li key={`${item.code}-${item.message}`}>{item.message}</li>)}</ul> : null}</Notice></div> : null}
+      {attentionCount ? <div className="mt-4"><Notice tone="error"><div className="font-medium">{attentionCount} items need attention.</div><div className="mt-2 flex flex-wrap gap-2">{Object.entries(fieldErrors).map(([field, items]) => <button type="button" className="text-left text-sm underline" key={field} onClick={() => document.getElementById(`script-${field.replaceAll('.', '-')}`)?.focus()}>{items[0]}</button>)}</div></Notice></div> : null}
       {active.status === 'failed' || active.status === 'failed_recoverable' ? (
         <div className="mt-4"><Notice tone="error">Your changes are saved but are not live. Production is still using v{studio.published_version.version_number}. Failure stage: {active.failure_stage || 'provider publish'}. {active.recovery_action || 'Retry publish or return to editing.'}</Notice></div>
       ) : null}
@@ -264,46 +486,48 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
               <div className="text-xs font-semibold text-emerald-300">LIVE IN RETELL</div>
               <div className="mt-2">Voryx v{studio.published_version.version_number} / Retell agent {studio.live_retell_preview?.agent_version ?? '-'} / flow {studio.live_retell_preview?.flow_version ?? '-'}</div>
               <div className="mt-1 text-xs text-zinc-500">Published <LocalTime value={studio.published_version.published_at} /></div>
-              <p className="mt-2 text-zinc-300">{studio.live_retell_preview?.opening_consented || studio.published_version.opening_consented}</p>
+              <div className="mt-2 text-xs text-zinc-500">Internal-test opening</div>
+              <p className="mt-1 text-zinc-300">{studio.live_retell_preview?.opening_internal || studio.published_version.opening_internal}</p>
+              <div className="mt-2 text-xs text-zinc-500">Consented-lead opening</div>
+              <p className="mt-1 text-zinc-300">{studio.live_retell_preview?.opening_consented || studio.published_version.opening_consented}</p>
               <div className={`mt-2 text-xs ${studio.live_retell_preview?.node_text_verified ? 'text-emerald-300' : 'text-amber-300'}`}>{studio.live_retell_preview?.node_text_verified ? 'Exact Retell node text verified' : studio.live_retell_preview?.verification_error || 'Retell text verification pending'}</div>
             </div>
-            <div className="rounded border border-zinc-700 p-3 text-sm" data-current-draft-card>
-              <div className="text-xs font-semibold text-zinc-300">CURRENT DRAFT</div>
+            <div className="rounded border border-zinc-700 p-3 text-sm" data-working-changes-card>
+              <div className="text-xs font-semibold text-zinc-300">WORKING CHANGES</div>
               <div className="mt-1 text-xs text-zinc-500">DRAFT PREVIEW</div>
-              <div className="mt-2">Voryx v{active.version_number} / {active.status}</div>
-              <div className="mt-1 text-xs text-zinc-500">{active.node_changes?.length || 0} changed fields / {active.test_result?.passed ? 'tests passed' : 'not tested'}</div>
-              <p className="mt-2 text-zinc-300">{active.opening_consented}</p>
-              {active.id !== studio.published_version.id ? <div className="mt-2 text-xs text-amber-300">Not live until Retell publish and exact verification complete.</div> : <div className="mt-2 text-xs text-emerald-300">This version is live.</div>}
+              <div className={`mt-2 ${isDirty ? 'text-amber-300' : ''}`}>{workingLabel}</div>
+              <div className="mt-1 text-xs text-zinc-500">{changedFields.length} changed fields / {validTest ? 'Tests valid for this content.' : changedFields.length ? 'Testing required for these changes.' : 'No pending tests.'}</div>
+              <p className="mt-2 text-zinc-300">{formValues.opening_consented}</p>
+              {changedFields.length ? <div className="mt-2 text-xs text-amber-300">Not live until the complete verified publish finishes.</div> : null}
             </div>
           </div>
           <div className="grid gap-3 md:grid-cols-2">
             <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Estimated prompt</div>{active.estimated_prompt_tokens} tokens</div>
             <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Maximum call</div>4 minutes / no retry / concurrency 1</div>
           </div>
-          <Field label="Internal-test opening" value={active.opening_internal} onChange={(value) => mutate({ opening_internal: value })} />
-          <Field label="Consented-lead opening" value={active.opening_consented} onChange={(value) => mutate({ opening_consented: value })} />
-          <Field label="Reason for call" value={active.purpose_statement} onChange={(value) => mutate({ purpose_statement: value })} />
+          <Field id="script-opening_internal" label="Internal-test opening" value={formValues.opening_internal} errors={fieldErrors.opening_internal} onChange={(value) => mutate({ opening_internal: value })} />
+          <Field id="script-opening_consented" label="Consented-lead opening" value={formValues.opening_consented} errors={fieldErrors.opening_consented} onChange={(value) => mutate({ opening_consented: value })} />
+          <Field id="script-purpose_statement" label="Reason for call" value={formValues.purpose_statement} errors={fieldErrors.purpose_statement} onChange={(value) => mutate({ purpose_statement: value })} />
           <div className="grid gap-3 md:grid-cols-2">
-            <Field label="Product-interest question" value={active.discovery_content?.product_interest || ''} onChange={(value) => mutate({ discovery_content: { ...active.discovery_content, product_interest: value } })} />
-            <Field label="Coverage-review question" value={active.discovery_content?.coverage_review || ''} onChange={(value) => mutate({ discovery_content: { ...active.discovery_content, coverage_review: value } })} />
-            <Field label="Appointment close" value={active.closing_library?.appointment || ''} onChange={(value) => mutate({ closing_library: { ...active.closing_library, appointment: value } })} />
-            <Field label="Renewal callback close" value={active.closing_library?.renewal_callback || ''} onChange={(value) => mutate({ closing_library: { ...active.closing_library, renewal_callback: value } })} />
-            <Field label="Busy callback close" value={active.closing_library?.busy_callback || ''} onChange={(value) => mutate({ closing_library: { ...active.closing_library, busy_callback: value } })} />
-            <Field label="Voicemail" value={active.voicemail_content || ''} onChange={(value) => mutate({ voicemail_content: value })} />
+            <Field id="script-discovery_content-product_interest" label="Product-interest question" value={formValues.discovery_content?.product_interest || ''} errors={fieldErrors['discovery_content.product_interest']} onChange={(value) => mutate({ discovery_content: { ...formValues.discovery_content, product_interest: value } })} />
+            <Field id="script-discovery_content-coverage_review" label="Coverage-review question" value={formValues.discovery_content?.coverage_review || ''} errors={fieldErrors['discovery_content.coverage_review']} onChange={(value) => mutate({ discovery_content: { ...formValues.discovery_content, coverage_review: value } })} />
+            <Field id="script-closing_library-appointment" label="Appointment close" value={formValues.closing_library?.appointment || ''} errors={fieldErrors['closing_library.appointment']} onChange={(value) => mutate({ closing_library: { ...formValues.closing_library, appointment: value } })} />
+            <Field id="script-closing_library-renewal_callback" label="Renewal callback close" value={formValues.closing_library?.renewal_callback || ''} errors={fieldErrors['closing_library.renewal_callback']} onChange={(value) => mutate({ closing_library: { ...formValues.closing_library, renewal_callback: value } })} />
+            <Field id="script-closing_library-busy_callback" label="Busy callback close" value={formValues.closing_library?.busy_callback || ''} errors={fieldErrors['closing_library.busy_callback']} onChange={(value) => mutate({ closing_library: { ...formValues.closing_library, busy_callback: value } })} />
+            <Field id="script-voicemail_content" label="Voicemail" value={formValues.voicemail_content || ''} errors={fieldErrors.voicemail_content} onChange={(value) => mutate({ voicemail_content: value })} />
           </div>
-          <Field label="Voice and delivery notes" value={String(active.voice_settings?.tone_notes || '')} onChange={(value) => mutate({ voice_settings: { ...active.voice_settings, tone_notes: value } })} />
-          <label className="block space-y-1 text-sm"><span>Approved campaign talking points, one per line</span><textarea className={INPUT_CLASS} rows={3} value={(active.talking_points || []).join('\n')} onChange={(event) => mutate({ talking_points: event.target.value.split('\n').map((item) => item.trim()).filter(Boolean) })} /></label>
+          <Field id="script-voice_settings" label="Voice and delivery notes" value={String(formValues.voice_settings?.tone_notes || '')} errors={fieldErrors.voice_settings} onChange={(value) => mutate({ voice_settings: { ...formValues.voice_settings, tone_notes: value } })} />
+          <label className="block space-y-1 text-sm"><span>Approved campaign talking points, one per line</span><textarea id="script-talking_points" className={INPUT_CLASS} rows={3} value={(formValues.talking_points || []).join('\n')} onChange={(event) => mutate({ talking_points: event.target.value.split('\n').map((item) => item.trim()).filter(Boolean) })} /></label>
           <details className="rounded border border-zinc-800 p-3">
             <summary className="cursor-pointer text-sm font-semibold">Dynamic-variable preview</summary>
             <div className="mt-3 grid gap-2 text-xs md:grid-cols-2 xl:grid-cols-5">
               {['customer_name', 'agent_name', 'product_interest', 'consent_source', 'consent_date', 'renewal_month', 'slot_one', 'slot_two', 'callback_date', 'callback_time'].map((name) => <div key={name} className="rounded border border-zinc-900 p-2"><span className="font-mono text-zinc-500">{`{{${name}}}`}</span><div className="mt-1">Sample {name.replaceAll('_', ' ')}</div></div>)}
             </div>
           </details>
-          <div className="flex flex-wrap gap-2">
-            <button type="button" className="btn" disabled={busy} onClick={() => void action(saveAndTest, 'Draft saved, tested and approved for publish in one step.')}>Save and test</button>
-            <button type="button" className="btn-secondary" disabled={busy || !test.passed || active.status === 'published'} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/publish`, { method: 'POST' }), 'Published and verified against the existing Retell agent, flow and number.')}>{active.status === 'failed' || active.status === 'failed_recoverable' ? 'Retry publish' : 'Publish'}</button>
+          <div className="space-y-2">
+            <button type="button" className="btn" disabled={publishDisabled} aria-describedby="publish-changes-reason" title={publishReason} onClick={() => void publishChanges()}>{busy ? `Publishing — step ${publishingStep || 1} of 10` : active.status === 'failed' || active.status === 'failed_recoverable' ? 'Retry publish' : 'Publish changes'}</button>
+            <div id="publish-changes-reason" className={publishDisabled && attentionCount ? 'text-sm text-red-300' : 'text-sm text-zinc-400'}>{publishReason}</div>
             {(active.status === 'failed' || active.status === 'failed_recoverable') ? <>
-              <button type="button" className="btn-secondary" disabled={busy} onClick={() => setDraft({ ...active, status: 'draft' })}>Return to editing</button>
               <button type="button" className="btn-secondary" disabled={busy} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/discard`, { method: 'POST' }), 'Failed draft discarded. Live production was not changed.')}>Discard failed draft</button>
             </> : null}
           </div>
@@ -311,8 +535,8 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
             <summary className="cursor-pointer text-sm font-semibold">Advanced actions</summary>
             <div className="mt-3 flex flex-wrap gap-2">
               <button type="button" className="btn-secondary" disabled={busy} onClick={() => void action(saveDraft, 'Draft saved. Retell production was not changed.')}>Save draft only</button>
-              <button type="button" className="btn-secondary" disabled={busy || active.status === 'published'} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/test`, { method: 'POST' }), 'All 15 deterministic draft scenarios were evaluated.')}>Test only</button>
-              <button type="button" className="btn-secondary" disabled={busy || !test.passed} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/request-approval`, { method: 'POST' }), 'Script approved for publishing.')}>Request approval only</button>
+              <button type="button" className="btn-secondary" disabled={busy || !serverDraftVersion} onClick={() => void action(() => api(`/calling/allstate/script-versions/${serverDraftVersion?.id}/test`, { method: 'POST' }), 'All 15 deterministic draft scenarios were evaluated.')}>Test only</button>
+              <button type="button" className="btn-secondary" disabled={busy || !serverDraftVersion || !validTest} onClick={() => void action(() => api(`/calling/allstate/script-versions/${serverDraftVersion?.id}/request-approval`, { method: 'POST' }), 'Script approved for publishing.')}>Request approval only</button>
             </div>
           </details>
           {test.required_scenarios_total ? <Notice tone={test.passed ? 'ok' : 'error'}>{test.required_scenarios_passed}/{test.required_scenarios_total} scenarios passed. Sales score {test.sales_score}/10. Missing variables: {(test.missing_dynamic_variables || []).join(', ') || 'none'}. Missing tools: {(test.missing_retell_tools || []).join(', ') || 'none'}.</Notice> : null}
@@ -328,12 +552,12 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
       {tab === 'Objections' ? (
         <div className="mt-4 space-y-3">
           <Notice tone="info">Maximum one reframe after a soft or first neutral objection. A second refusal, hard rejection or DNC ends the call.</Notice>
-          {(active.objection_library || []).map((item, index) => (
+          {(formValues.objection_library || []).map((item, index) => (
             <div className="grid gap-2 border-b border-zinc-800 pb-3 md:grid-cols-[180px_110px_1fr_180px]" key={item.key}>
               <div><div className="font-medium">{item.name}</div><div className="text-xs text-zinc-500">{(item.example_phrases || []).join(' / ')}</div></div>
               <div className="text-sm"><div>{item.classification}</div><div className="text-xs text-zinc-500">Max {item.maximum_attempts}</div></div>
               <textarea className={INPUT_CLASS} rows={2} value={item.response || ''} disabled={['hard', 'DNC'].includes(item.classification)} onChange={(event) => {
-                const objection_library = [...active.objection_library];
+                const objection_library = [...formValues.objection_library];
                 objection_library[index] = { ...item, response: event.target.value };
                 mutate({ objection_library });
               }} />
@@ -365,7 +589,7 @@ export function CallScriptStudio({ studio, refresh }: { studio?: Studio; refresh
           </div>
           <div className="rounded border border-zinc-800 p-3">
             <div className="flex items-center gap-2 font-semibold"><span aria-hidden="true">🔒</span> Compliance-locked script rules</div>
-            <div className="mt-2 grid gap-2 text-sm md:grid-cols-2">{Object.entries(active.compliance_content || {}).filter(([key]) => key !== 'proposed_change').map(([key, value]) => <div key={key} className="flex justify-between border-b border-zinc-900 py-1"><span>{key.replaceAll('_', ' ')}</span><span>{String(value)}</span></div>)}</div>
+            <div className="mt-2 grid gap-2 text-sm md:grid-cols-2">{Object.entries(formValues.compliance_content || {}).filter(([key]) => key !== 'proposed_change').map(([key, value]) => <div key={key} className="flex justify-between border-b border-zinc-900 py-1"><span>{key.replaceAll('_', ' ')}</span><span>{String(value)}</span></div>)}</div>
             <div className="mt-3 grid gap-2 md:grid-cols-[1fr_auto]"><input className={INPUT_CLASS} placeholder="Describe a locked-section change proposal" value={lockedProposal} onChange={(event) => setLockedProposal(event.target.value)} /><button className="btn-secondary" type="button" disabled={busy} onClick={() => void action(proposeLockedChange, 'Locked change recorded as a draft. Separate compliance approval is required.')}>Propose change</button></div>
             {active.compliance_content?.proposed_change ? <div className="mt-3 grid gap-2 md:grid-cols-[1fr_1fr_auto]"><div className="rounded border border-amber-800 p-2 text-sm text-amber-200">{active.compliance_content.proposed_change}</div><input className={INPUT_CLASS} placeholder="Separate compliance approval reason" value={complianceReason} onChange={(event) => setComplianceReason(event.target.value)} /><button type="button" className="btn-secondary" disabled={busy || !complianceReason.trim()} onClick={() => void action(() => api(`/calling/allstate/script-versions/${active.id}/compliance-approval`, { method: 'POST', body: JSON.stringify({ reason: complianceReason }) }), 'Locked-section change separately approved and audited.')}>Approve locked change</button></div> : null}
           </div>
