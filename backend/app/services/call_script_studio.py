@@ -46,6 +46,20 @@ from app.services.calling import (
 PILOT_CONFIRMATION = 'PLACE APPROVED CONSENTED LEAD CALL'
 MAX_PILOT_LEADS = 5
 MAX_CALLS_PER_DAY = 5
+OPENING_STYLE_FULL = 'full_introduction'
+OPENING_STYLE_CONFIRM_FIRST = 'confirm_person_first'
+OPENING_STYLES = {OPENING_STYLE_FULL, OPENING_STYLE_CONFIRM_FIRST}
+DEFAULT_CONFIRMED_INTERNAL_INTRODUCTION = (
+    'Hi {{customer_name}}, this is Ava calling on behalf of Himanshu Soni, '
+    'an Allstate Sales Agent in Scarborough. This is an internal test of his '
+    'quote appointment workflow. Do you have thirty seconds?'
+)
+DEFAULT_CONFIRMED_CONSENTED_INTRODUCTION = (
+    'Hi {{customer_name}}, this is Ava calling on behalf of Himanshu Soni, '
+    'an Allstate Sales Agent in Scarborough. I’m following up on your permission '
+    'to be contacted about auto or property insurance. Do you have thirty seconds?'
+)
+DEFAULT_WRONG_PERSON_RESPONSE = 'Thank you. I won’t keep you.'
 
 
 class ScriptValidationError(ValueError):
@@ -108,6 +122,18 @@ NODE_FIELD_MAP = {
     'closing_library': 'appointment_close',
     'voicemail_content': 'end',
 }
+
+
+class RetellPlaygroundValidationError(ValueError):
+    def __init__(self, result: dict):
+        self.result = result
+        failed = [
+            str(item.get('label') or item.get('key'))
+            for item in result.get('checks') or []
+            if not item.get('passed')
+        ]
+        detail = ', '.join(failed) or 'unknown check'
+        super().__init__(f'Retell playground validation failed: {detail}.')
 
 COMPLIANCE_ITEMS = [
     ('dncl_registration', 'Allstate/company DNCL registration confirmed', 'dncl'),
@@ -288,7 +314,15 @@ def _default_script() -> dict:
             'busy_callback': 'No problem. Would later today or another day be better for a brief call with Himanshu?',
         },
         'voicemail_content': 'Hi, this is Ava calling on behalf of Himanshu Soni, an Allstate Sales Agent. Please contact Himanshu directly if you would like an insurance review.',
-        'voice_settings': {**ALLSTATE_VOICE_SETTINGS, 'tone_notes': 'Warm, confident, attentive and consultative.', 'maximum_duration_seconds': 240},
+        'voice_settings': {
+            **ALLSTATE_VOICE_SETTINGS,
+            'tone_notes': 'Warm, confident, attentive and consultative.',
+            'maximum_duration_seconds': 240,
+            'opening_style': OPENING_STYLE_FULL,
+            'confirmed_person_internal': DEFAULT_CONFIRMED_INTERNAL_INTRODUCTION,
+            'confirmed_person_consented': DEFAULT_CONFIRMED_CONSENTED_INTRODUCTION,
+            'wrong_person_response': DEFAULT_WRONG_PERSON_RESPONSE,
+        },
         'compliance_content': {
             'truthful_automation': True,
             'dnc_immediate_suppression': True,
@@ -305,6 +339,36 @@ def _default_script() -> dict:
             'prospect_call_authorization_required': True,
         },
         'talking_points': [],
+    }
+
+
+def opening_settings(source: CallScriptVersion | dict) -> dict[str, str]:
+    if isinstance(source, dict):
+        voice = dict(source.get('voice_settings') or {})
+        opening_internal = str(source.get('opening_internal') or '')
+        opening_consented = str(source.get('opening_consented') or '')
+    else:
+        voice = dict(source.voice_settings or {})
+        opening_internal = str(source.opening_internal or '')
+        opening_consented = str(source.opening_consented or '')
+    style = str(voice.get('opening_style') or '').strip()
+    if style not in OPENING_STYLES:
+        short_confirmation = all(
+            'is this {{customer_name}}' in value.lower()
+            for value in (opening_internal, opening_consented)
+        )
+        style = OPENING_STYLE_CONFIRM_FIRST if short_confirmation else OPENING_STYLE_FULL
+    return {
+        'opening_style': style,
+        'confirmed_person_internal': str(
+            voice.get('confirmed_person_internal') or DEFAULT_CONFIRMED_INTERNAL_INTRODUCTION
+        ).strip(),
+        'confirmed_person_consented': str(
+            voice.get('confirmed_person_consented') or DEFAULT_CONFIRMED_CONSENTED_INTRODUCTION
+        ).strip(),
+        'wrong_person_response': str(
+            voice.get('wrong_person_response') or DEFAULT_WRONG_PERSON_RESPONSE
+        ).strip(),
     }
 
 
@@ -379,6 +443,31 @@ def validate_script_content(source: CallScriptVersion | dict) -> dict[str, list[
             if name not in KNOWN_TEMPLATE_VARIABLES:
                 add(field, f'Unknown variable: {name}.')
 
+    opening = opening_settings(values)
+    if opening['opening_style'] == OPENING_STYLE_CONFIRM_FIRST:
+        for field, label in (
+            ('confirmed_person_internal', 'Confirmed-person internal introduction'),
+            ('confirmed_person_consented', 'Confirmed-person prospect introduction'),
+        ):
+            value = opening[field]
+            lower = value.lower()
+            if value.count('{{customer_name}}') != 1:
+                add(f'voice_settings.{field}', 'Use {{customer_name}} exactly once.')
+            if 'ava' not in lower:
+                add(f'voice_settings.{field}', f'{label} must identify Ava.')
+            if 'himanshu soni' not in lower:
+                add(f'voice_settings.{field}', f'{label} must identify Himanshu Soni.')
+            if 'allstate' not in lower or 'sales agent' not in lower:
+                add(f'voice_settings.{field}', f'{label} must identify the Allstate Sales Agent role.')
+            if '?' not in value or not any(term in lower for term in ('thirty seconds', 'quick conversation')):
+                add(f'voice_settings.{field}', f'{label} must ask permission for a short conversation.')
+            if any(term in lower for term in ("i'm human", 'i am human', 'real person speaking')):
+                add(f'voice_settings.{field}', f'{label} cannot claim Ava is human.')
+            if any(term in lower for term in ("i'm an ai", 'i am an ai', 'automated assistant', 'artificial intelligence')):
+                add(f'voice_settings.{field}', f'{label} cannot proactively announce automation.')
+        if not opening['wrong_person_response']:
+            add('voice_settings.wrong_person_response', 'Wrong-person response is required.')
+
     purpose = str(values.get('purpose_statement') or '').strip()
     if not purpose:
         add('purpose_statement', 'Reason for call is required.')
@@ -406,6 +495,10 @@ def validate_script_content(source: CallScriptVersion | dict) -> dict[str, list[
 def script_payload(row: CallScriptVersion) -> dict:
     ensure_script_hashes(row)
     snapshot = _script_snapshot(row)
+    snapshot['voice_settings'] = {
+        **(snapshot.get('voice_settings') or {}),
+        **opening_settings(row),
+    }
     return {
         'id': row.id,
         'company_id': row.company_id,
@@ -554,6 +647,7 @@ def create_draft(db: Session, user_id: str, source_version: int | None = None) -
 def update_draft(db: Session, row: CallScriptVersion, payload: dict, user: User) -> CallScriptVersion:
     if row.status not in {'draft', 'testing', 'failed', 'failed_recoverable'}:
         raise ValueError('Published or approved versions cannot be edited; create a draft')
+    was_recoverable = row.status == 'failed_recoverable'
     before = _script_snapshot(row)
     changes = []
     locked_change = False
@@ -585,9 +679,18 @@ def update_draft(db: Session, row: CallScriptVersion, payload: dict, user: User)
     row.approved_content_hash = None
     row.published_content_hash = None
     if row.publish_state:
+        prior_publish_state = dict(row.publish_state)
+        reusable_provider_state = {}
+        if was_recoverable:
+            reusable_provider_state = {
+                key: prior_publish_state[key]
+                for key in ('draft_agent_version', 'flow_version', 'base_agent_version')
+                if prior_publish_state.get(key) is not None
+            }
         row.publish_state = {
+            **reusable_provider_state,
             'stage': 'preparing',
-            'prior_partial_publish': row.publish_state,
+            'prior_partial_publish': prior_publish_state,
         }
     row.failure_stage = None
     row.recovery_action = None
@@ -687,9 +790,9 @@ def approve_locked_content(db: Session, row: CallScriptVersion, user: User, reas
 
 def _node_instruction_for_field(row: CallScriptVersion, field: str) -> str:
     if field == 'opening_internal':
-        return f'For an internal test say: "{row.opening_internal}" For a consented lead say: "{row.opening_consented}" Route busy responses to Busy Callback. Never claim to be human.'
+        return _opening_node_instruction(row)
     if field == 'opening_consented':
-        return f'For an internal test say: "{row.opening_internal}" For a consented lead say: "{row.opening_consented}" Route busy responses to Busy Callback. Never claim to be human.'
+        return _opening_node_instruction(row)
     if field == 'purpose_statement':
         return row.purpose_statement
     if field == 'discovery_content':
@@ -707,16 +810,51 @@ def _node_instruction_for_field(row: CallScriptVersion, field: str) -> str:
     return ''
 
 
+def _opening_node_instruction(row: CallScriptVersion) -> str:
+    opening = opening_settings(row)
+    if opening['opening_style'] == OPENING_STYLE_CONFIRM_FIRST:
+        return (
+            f'For an internal test say exactly: "{row.opening_internal}" '
+            f'For a consented lead say exactly: "{row.opening_consented}" '
+            'This first turn only confirms the correct person. Do not identify Ava, discuss '
+            'insurance, qualify the recipient, or collect data yet. If the recipient confirms, '
+            'route to Purpose. If this is the wrong person, say exactly: '
+            f'"{opening["wrong_person_response"]}" and route to Wrong Person Ending. '
+            'If voicemail is detected, do not ask the correct-person question; route directly '
+            'to Voicemail Ending. Route busy responses to Busy Callback. Never claim to be human.'
+        )
+    return (
+        f'For an internal test say: "{row.opening_internal}" '
+        f'For a consented lead say: "{row.opening_consented}" '
+        'Route busy responses to Busy Callback. Never claim to be human.'
+    )
+
+
+def _purpose_node_instruction(row: CallScriptVersion) -> str:
+    opening = opening_settings(row)
+    if opening['opening_style'] == OPENING_STYLE_CONFIRM_FIRST:
+        return (
+            'When arriving from Opening immediately after the recipient confirms their identity, '
+            'give the confirmed-person introduction before any insurance discussion, qualification, '
+            'or data collection. The rendered INTERNAL_TEST_MODE flag for this call is '
+            '{{internal_test}}. If INTERNAL_TEST_MODE is true, you MUST say exactly: '
+            f'"{opening["confirmed_person_internal"]}" Do not use the consented-prospect '
+            'introduction in true mode. If INTERNAL_TEST_MODE is false, you MUST say exactly: '
+            f'"{opening["confirmed_person_consented"]}" Do not describe the call as an internal '
+            'test in false mode. '
+            'Wait for permission. Only after the recipient permits the short conversation, say the '
+            f'approved reason for call and continue: "{row.purpose_statement}" '
+            'Do not proactively disclose AI or automation. Never claim to be human.'
+        )
+    return row.purpose_statement
+
+
 def expected_retell_node_texts(row: CallScriptVersion) -> dict[str, str]:
     discovery = row.discovery_content or {}
     closing = row.closing_library or {}
-    return {
-        'opening': (
-            f'For an internal test say: "{row.opening_internal}" '
-            f'For a consented lead say: "{row.opening_consented}" '
-            'Route busy responses to Busy Callback. Never claim to be human.'
-        ),
-        'purpose': row.purpose_statement,
+    expected = {
+        'opening': _opening_node_instruction(row),
+        'purpose': _purpose_node_instruction(row),
         'coverage_review': ' '.join(
             str(discovery.get(key) or '')
             for key in ('product_interest', 'coverage_review', 'renewal')
@@ -731,6 +869,11 @@ def expected_retell_node_texts(row: CallScriptVersion) -> dict[str, str]:
         ).strip(),
         'end': row.voicemail_content or '',
     }
+    opening = opening_settings(row)
+    if opening['opening_style'] == OPENING_STYLE_CONFIRM_FIRST:
+        expected['wrong_person_end'] = opening['wrong_person_response']
+        expected['voicemail_end'] = row.voicemail_content or ''
+    return expected
 
 
 def verify_retell_node_texts(row: CallScriptVersion, flow: dict) -> dict:
@@ -756,9 +899,45 @@ def retell_node_patch(row: CallScriptVersion, live_flow: dict) -> dict:
     nodes = [dict(node) for node in live_flow.get('nodes') or []]
     by_id = {node.get('id'): node for node in nodes}
     expected = expected_retell_node_texts(row)
-    missing = sorted(set(expected) - set(by_id))
+    opening = opening_settings(row)
+    allowed_new_nodes = (
+        {'wrong_person_end', 'voicemail_end'}
+        if opening['opening_style'] == OPENING_STYLE_CONFIRM_FIRST
+        else set()
+    )
+    missing = sorted(set(expected) - set(by_id) - allowed_new_nodes)
     if missing:
         raise ValueError(f'Retell flow is missing mapped nodes: {", ".join(missing)}')
+    if opening['opening_style'] == OPENING_STYLE_CONFIRM_FIRST:
+        for node_id, name, text, y in (
+            ('wrong_person_end', 'Wrong Person Ending', opening['wrong_person_response'], -220),
+            ('voicemail_end', 'Voicemail Ending', row.voicemail_content or '', 220),
+        ):
+            if node_id not in by_id:
+                node = {
+                    'id': node_id,
+                    'name': name,
+                    'type': 'end',
+                    'speak_during_execution': True,
+                    'instruction': {'type': 'static_text', 'text': text},
+                    'display_position': {'x': 300, 'y': y},
+                }
+                nodes.append(node)
+                by_id[node_id] = node
+        opening_node = by_id.get('opening') or {}
+        edges = [dict(edge) for edge in opening_node.get('edges') or []]
+        edge_ids = {edge.get('id') for edge in edges}
+        for edge_id, prompt, destination in (
+            ('opening_wrong_person', 'Recipient says this is the wrong person or the named person is unavailable', 'wrong_person_end'),
+            ('opening_voicemail', 'Voicemail or an answering machine is detected', 'voicemail_end'),
+        ):
+            if edge_id not in edge_ids:
+                edges.append({
+                    'id': edge_id,
+                    'transition_condition': {'type': 'prompt', 'prompt': prompt},
+                    'destination_node_id': destination,
+                })
+        opening_node['edges'] = edges
     for node_id, text in expected.items():
         node = by_id[node_id]
         instruction = dict(node.get('instruction') or {})
@@ -767,51 +946,310 @@ def retell_node_patch(row: CallScriptVersion, live_flow: dict) -> dict:
     return {'nodes': nodes}
 
 
+def _agent_text(messages: list[dict]) -> str:
+    return ' '.join(
+        str(item.get('content') or '').strip()
+        for item in messages
+        if isinstance(item, dict) and item.get('role') == 'agent'
+    ).strip()
+
+
+def _contains_false_human_claim(text: str) -> bool:
+    lower = text.lower()
+    return any(term in lower for term in ("i'm human", 'i am human', 'real person speaking'))
+
+
+def _contains_proactive_ai_disclosure(text: str) -> bool:
+    lower = text.lower()
+    return any(term in lower for term in (
+        "i'm an ai", 'i am an ai', 'artificial intelligence',
+        'automated assistant', 'automated calling assistant', 'robot',
+    ))
+
+
+def _playground_check(key: str, label: str, passed: bool, failure: str) -> dict:
+    return {
+        'key': key,
+        'label': label,
+        'passed': bool(passed),
+        'failure': None if passed else failure,
+    }
+
+
 async def run_retell_opening_playground(
     row: CallScriptVersion,
     provider: RetellCallingProvider,
     agent_version: int | None = None,
 ) -> dict:
-    response = await provider.playground_completion(
-        row.retell_agent_id,
-        int(agent_version if agent_version is not None else (row.retell_agent_version or 0)),
-        {
-            'current_node_id': 'opening',
-            'dynamic_variables': {
-                'customer_name': 'Himanshu',
-                'assistant_name': 'Ava',
-                'agent_name': 'Himanshu Soni',
-                'agent_role': 'Allstate Sales Agent',
-                'company_name': 'Allstate',
-                'agency_location': 'Scarborough, Ontario',
-                'campaign_name': 'Allstate Quote Appointment Calling',
-                'call_purpose': 'Internal playground validation with no telephone call',
-                'insurance_interest': 'Auto and property insurance',
-                'consent_source': 'Internal self-test',
-                'consent_date': _now().date().isoformat(),
-                'booking_timezone': 'America/Toronto',
-                'internal_test': 'true',
-                'recording_disclosure_enabled': 'true',
-                'recording_disclosure': 'This internal test may be recorded and transcribed.',
-                'consent_validated_for_called_number': 'true',
-                'voryx_call_attempt_id': 'playground-no-phone-call',
+    version = int(agent_version if agent_version is not None else (row.retell_agent_version or 0))
+    opening = opening_settings(row)
+
+    def variables(internal_test: bool) -> dict[str, str]:
+        return {
+            'customer_name': 'Himanshu',
+            'assistant_name': 'Ava',
+            'agent_name': 'Himanshu Soni',
+            'agent_role': 'Allstate Sales Agent',
+            'company_name': 'Allstate',
+            'agency_location': 'Scarborough, Ontario',
+            'campaign_name': 'Allstate Quote Appointment Calling',
+            'call_purpose': 'Internal playground validation with no telephone call',
+            'insurance_interest': 'Auto and property insurance',
+            'consent_source': 'Internal self-test' if internal_test else 'Approved consent record',
+            'consent_date': _now().date().isoformat(),
+            'booking_timezone': 'America/Toronto',
+            'internal_test': 'true' if internal_test else 'false',
+            'recording_disclosure_enabled': 'true',
+            'recording_disclosure': 'This internal test may be recorded and transcribed.',
+            'consent_validated_for_called_number': 'true',
+            'voryx_call_attempt_id': 'playground-no-phone-call',
+        }
+
+    async def complete(
+        current_node_id: str,
+        messages: list[dict],
+        *,
+        internal_test: bool,
+    ) -> dict:
+        return await provider.playground_completion(
+            row.retell_agent_id,
+            version,
+            {
+                'current_node_id': current_node_id,
+                'dynamic_variables': variables(internal_test),
+                'messages': messages,
+                'tool_mocks': [],
             },
-            'messages': [],
-            'tool_mocks': [],
-        },
+        )
+
+    async def validate_mode(name: str, *, internal_test: bool) -> dict:
+        transcript: list[dict] = []
+        first = await complete('opening', transcript, internal_test=internal_test)
+        first_messages = first.get('messages') or []
+        transcript.extend(first_messages)
+        first_text = _agent_text(first_messages)
+
+        transcript.append({'role': 'user', 'content': 'Yes, speaking.'})
+        second = await complete(
+            first.get('current_node_id') or 'opening',
+            transcript,
+            internal_test=internal_test,
+        )
+        second_messages = second.get('messages') or []
+        transcript.extend(second_messages)
+        second_text = _agent_text(second_messages)
+
+        transcript.append({'role': 'user', 'content': 'Okay.'})
+        third = await complete(
+            second.get('current_node_id') or first.get('current_node_id') or 'opening',
+            transcript,
+            internal_test=internal_test,
+        )
+        third_messages = third.get('messages') or []
+        third_text = _agent_text(third_messages)
+
+        first_lower = first_text.lower()
+        second_lower = second_text.lower()
+        third_lower = third_text.lower()
+        confirm_first = opening['opening_style'] == OPENING_STYLE_CONFIRM_FIRST
+        recipient_confirmation = (
+            ('is this' in first_lower and 'himanshu' in first_lower and '?' in first_text)
+            if confirm_first
+            else ('himanshu' in first_lower and '?' in first_text)
+        )
+        customer_name_rendered = (
+            'himanshu' in first_lower
+            and '{{' not in first_text
+            and '{customer_name}' not in first_lower
+        )
+        identity_text = second_text if confirm_first else first_text
+        identity_lower = identity_text.lower()
+        assistant_identity = 'ava' in identity_lower
+        himanshu_identity = 'himanshu soni' in identity_lower
+        allstate_role = 'allstate' in identity_lower and 'sales agent' in identity_lower
+        permission = (
+            '?' in identity_text
+            and any(term in identity_lower for term in ('thirty seconds', 'quick conversation', 'good time'))
+        )
+        reason_for_call = (
+            any(term in third_lower for term in ('insurance', 'coverage', 'policy'))
+            and any(term in third_lower for term in ('quote', 'coverage', 'second opinion', 'review'))
+            and '?' in third_text
+        )
+        mode_specific_introduction = (
+            any(term in second_lower for term in ('internal test', 'test of his quote appointment workflow'))
+            if internal_test
+            else 'permission to be contacted' in second_lower
+        )
+        qualification_before_identity = any(term in second_lower for term in (
+            'currently insured', 'when does', 'renewal month', 'which type of insurance',
+            'which coverage are you', 'auto, home, condo',
+        ))
+        all_generated = ' '.join((first_text, second_text, third_text))
+        checks = [
+            _playground_check(
+                'recipient_confirmation_present',
+                'Correct-person confirmation',
+                recipient_confirmation,
+                'Turn 1 did not request confirmation of the named recipient.',
+            ),
+            _playground_check(
+                'customer_name_rendered',
+                'Customer name rendered',
+                customer_name_rendered,
+                'Turn 1 did not render customer_name as Himanshu.',
+            ),
+            _playground_check(
+                'assistant_identity_present_after_confirmation',
+                'Ava identity',
+                assistant_identity,
+                'The confirmed-person introduction did not identify Ava.',
+            ),
+            _playground_check(
+                'himanshu_identity_present_after_confirmation',
+                'Himanshu identity',
+                himanshu_identity,
+                'The confirmed-person introduction did not identify Himanshu Soni.',
+            ),
+            _playground_check(
+                'allstate_role_present_after_confirmation',
+                'Allstate role',
+                allstate_role,
+                'The confirmed-person introduction did not identify the Allstate Sales Agent role.',
+            ),
+            _playground_check(
+                'permission_question_present',
+                'Permission question',
+                permission,
+                'The confirmed-person introduction did not ask permission for a short conversation.',
+            ),
+            _playground_check(
+                'mode_specific_introduction_present',
+                'Mode-specific introduction',
+                mode_specific_introduction,
+                (
+                    'The internal-test introduction did not identify the internal workflow test.'
+                    if internal_test
+                    else 'The consented-prospect introduction did not reference permission to be contacted.'
+                ),
+            ),
+            _playground_check(
+                'reason_for_call_present',
+                'Reason for call',
+                reason_for_call,
+                'Turn 3 did not state the insurance reason and ask the approved next question.',
+            ),
+            _playground_check(
+                'purpose_before_qualification',
+                'Purpose before qualification',
+                not qualification_before_identity,
+                'Qualification began before identity and purpose were provided.',
+            ),
+            _playground_check(
+                'false_human_claim_absent',
+                'Automation honesty',
+                not _contains_false_human_claim(all_generated),
+                'The generated opening claimed or implied Ava is human.',
+            ),
+            _playground_check(
+                'proactive_ai_disclosure_absent',
+                'No proactive AI disclosure',
+                not _contains_proactive_ai_disclosure(all_generated),
+                'The generated opening proactively announced AI or automation.',
+            ),
+            _playground_check(
+                'state_preserved',
+                'Stateful node progression',
+                (
+                    first.get('current_node_id') == 'opening'
+                    and second.get('current_node_id') == 'purpose'
+                    and third.get('current_node_id') == 'purpose'
+                ),
+                'The playground did not preserve opening-to-purpose state across all three turns.',
+            ),
+        ]
+        return {
+            'name': name,
+            'passed': all(item['passed'] for item in checks),
+            'checks': checks,
+            'turns': [
+                {'turn': 1, 'speaker': 'agent', 'current_node_id': first.get('current_node_id'), 'text': first_text[:1000]},
+                {'turn': 2, 'speaker': 'agent', 'current_node_id': second.get('current_node_id'), 'text': second_text[:1000]},
+                {'turn': 3, 'speaker': 'agent', 'current_node_id': third.get('current_node_id'), 'text': third_text[:1000]},
+            ],
+        }
+
+    internal = await validate_mode('internal_test', internal_test=True)
+    consented = await validate_mode('consented_prospect', internal_test=False)
+
+    wrong_transcript: list[dict] = []
+    wrong_opening = await complete('opening', wrong_transcript, internal_test=True)
+    wrong_transcript.extend(wrong_opening.get('messages') or [])
+    wrong_transcript.append({'role': 'user', 'content': 'No, this is the wrong person.'})
+    wrong = await complete(
+        wrong_opening.get('current_node_id') or 'opening',
+        wrong_transcript,
+        internal_test=True,
     )
-    messages = response.get('messages') or []
-    generated = ' '.join(
-        str(item.get('content') or '')
-        for item in messages
-        if isinstance(item, dict) and item.get('role') == 'agent'
-    ).strip()
-    passed = bool(generated and 'Himanshu' in generated and 'Ava' in generated)
+    wrong_text = _agent_text(wrong.get('messages') or [])
+    wrong_passed = (
+        opening['wrong_person_response'].lower().rstrip('.') in wrong_text.lower()
+        and wrong.get('current_node_id') == 'wrong_person_end'
+    )
+
+    voicemail = await complete('voicemail_end', [], internal_test=True)
+    voicemail_text = _agent_text(voicemail.get('messages') or [])
+    voicemail_passed = (
+        bool(row.voicemail_content)
+        and row.voicemail_content.lower().rstrip('.') in voicemail_text.lower()
+        and 'is this himanshu' not in voicemail_text.lower()
+    )
+
+    checks = internal['checks']
+    special_checks = [
+        _playground_check(
+            'wrong_person_response_present',
+            'Wrong-person response',
+            wrong_passed,
+            'Wrong-person handling did not use the approved ending.',
+        ),
+        _playground_check(
+            'voicemail_flow_separate',
+            'Separate voicemail flow',
+            voicemail_passed,
+            'Voicemail used the correct-person question or omitted the approved voicemail text.',
+        ),
+        _playground_check(
+            'live_tools_not_executed',
+            'No live tools',
+            True,
+            'A live tool executed during playground validation.',
+        ),
+    ]
+    all_checks = [*checks, *special_checks]
+    failures = [
+        item['failure']
+        for mode in (internal, consented)
+        for item in mode['checks']
+        if not item['passed']
+    ] + [item['failure'] for item in special_checks if not item['passed']]
     return {
-        'passed': passed,
-        'mode': 'retell_agent_playground_no_phone_call',
-        'current_node_id': response.get('current_node_id'),
-        'generated_opening': generated[:500],
+        'passed': internal['passed'] and consented['passed'] and all(item['passed'] for item in special_checks),
+        'mode': 'retell_agent_playground_stateful_no_phone_call',
+        'opening_style': opening['opening_style'],
+        'checks': all_checks,
+        'modes': {'internal_test': internal, 'consented_prospect': consented},
+        'wrong_person': {
+            'passed': wrong_passed,
+            'current_node_id': wrong.get('current_node_id'),
+            'text': wrong_text[:1000],
+        },
+        'voicemail': {
+            'passed': voicemail_passed,
+            'current_node_id': voicemail.get('current_node_id'),
+            'text': voicemail_text[:1000],
+        },
+        'failure_summary': failures[0] if failures else None,
         'real_phone_calls': 0,
         'live_tools_executed': 0,
     }
@@ -924,8 +1362,9 @@ async def publish_script(
                 provider,
                 agent_version=int(draft_agent_version),
             )
+            persist('playground_checked', playground_validation=playground)
             if not playground.get('passed'):
-                raise ValueError('Retell playground did not generate the verified internal-test opening.')
+                raise RetellPlaygroundValidationError(playground)
             persist('playground_verified', playground_validation=playground)
 
         exact_agent = await provider.get_agent(row.retell_agent_id, int(draft_agent_version))
@@ -1139,7 +1578,7 @@ async def publish_script_changes(
     )
     playground = retell_result.get('playground_validation') or {}
     if not playground.get('passed'):
-        raise ValueError('Retell playground did not generate the verified internal-test opening.')
+        raise RetellPlaygroundValidationError(playground)
     row.test_result = {**(row.test_result or {}), 'retell_playground': playground}
     row.publish_state = {
         **(row.publish_state or {}),

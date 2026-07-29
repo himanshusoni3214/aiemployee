@@ -585,9 +585,54 @@ class MockCallingProvider:
         return result
 
     async def playground_completion(self, agent_id: str, version: int, payload: dict) -> dict:
+        node_id = payload.get('current_node_id') or 'opening'
+        messages = payload.get('messages') or []
+        last_user = next(
+            (
+                str(item.get('content') or '')
+                for item in reversed(messages)
+                if isinstance(item, dict) and item.get('role') == 'user'
+            ),
+            '',
+        ).lower()
+        if node_id == 'voicemail_end':
+            return {
+                'current_node_id': 'voicemail_end',
+                'messages': [{'role': 'agent', 'content': 'Hi, this is Ava calling on behalf of Himanshu Soni, an Allstate Sales Agent. Please contact Himanshu directly if you would like an insurance review.'}],
+                'call_ended': True,
+            }
+        if 'wrong person' in last_user:
+            return {
+                'current_node_id': 'wrong_person_end',
+                'messages': [{'role': 'agent', 'content': 'Thank you. I won’t keep you.'}],
+                'call_ended': True,
+            }
+        if not last_user:
+            return {
+                'current_node_id': 'opening',
+                'messages': [{'role': 'agent', 'content': 'Hi, is this Himanshu?'}],
+                'call_ended': False,
+            }
+        if 'yes, speaking' in last_user:
+            internal_test = str(
+                (payload.get('dynamic_variables') or {}).get('internal_test') or ''
+            ).lower() == 'true'
+            introduction = (
+                'Hi Himanshu, this is Ava calling on behalf of Himanshu Soni, an Allstate Sales Agent in Scarborough. '
+                'This is an internal test of his quote appointment workflow. Do you have thirty seconds?'
+                if internal_test
+                else
+                'Hi Himanshu, this is Ava calling on behalf of Himanshu Soni, an Allstate Sales Agent in Scarborough. '
+                'I’m following up on your permission to be contacted about auto or property insurance. Do you have thirty seconds?'
+            )
+            return {
+                'current_node_id': 'purpose',
+                'messages': [{'role': 'agent', 'content': introduction}],
+                'call_ended': False,
+            }
         return {
-            'current_node_id': payload.get('current_node_id') or 'opening',
-            'messages': [{'role': 'agent', 'content': 'Hi Himanshu, this is Ava calling for the internal playground test.'}],
+            'current_node_id': 'purpose',
+            'messages': [{'role': 'agent', 'content': 'The reason for my call is to see whether your current auto or property insurance coverage still fits and whether a short second-opinion quote would be useful. Is auto or property insurance most relevant?'}],
             'call_ended': False,
         }
 

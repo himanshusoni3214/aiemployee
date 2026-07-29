@@ -39,6 +39,24 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("title={publishReason}", source)
         self.assertIn("Advanced actions", source)
 
+    def test_call_script_studio_supports_two_step_opening_and_detailed_playground_checks(self):
+        source = read_frontend("components/CallScriptStudio.tsx")
+
+        for contract in [
+            "Opening style",
+            "Full introduction",
+            "Confirm person first",
+            "Confirmed-person internal introduction",
+            "Confirmed-person prospect introduction",
+            "Wrong-person response",
+            "Retell playground checks",
+            "playgroundValidation.checks.map",
+            "item.label",
+            "Advanced playground transcript",
+            "data-playground-validation",
+        ]:
+            self.assertIn(contract, source)
+
     def test_call_script_studio_has_field_errors_and_unsaved_change_protection(self):
         source = read_frontend("components/CallScriptStudio.tsx")
 

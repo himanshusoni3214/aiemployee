@@ -21,6 +21,10 @@ from app.models.entities import (
 from app.services.call_script_studio import (
     ALLSTATE_CAMPAIGN_ID,
     ALLSTATE_COMPANY_ID,
+    DEFAULT_CONFIRMED_CONSENTED_INTRODUCTION,
+    DEFAULT_CONFIRMED_INTERNAL_INTRODUCTION,
+    DEFAULT_WRONG_PERSON_RESPONSE,
+    OPENING_STYLE_CONFIRM_FIRST,
     PILOT_CONFIRMATION,
     approve_locked_content,
     approve_pilot_lead,
@@ -39,11 +43,13 @@ from app.services.call_script_studio import (
     retell_node_patch,
     expected_retell_node_texts,
     verify_retell_node_texts,
+    run_retell_opening_playground,
     run_draft_tests,
     script_content_hash,
     update_draft,
     validate_script_content,
 )
+from app.services.calling import MockCallingProvider
 
 
 class CallScriptStudioTests(unittest.TestCase):
@@ -130,6 +136,129 @@ class CallScriptStudioTests(unittest.TestCase):
             nodes = {item['id']: item for item in patch_payload['nodes']}
             self.assertEqual(nodes['opening']['instruction']['text'], expected_retell_node_texts(draft)['opening'])
             self.assertEqual(nodes['purpose']['instruction']['text'], 'New approved purpose')
+
+    def configure_confirm_first(self, draft):
+        draft.opening_internal = 'Hi, is this {{customer_name}}?'
+        draft.opening_consented = 'Hi, is this {{customer_name}}?'
+        draft.voice_settings = {
+            **(draft.voice_settings or {}),
+            'opening_style': OPENING_STYLE_CONFIRM_FIRST,
+            'confirmed_person_internal': DEFAULT_CONFIRMED_INTERNAL_INTRODUCTION,
+            'confirmed_person_consented': DEFAULT_CONFIRMED_CONSENTED_INTRODUCTION,
+            'wrong_person_response': DEFAULT_WRONG_PERSON_RESPONSE,
+        }
+
+    def test_confirm_first_node_patch_adds_stateful_identity_and_separate_endings(self):
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
+            user = self.seed(db)
+            ensure_script_studio(db, user.id)
+            draft = create_draft(db, user.id)
+            self.configure_confirm_first(draft)
+            live = self.flow_payload(draft)
+            live['nodes'] = [
+                item for item in live['nodes']
+                if item['id'] not in {'wrong_person_end', 'voicemail_end'}
+            ]
+            patched = retell_node_patch(draft, live)
+            nodes = {item['id']: item for item in patched['nodes']}
+            self.assertIn('confirmed-person introduction', nodes['purpose']['instruction']['text'])
+            self.assertEqual(
+                nodes['wrong_person_end']['instruction']['text'],
+                DEFAULT_WRONG_PERSON_RESPONSE,
+            )
+            self.assertEqual(
+                nodes['voicemail_end']['instruction']['text'],
+                draft.voicemail_content,
+            )
+            edge_destinations = {
+                item['destination_node_id']
+                for item in nodes['opening']['edges']
+            }
+            self.assertIn('wrong_person_end', edge_destinations)
+            self.assertIn('voicemail_end', edge_destinations)
+
+    def test_stateful_playground_accepts_two_step_opening_without_literal_turn_one_identity(self):
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
+            user = self.seed(db)
+            ensure_script_studio(db, user.id)
+            draft = create_draft(db, user.id)
+            self.configure_confirm_first(draft)
+            result = asyncio.run(
+                run_retell_opening_playground(draft, MockCallingProvider(), agent_version=8)
+            )
+            self.assertTrue(result['passed'], result)
+            internal = result['modes']['internal_test']
+            self.assertEqual(internal['turns'][0]['text'], 'Hi, is this Himanshu?')
+            self.assertNotIn('Ava', internal['turns'][0]['text'])
+            checks = {item['key']: item['passed'] for item in result['checks']}
+            self.assertTrue(checks['recipient_confirmation_present'])
+            self.assertTrue(checks['assistant_identity_present_after_confirmation'])
+            self.assertTrue(checks['himanshu_identity_present_after_confirmation'])
+            self.assertTrue(checks['allstate_role_present_after_confirmation'])
+            self.assertTrue(checks['reason_for_call_present'])
+            self.assertEqual(result['real_phone_calls'], 0)
+            self.assertEqual(result['live_tools_executed'], 0)
+
+    def test_stateful_playground_reports_individual_missing_identity_check(self):
+        class MissingAllstateProvider(MockCallingProvider):
+            async def playground_completion(self, agent_id, version, payload):
+                response = await super().playground_completion(agent_id, version, payload)
+                messages = payload.get('messages') or []
+                last_user = next(
+                    (
+                        str(item.get('content') or '').lower()
+                        for item in reversed(messages)
+                        if item.get('role') == 'user'
+                    ),
+                    '',
+                )
+                if 'yes, speaking' in last_user:
+                    response['messages'] = [{
+                        'role': 'agent',
+                        'content': 'Hi Himanshu, this is Ava calling for Himanshu Soni. Do you have thirty seconds?',
+                    }]
+                return response
+
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
+            user = self.seed(db)
+            ensure_script_studio(db, user.id)
+            draft = create_draft(db, user.id)
+            self.configure_confirm_first(draft)
+            result = asyncio.run(
+                run_retell_opening_playground(draft, MissingAllstateProvider(), agent_version=8)
+            )
+            self.assertFalse(result['passed'])
+            failed = {
+                item['key']: item['failure']
+                for item in result['modes']['internal_test']['checks']
+                if not item['passed']
+            }
+            self.assertIn('allstate_role_present_after_confirmation', failed)
+            self.assertIn('Allstate Sales Agent', failed['allstate_role_present_after_confirmation'])
+
+    def test_recoverable_content_edit_preserves_existing_provider_draft_versions(self):
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
+            user = self.seed(db)
+            ensure_script_studio(db, user.id)
+            draft = create_draft(db, user.id)
+            draft.status = 'failed_recoverable'
+            draft.publish_state = {
+                'draft_agent_version': 8,
+                'flow_version': 8,
+                'base_agent_version': 7,
+                'stage': 'flow_verified',
+            }
+            voice = {
+                **draft.voice_settings,
+                'opening_style': OPENING_STYLE_CONFIRM_FIRST,
+            }
+            update_draft(db, draft, {'voice_settings': voice}, user)
+            self.assertEqual(draft.publish_state['draft_agent_version'], 8)
+            self.assertEqual(draft.publish_state['flow_version'], 8)
+            self.assertEqual(
+                draft.publish_state['prior_partial_publish']['stage'],
+                'flow_verified',
+            )
 
     def test_all_required_draft_scenarios_pass(self):
         with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):

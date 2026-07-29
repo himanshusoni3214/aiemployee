@@ -142,6 +142,21 @@ function validateForm(values: FormValues): Record<string, string[]> {
       add(field, 'Use {{customer_name}} with two opening and two closing braces.');
     }
   }
+  if (values.voice_settings?.opening_style === 'confirm_person_first') {
+    for (const [field, label] of [
+      ['confirmed_person_internal', 'Confirmed-person internal introduction'],
+      ['confirmed_person_consented', 'Confirmed-person prospect introduction'],
+    ] as const) {
+      const value = String(values.voice_settings?.[field] || '').trim();
+      const lower = value.toLowerCase();
+      if ((value.match(/\{\{customer_name\}\}/g) || []).length !== 1) add(`voice_settings.${field}`, `${label} must use {{customer_name}} exactly once.`);
+      if (!lower.includes('ava')) add(`voice_settings.${field}`, `${label} must identify Ava.`);
+      if (!lower.includes('himanshu soni')) add(`voice_settings.${field}`, `${label} must identify Himanshu Soni.`);
+      if (!lower.includes('allstate') || !lower.includes('sales agent')) add(`voice_settings.${field}`, `${label} must identify the Allstate Sales Agent role.`);
+      if (!value.includes('?') || !['thirty seconds', 'quick conversation'].some((term) => lower.includes(term))) add(`voice_settings.${field}`, `${label} must ask permission for a short conversation.`);
+    }
+    if (!String(values.voice_settings?.wrong_person_response || '').trim()) add('voice_settings.wrong_person_response', 'Wrong-person response is required.');
+  }
   if (!values.purpose_statement.trim()) add('purpose_statement', 'Reason for call is required.');
   if (!String(values.discovery_content?.product_interest || '').trim()) add('discovery_content.product_interest', 'Product-interest question is required.');
   if (!String(values.discovery_content?.coverage_review || '').trim()) add('discovery_content.coverage_review', 'Coverage-review question is required.');
@@ -423,6 +438,9 @@ export function CallScriptStudio({ studio, refresh, onDirtyChange }: { studio?: 
   }
 
   const test = validTest ? serverDraftVersion?.test_result || {} : {};
+  const playgroundValidation = active.publish_state?.playground_validation
+    || active.test_result?.retell_playground
+    || null;
   const projection = studio.cost_projection || {};
   const attentionCount = Object.values(fieldErrors).reduce((total, items) => total + items.length, 0);
   const publishDisabled = Boolean(busy || !changedFields.length || attentionCount || !currentContentHash);
@@ -478,6 +496,35 @@ export function CallScriptStudio({ studio, refresh, onDirtyChange }: { studio?: 
       {active.status === 'failed' || active.status === 'failed_recoverable' ? (
         <div className="mt-4"><Notice tone="error">Your changes are saved but are not live. Production is still using v{studio.published_version.version_number}. Failure stage: {active.failure_stage || 'provider publish'}. {active.recovery_action || 'Retry publish or return to editing.'}</Notice></div>
       ) : null}
+      {playgroundValidation?.checks?.length ? (
+        <div className="mt-4 rounded border border-zinc-800 p-3" data-playground-validation>
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <div className="font-semibold">Retell playground checks</div>
+            <div className={playgroundValidation.passed ? 'text-sm text-emerald-300' : 'text-sm text-red-300'}>{playgroundValidation.passed ? 'Passed' : 'Needs attention'}</div>
+          </div>
+          <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
+            {playgroundValidation.checks.map((item: Record<string, any>) => (
+              <div className={`rounded border p-2 text-sm ${item.passed ? 'border-emerald-900 text-emerald-200' : 'border-red-900 text-red-200'}`} key={item.key}>
+                <div>{item.passed ? 'Pass' : 'Fail'}: {item.label}</div>
+                {!item.passed && item.failure ? <div className="mt-1 text-xs">{item.failure}</div> : null}
+              </div>
+            ))}
+          </div>
+          <details className="mt-3 rounded border border-zinc-800 p-3">
+            <summary className="cursor-pointer text-sm font-semibold">Advanced playground transcript</summary>
+            <div className="mt-3 space-y-3 text-xs">
+              {Object.entries(playgroundValidation.modes || {}).map(([mode, result]: [string, any]) => (
+                <div key={mode}>
+                  <div className="font-medium text-zinc-300">{mode.replaceAll('_', ' ')}</div>
+                  {(result.turns || []).map((turn: Record<string, any>) => <div className="mt-1 rounded border border-zinc-900 p-2" key={`${mode}-${turn.turn}`}><span className="text-zinc-500">Turn {turn.turn} / node {turn.current_node_id || '-'}</span><div className="mt-1 whitespace-pre-wrap">{turn.text || '-'}</div></div>)}
+                </div>
+              ))}
+              {playgroundValidation.wrong_person ? <div><div className="font-medium text-zinc-300">Wrong person</div><div className="mt-1 whitespace-pre-wrap">{playgroundValidation.wrong_person.text || '-'}</div></div> : null}
+              {playgroundValidation.voicemail ? <div><div className="font-medium text-zinc-300">Voicemail</div><div className="mt-1 whitespace-pre-wrap">{playgroundValidation.voicemail.text || '-'}</div></div> : null}
+            </div>
+          </details>
+        </div>
+      ) : null}
 
       {tab === 'Script' ? (
         <div className="mt-4 space-y-4">
@@ -505,8 +552,23 @@ export function CallScriptStudio({ studio, refresh, onDirtyChange }: { studio?: 
             <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Estimated prompt</div>{active.estimated_prompt_tokens} tokens</div>
             <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Maximum call</div>4 minutes / no retry / concurrency 1</div>
           </div>
-          <Field id="script-opening_internal" label="Internal-test opening" value={formValues.opening_internal} errors={fieldErrors.opening_internal} onChange={(value) => mutate({ opening_internal: value })} />
-          <Field id="script-opening_consented" label="Consented-lead opening" value={formValues.opening_consented} errors={fieldErrors.opening_consented} onChange={(value) => mutate({ opening_consented: value })} />
+          <label className="block space-y-1 text-sm">
+            <span className="text-zinc-300">Opening style</span>
+            <select id="script-opening-style" className={INPUT_CLASS} value={formValues.voice_settings?.opening_style || 'full_introduction'} onChange={(event) => mutate({ voice_settings: { ...formValues.voice_settings, opening_style: event.target.value } })}>
+              <option value="full_introduction">Full introduction</option>
+              <option value="confirm_person_first">Confirm person first</option>
+            </select>
+          </label>
+          <Field id="script-opening_internal" label={formValues.voice_settings?.opening_style === 'confirm_person_first' ? 'Internal-test first-turn opening' : 'Internal-test opening'} value={formValues.opening_internal} errors={fieldErrors.opening_internal} onChange={(value) => mutate({ opening_internal: value })} />
+          <Field id="script-opening_consented" label={formValues.voice_settings?.opening_style === 'confirm_person_first' ? 'Consented-lead first-turn opening' : 'Consented-lead opening'} value={formValues.opening_consented} errors={fieldErrors.opening_consented} onChange={(value) => mutate({ opening_consented: value })} />
+          {formValues.voice_settings?.opening_style === 'confirm_person_first' ? (
+            <div className="grid gap-3 md:grid-cols-2">
+              <Field id="script-voice_settings-confirmed_person_internal" label="Confirmed-person internal introduction" value={String(formValues.voice_settings?.confirmed_person_internal || '')} errors={fieldErrors['voice_settings.confirmed_person_internal']} onChange={(value) => mutate({ voice_settings: { ...formValues.voice_settings, confirmed_person_internal: value } })} />
+              <Field id="script-voice_settings-confirmed_person_consented" label="Confirmed-person prospect introduction" value={String(formValues.voice_settings?.confirmed_person_consented || '')} errors={fieldErrors['voice_settings.confirmed_person_consented']} onChange={(value) => mutate({ voice_settings: { ...formValues.voice_settings, confirmed_person_consented: value } })} />
+              <Field id="script-voice_settings-wrong_person_response" label="Wrong-person response" value={String(formValues.voice_settings?.wrong_person_response || '')} errors={fieldErrors['voice_settings.wrong_person_response']} onChange={(value) => mutate({ voice_settings: { ...formValues.voice_settings, wrong_person_response: value } })} />
+              <div className="rounded border border-zinc-800 p-3 text-sm text-zinc-400">Voicemail uses the separate voicemail field below and never asks the correct-person confirmation question.</div>
+            </div>
+          ) : null}
           <Field id="script-purpose_statement" label="Reason for call" value={formValues.purpose_statement} errors={fieldErrors.purpose_statement} onChange={(value) => mutate({ purpose_statement: value })} />
           <div className="grid gap-3 md:grid-cols-2">
             <Field id="script-discovery_content-product_interest" label="Product-interest question" value={formValues.discovery_content?.product_interest || ''} errors={fieldErrors['discovery_content.product_interest']} onChange={(value) => mutate({ discovery_content: { ...formValues.discovery_content, product_interest: value } })} />
