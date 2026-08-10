@@ -25,5 +25,6 @@ class Settings(BaseSettings):
     retell_tool_token: str = ""
     retell_internal_test_mode: bool = False
     retell_webhook_url: str = "https://ops.themealz.com/api/webhooks/retell"
+    allstate_calling_baseline: str = "v8"
     class Config: env_file = ".env"
 settings = Settings()

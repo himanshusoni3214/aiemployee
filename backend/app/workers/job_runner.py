@@ -208,10 +208,29 @@ async def run_once() -> bool:
     finally:
         db.close()
 
+async def run_calling_once() -> bool:
+    db = SessionLocal()
+    try:
+        from app.services.calling_campaign import process_next_queue_item, reconcile_active_calls
+        await reconcile_active_calls(db)
+        worked = await process_next_queue_item(db)
+        db.commit()
+        return worked
+    except Exception:
+        db.rollback()
+        raise
+    finally:
+        db.close()
+
 async def main():
     while True:
         worked = await run_once()
-        await asyncio.sleep(1 if worked else 5)
+        try:
+            calling_worked = await run_calling_once()
+        except Exception as exc:
+            print(f'Calling queue cycle failed: {exc}', flush=True)
+            calling_worked = False
+        await asyncio.sleep(1 if worked or calling_worked else 5)
 
 if __name__ == '__main__':
     asyncio.run(main())

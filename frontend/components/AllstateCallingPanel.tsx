@@ -1,508 +1,312 @@
 'use client';
 
 import { useEffect, useMemo, useState } from 'react';
-import { api } from '../lib/api';
+import { api, downloadApi } from '../lib/api';
 import { LocalTime } from './LocalTime';
 import { CallScriptStudio } from './CallScriptStudio';
 
-type CallingHealth = {
-  api_authenticated?: boolean;
-  agent_exists?: boolean;
-  agent_name?: string | null;
-  outbound_agent_correctly_assigned?: boolean;
-  webhook_signature_key_configured?: boolean;
-  tool_token_configured?: boolean;
-  internal_test_ready?: boolean;
-  prospect_calling_ready?: boolean;
-  agent_id?: string | null;
-  agent_version?: number | string | null;
-  response_engine?: { type?: string; conversation_flow_id?: string; version?: number | null } | null;
-  legacy_agent_id_configured?: boolean;
-  legacy_agent_exists?: boolean;
-  configured_agent_version?: string | null;
-  voice_id?: string | null;
-  responsiveness?: number | null;
-  interruption_sensitivity?: number | null;
-  enable_backchannel?: boolean | null;
-  backchannel_words?: string[] | null;
-  ambient_sound?: string | null;
-  blockers?: string[];
+type Tab = 'overview' | 'contacts' | 'calling' | 'results' | 'script' | 'settings';
+
+type Readiness = {
+  ready: boolean;
+  checks: Array<{ code: string; label: string; ready: boolean }>;
+  blockers: Array<{ code: string; label: string }>;
+  eligible_contacts: number;
+  calling_now: boolean;
+  next_calling_window?: string | null;
+  daily_limit: number;
+  concurrency: number;
+  confirmation_required: string;
 };
 
-type CallingSettings = {
-  from_number?: string | null;
-  provider_agent_id?: string | null;
-  internal_test_enabled?: boolean;
-  internal_test_numbers_masked?: string[];
-  prospect_calling_enabled?: boolean;
-  automated_queue_enabled?: boolean;
-  recording_enabled?: boolean;
-  transcription_enabled?: boolean;
-  call_recording_disclosure_enabled?: boolean;
-  daily_call_limit?: number;
-  hourly_call_limit?: number;
-  concurrent_call_limit?: number;
-};
-
-type CallAttempt = {
+type ImportReview = {
   id: string;
-  provider_call_id?: string | null;
-  provider_agent_id?: string | null;
-  provider_agent_version?: number | null;
-  to_number_masked?: string | null;
+  filename: string;
+  uploaded: number;
+  ready: number;
+  needs_review: number;
+  blocked: number;
+  reason_counts: Record<string, number>;
+  created_at?: string;
+  rows: Array<{
+    id: string;
+    row_number: number;
+    first_name?: string | null;
+    phone_number_masked?: string | null;
+    classification: string;
+    blocker_messages: string[];
+  }>;
+};
+
+type QueueItem = {
+  id: string;
+  name: string;
+  phone_number_masked: string;
   status: string;
-  requested_at?: string | null;
+  outcome?: string | null;
+  created_at?: string | null;
   started_at?: string | null;
-  ended_at?: string | null;
+  completed_at?: string | null;
   duration_seconds?: number | null;
-  termination_reason?: string | null;
-  provider_receipt?: Record<string, unknown>;
-  cost?: {
-    amount?: number | null;
-    currency?: string;
-    final?: boolean;
-    label?: string;
-    per_connected_minute?: number | null;
-    breakdown?: Record<string, unknown>;
-    llm?: string | null;
-    voice?: string | null;
-  };
-  transcript?: {
-    transcript?: string | null;
-    segments?: unknown[];
-    summary?: string | null;
-    recording_url?: string | null;
-    objections?: unknown[];
-    extracted_fields?: Record<string, unknown>;
-    sales_score?: number | null;
-    sales_score_details?: {
-      target?: number;
-      passed?: boolean;
-      stage_scores?: Record<string, boolean>;
-      critical_failures?: string[];
-      missed_questions?: string[];
-      objection_detected?: string | null;
-      close_attempted?: boolean;
-      improvement_recommendation?: string;
-    };
-  } | null;
-  disposition?: {
-    disposition?: string | null;
-    appointment_requested?: boolean;
-    appointment_booked?: boolean;
-    do_not_call_requested?: boolean;
-    notes?: string | null;
-  } | null;
-  appointments?: Array<{ id: string; start_time?: string | null; timezone: string; status: string; insurance_interest?: string | null; notes?: string | null }>;
+  cost_usd?: number | null;
+  summary?: string | null;
+  transcript?: string | null;
+  recording_url?: string | null;
+  sales_score?: number | null;
+  objections?: unknown[];
+  disposition?: string | null;
+  renewal_month?: string | null;
+  callback_at?: string | null;
+  callback_timezone?: string | null;
+  callback_reason?: string | null;
+  appointment?: boolean;
+  failure_code?: string | null;
+  error_message?: string | null;
+  advanced?: Record<string, unknown>;
+};
+
+type CallingState = {
+  status: string;
+  progress: { completed: number; total: number; queued: number; calling: number };
+  today: { attempts: number; answered: number; appointments: number; callbacks: number; dnc: number; no_answer: number };
+  cost_today: number;
+  average_cost: number;
+  callbacks: Array<{ id: string; callback_at?: string | null; timezone?: string | null; reason?: string | null; status: string }>;
+  queue_items: QueueItem[];
 };
 
 export type CallingWorkspace = {
-  confirmation_required: string;
-  settings: CallingSettings;
-  health: CallingHealth;
-  preview?: {
-    begin_message?: string;
-    consented_prospect_begin_message?: string;
-    recording_disclosure?: string;
-    recording_disclosure_enabled?: boolean;
-    business_purpose?: string;
-    dynamic_variables?: Record<string, string>;
-    required_dynamic_variables?: string[];
-    missing_dynamic_variables?: string[];
-    override_agent_id?: string;
-    override_agent_version?: string;
-    from_number?: string;
-    expected_agent_name?: string;
-    voice?: {
-      voice_id?: string;
-      voice_name?: string;
-      responsiveness?: number;
-      interruption_sensitivity?: number;
-      enable_backchannel?: boolean;
-      backchannel_words?: string[];
-      ambient_sound?: string | null;
-      pronunciation_guidance?: Record<string, string>;
-    };
+  confirmation_required?: string;
+  baseline?: string;
+  settings: {
+    from_number?: string | null;
+    campaign_status?: string;
+    daily_call_limit?: number;
+    concurrent_call_limit?: number;
+    prospect_calling_enabled?: boolean;
+    automated_queue_enabled?: boolean;
+    baseline_version?: string;
   };
-  warnings?: string[];
-  agent_migration?: {
-    legacy_agent_id: string;
-    successor_agent_id: string;
-    conversation_flow_id: string;
-    cutover_at?: string | null;
-    rollback_status: string;
-    test_result?: Record<string, unknown>;
-  } | null;
-  attempts: CallAttempt[];
-  campaign_cost?: { amount?: number; currency?: string; scope?: string };
+  health: {
+    api_authenticated?: boolean;
+    agent_exists?: boolean;
+    agent_name?: string | null;
+    agent_id?: string | null;
+    agent_version?: number | string | null;
+    number_exists?: boolean;
+    outbound_agent_correctly_assigned?: boolean;
+    webhook_signature_key_configured?: boolean;
+    tool_token_configured?: boolean;
+    response_engine?: { type?: string; conversation_flow_id?: string; version?: number | null } | null;
+    blockers?: string[];
+  };
+  readiness?: Readiness;
+  latest_import?: ImportReview | null;
+  calling?: CallingState;
+  attempts?: any[];
   script_studio?: any;
+  preview?: any;
+  warnings?: string[];
+  agent_migration?: any;
 };
 
-type ReadinessCheck = {
-  code: string;
-  field?: string | null;
-  label: string;
-  ready: boolean;
-  message: string;
-};
+const tabs: Array<{ id: Tab; label: string }> = [
+  { id: 'overview', label: 'Overview' },
+  { id: 'contacts', label: 'Contacts' },
+  { id: 'calling', label: 'Calling' },
+  { id: 'results', label: 'Results' },
+  { id: 'script', label: 'Script' },
+  { id: 'settings', label: 'Settings' },
+];
 
-type InternalTestReadiness = {
-  ready: boolean;
-  blockers: Array<{ code: string; field?: string | null; message: string }>;
-  checks: ReadinessCheck[];
-};
-
-function normalizeReadiness(value: any): InternalTestReadiness {
-  if (
-    value
-    && typeof value.ready === 'boolean'
-    && Array.isArray(value.blockers)
-    && Array.isArray(value.checks)
-  ) {
-    return value;
-  }
-  return {
-    ready: false,
-    blockers: [{
-      code: 'READINESS_RESPONSE_INVALID',
-      message: 'The readiness service returned no usable result. Refresh and try again.',
-    }],
-    checks: [],
-  };
+function money(value?: number | null) {
+  return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(value || 0);
 }
 
-function money(value?: number | null, currency = 'USD') {
-  if (value == null) return '-';
-  return new Intl.NumberFormat(undefined, { style: 'currency', currency }).format(value);
+function statusLabel(value?: string | null) {
+  return String(value || 'not_started').replaceAll('_', ' ').replace(/\b\w/g, (letter) => letter.toUpperCase());
 }
 
-function CheckRow({ label, ok }: { label: string; ok?: boolean }) {
-  return (
-    <div className="flex items-center justify-between rounded border border-zinc-800 px-3 py-2 text-sm">
-      <span className="text-zinc-300">{label}</span>
-      <span className={ok ? 'text-emerald-300' : 'text-amber-300'}>{ok ? 'Ready' : 'Blocked'}</span>
-    </div>
-  );
+function Metric({ label, value }: { label: string; value: React.ReactNode }) {
+  return <div className="rounded border border-zinc-800 p-3"><div className="text-xs text-zinc-500">{label}</div><div className="mt-1 text-xl font-semibold">{value}</div></div>;
 }
 
-function SectionCard({ title, children }: { title: string; children: React.ReactNode }) {
-  return (
-    <section className="rounded border border-zinc-800 p-3">
-      <h2 className="text-sm font-semibold">{title}</h2>
-      <div className="mt-2 text-sm text-zinc-400">{children}</div>
-    </section>
-  );
+function Message({ value, error = false }: { value: string; error?: boolean }) {
+  if (!value) return null;
+  return <div role="status" className={`rounded border p-3 text-sm ${error ? 'border-red-800 bg-red-950/30 text-red-200' : 'border-emerald-800 bg-emerald-950/30 text-emerald-200'}`}>{value}</div>;
 }
 
 export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: CallingWorkspace }) {
-  const [workspace, setWorkspace] = useState<CallingWorkspace>(initialWorkspace);
-  const [recipientName, setRecipientName] = useState('Himanshu');
-  const [phoneNumber, setPhoneNumber] = useState('');
-  const [insuranceInterest, setInsuranceInterest] = useState('Auto and property insurance');
-  const [confirmation, setConfirmation] = useState('');
+  const [workspace, setWorkspace] = useState(initialWorkspace);
+  const [tab, setTab] = useState<Tab>('overview');
+  const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState('');
   const [error, setError] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [hasUnpublishedScriptChanges, setHasUnpublishedScriptChanges] = useState(Boolean(initialWorkspace.script_studio?.current_draft));
-  const [readiness, setReadiness] = useState<InternalTestReadiness>({ ready: false, blockers: [], checks: [] });
-  const [selectedAttemptId, setSelectedAttemptId] = useState<string | null>(null);
+  const [file, setFile] = useState<File | null>(null);
+  const [profileId, setProfileId] = useState(initialWorkspace.script_studio?.consent_source_profiles?.[0]?.id || '');
+  const [dryRun, setDryRun] = useState<any>(null);
+  const [showStart, setShowStart] = useState(false);
+  const [selectedResult, setSelectedResult] = useState<QueueItem | null>(null);
+  const [dailyLimit, setDailyLimit] = useState(initialWorkspace.settings?.daily_call_limit || 20);
+  const [concurrency, setConcurrency] = useState(initialWorkspace.settings?.concurrent_call_limit || 1);
+  const [profile, setProfile] = useState({
+    name: '', organization_represented: 'Allstate', approved_consent_language: '',
+    organization_authorized: false, automated_call_permission: false,
+    consent_proof_method: '', source_approval_evidence: '', approval_date: '',
+    expires_at: '', default_province: 'Ontario', default_timezone: 'America/Toronto',
+  });
 
   async function refresh() {
-    const result = await api('/calling/allstate');
-    setWorkspace(result);
+    const next = await api('/calling/allstate');
+    setWorkspace(next);
+    if (!profileId && next.script_studio?.consent_source_profiles?.[0]?.id) setProfileId(next.script_studio.consent_source_profiles[0].id);
   }
 
   useEffect(() => {
-    const interval = window.setInterval(() => {
-      void refresh().catch((err) => console.warn('Calling refresh failed', err));
-    }, 10000);
+    const interval = window.setInterval(() => void refresh().catch((reason) => console.warn('Calling refresh failed', reason)), 10000);
     return () => window.clearInterval(interval);
   }, []);
 
-  const localPhoneValid = /^\+1[2-9]\d{9}$/.test(phoneNumber.trim());
-  const canPlaceCall = Boolean(readiness.ready && !busy);
-  const blockers = useMemo(() => workspace.health?.blockers || [], [workspace.health]);
-  const warnings = workspace.warnings || [];
-  const preview = workspace.preview || {};
-  const livePreview = workspace.script_studio?.live_retell_preview || {};
-  const selectedAttempt = (workspace.attempts || []).find((attempt) => attempt.id === selectedAttemptId) || null;
-
-  useEffect(() => {
-    const timer = window.setTimeout(() => {
-      const params = new URLSearchParams({
-        phone_number: phoneNumber,
-        confirmation_text: confirmation,
-        has_unpublished_changes: String(hasUnpublishedScriptChanges),
-      });
-      void api(`/calling/allstate/internal-test-readiness?${params.toString()}`)
-        .then((result) => setReadiness(normalizeReadiness(result)))
-        .catch((err) => {
-          console.error('Internal-test readiness failed', err);
-          setReadiness({
-            ready: false,
-            blockers: [{ code: 'READINESS_UNAVAILABLE', message: err?.message || 'Readiness could not be evaluated.' }],
-            checks: [],
-          });
-        });
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, [phoneNumber, confirmation, hasUnpublishedScriptChanges, workspace.script_studio?.published_version?.id]);
-
-  async function allowNumber() {
-    setBusy(true);
-    setError('');
-    setMessage('');
+  async function perform(action: () => Promise<any>, success: string) {
+    setBusy(true); setError(''); setMessage('');
     try {
-      await api('/calling/allstate/internal-test-number', {
-        method: 'POST',
-        body: JSON.stringify({ phone_number: phoneNumber, allow: true }),
-      });
-      setMessage('Internal test number allowlisted.');
+      const result = await action();
+      setMessage(success);
       await refresh();
-    } catch (err: any) {
-      setError(err?.message || 'Could not allowlist number');
+      return result;
+    } catch (reason: any) {
+      console.error('Calling action failed', reason);
+      setError(reason?.message || 'Action failed');
+      return null;
     } finally {
       setBusy(false);
     }
   }
 
-  async function placeCall() {
-    setBusy(true);
-    setError('');
-    setMessage('');
-    try {
-      const result = await api('/calling/allstate/internal-test-call', {
-        method: 'POST',
-        body: JSON.stringify({
-          recipient_name: recipientName,
-          phone_number: phoneNumber,
-          insurance_interest: insuranceInterest,
-          booking_timezone: 'America/Toronto',
-          confirmation_text: confirmation,
-          has_unpublished_changes: hasUnpublishedScriptChanges,
-        }),
-      });
-      setMessage(`Retell call created: ${result.retell_call_id}`);
-      await refresh();
-    } catch (err: any) {
-      setError(err?.message || 'Call blocked');
-    } finally {
-      setBusy(false);
-    }
+  async function upload() {
+    if (!file || !profileId) { setError('Select a Consent Source and CSV file.'); return; }
+    const body = new FormData();
+    body.append('profile_id', profileId); body.append('file', file);
+    await perform(() => api('/calling/allstate/contacts/upload', { method: 'POST', body }), 'Contacts uploaded and validated.');
   }
+
+  async function runDryRun() {
+    const result = await perform(() => api('/calling/allstate/dry-run', { method: 'POST' }), 'Dry run completed. No calls were placed.');
+    if (result) setDryRun(result.dry_run);
+  }
+
+  async function campaignAction(action: 'pause' | 'resume' | 'stop') {
+    await perform(() => api(`/calling/allstate/campaign/${action}`, { method: 'POST' }), `Campaign ${action} succeeded.`);
+  }
+
+  async function startCampaign() {
+    const result = await perform(() => api('/calling/allstate/campaign/start', {
+      method: 'POST', body: JSON.stringify({ confirmation: workspace.readiness?.confirmation_required || 'START APPROVED CALLING CAMPAIGN' }),
+    }), 'Approved calling campaign started.');
+    if (result) setShowStart(false);
+  }
+
+  async function saveLimits() {
+    await perform(() => api('/calling/allstate/campaign/settings', {
+      method: 'PATCH', body: JSON.stringify({ daily_call_limit: dailyLimit, concurrent_call_limit: concurrency }),
+    }), 'Calling limits saved.');
+  }
+
+  async function saveProfile() {
+    const result = await perform(() => api('/calling/allstate/consent-source-profiles', {
+      method: 'POST', body: JSON.stringify(profile),
+    }), 'Consent Source saved.');
+    if (result?.profile?.id) setProfileId(result.profile.id);
+  }
+
+  const calling: CallingState = workspace.calling || { status: 'not_started', progress: { completed: 0, total: 0, queued: 0, calling: 0 }, today: { attempts: 0, answered: 0, appointments: 0, callbacks: 0, dnc: 0, no_answer: 0 }, queue_items: [], callbacks: [], cost_today: 0, average_cost: 0 };
+  const readiness: Readiness = workspace.readiness || { ready: false, checks: [], blockers: [{ code: 'workspace', label: 'Calling workspace' }], eligible_contacts: 0, calling_now: false, daily_limit: 20, concurrency: 1, confirmation_required: 'START APPROVED CALLING CAMPAIGN' };
+  const campaignStatus = calling.status || workspace.settings?.campaign_status || 'not_started';
+  const sourceProfiles = workspace.script_studio?.consent_source_profiles || [];
+  const published = workspace.script_studio?.published_version;
+  const blockedReasonRows = useMemo(() => Object.entries(workspace.latest_import?.reason_counts || {}).sort((a: any, b: any) => b[1] - a[1]), [workspace.latest_import]);
 
   return (
-    <div className="space-y-5">
-      <section className="card">
-        <div className="flex flex-wrap items-start justify-between gap-3">
-          <div>
-            <p className="text-sm text-zinc-500">Sales Campaign &gt; Channels &gt; Calling</p>
-            <h1 className="text-2xl font-semibold">Calling Channel Workspace</h1>
-            <p className="text-sm text-zinc-400">Internal tests and individually approved consented-lead pilot controls. Automatic prospect calling, batch calling, queueing and schedules remain disabled.</p>
-          </div>
-          <div className="rounded border border-zinc-800 px-3 py-2 text-sm">
-            <div>From: <span className="text-zinc-100">{workspace.settings?.from_number || 'not configured'}</span></div>
-            <div>Agent: <span className="text-zinc-100">{workspace.health?.agent_name || workspace.settings?.provider_agent_id || 'not configured'}</span></div>
-          </div>
-        </div>
-        {blockers.length ? (
-          <div className="mt-4 rounded border border-amber-800 bg-amber-950/30 p-3 text-sm text-amber-200">
-            <div className="font-medium">Current blockers</div>
-            <ul className="mt-2 list-disc pl-5">{blockers.map((item) => <li key={item}>{item}</li>)}</ul>
-          </div>
-        ) : null}
-        {warnings.length ? (
-          <div className="mt-4 rounded border border-red-800 bg-red-950/30 p-3 text-sm text-red-200">
-            <div className="font-medium">Assignment warnings</div>
-            <ul className="mt-2 list-disc pl-5">{warnings.map((item) => <li key={item}>{item}</li>)}</ul>
-          </div>
-        ) : null}
-      </section>
-
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4" aria-label="Provider status">
-        <CheckRow label="Retell API authenticated" ok={workspace.health?.api_authenticated} />
-        <CheckRow label="Voice agent configured" ok={workspace.health?.agent_exists} />
-        <CheckRow label="Conversation Flow active" ok={workspace.health?.response_engine?.type === 'conversation-flow'} />
-        <CheckRow label="Legacy agent preserved" ok={workspace.health?.legacy_agent_id_configured && workspace.health?.legacy_agent_exists} />
-        <CheckRow label="Outbound number assigned" ok={workspace.health?.outbound_agent_correctly_assigned} />
-        <CheckRow label="Webhook signature ready" ok={workspace.health?.webhook_signature_key_configured} />
-        <CheckRow label="Tool token configured" ok={workspace.health?.tool_token_configured} />
-        <CheckRow label="Internal test enabled" ok={workspace.settings?.internal_test_enabled} />
-        <CheckRow label="Prospect calling disabled" ok={!workspace.settings?.prospect_calling_enabled} />
-        <CheckRow label="Batch queue disabled" ok={!workspace.settings?.automated_queue_enabled} />
-      </section>
-
-      <CallScriptStudio studio={workspace.script_studio} refresh={refresh} onDirtyChange={setHasUnpublishedScriptChanges} />
-
-      <section className="card">
-        <h2 className="text-lg font-semibold">LIVE RETELL PREVIEW</h2>
-        <div className="mt-3 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          <SectionCard title="Expected agent"><span className="font-mono text-xs text-zinc-200">{preview.expected_agent_name || workspace.health?.agent_name || '-'}</span></SectionCard>
-          <SectionCard title="Agent ID / version"><span className="font-mono text-xs text-zinc-200">{workspace.health?.agent_id || preview.override_agent_id || '-'} / {livePreview.agent_version ?? workspace.health?.configured_agent_version ?? preview.override_agent_version ?? workspace.health?.agent_version ?? '-'}</span></SectionCard>
-          <SectionCard title="Provider health">{workspace.health?.internal_test_ready ? 'Internal test ready' : 'Blocked'}</SectionCard>
-          <SectionCard title="Recording disclosure">{preview.recording_disclosure_enabled ? 'Enabled' : 'Disabled'}</SectionCard>
-          <SectionCard title="Voice tuning">{preview.voice?.voice_name || workspace.health?.voice_id || '-'} / responsiveness {preview.voice?.responsiveness ?? workspace.health?.responsiveness ?? '-'}</SectionCard>
-          <SectionCard title="Ambient sound">{preview.voice?.ambient_sound || 'NONE'}</SectionCard>
-        </div>
-        <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
-          <div className="text-zinc-500">Internal-test opening</div>
-          <p className="mt-1 text-zinc-200">{livePreview.opening_internal || preview.begin_message || '-'}</p>
-        </div>
-        <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
-          <div className="text-zinc-500">Consented-prospect opening</div>
-          <p className="mt-1 text-zinc-200">{livePreview.opening_consented || preview.consented_prospect_begin_message || '-'}</p>
-        </div>
-        <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
-          <div className="text-zinc-500">Recording/transcription disclosure</div>
-          <p className="mt-1 text-zinc-200">{preview.recording_disclosure_enabled ? preview.recording_disclosure : 'Not announced because recording/transcription disclosure is disabled.'}</p>
-        </div>
-        <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
-          <div className="text-zinc-500">Business purpose</div>
-          <p className="mt-1 text-zinc-200">{livePreview.purpose_statement || preview.business_purpose || '-'}</p>
-        </div>
-        <details className="mt-3 rounded border border-zinc-800 p-3">
-          <summary className="cursor-pointer text-sm font-semibold">Voice, pronunciation and dynamic variables</summary>
-          <div className="mt-3 grid gap-2 md:grid-cols-2">
-            <div className="text-xs text-zinc-300">Interruption sensitivity: {preview.voice?.interruption_sensitivity ?? workspace.health?.interruption_sensitivity ?? '-'}</div>
-            <div className="text-xs text-zinc-300">Backchanneling: {preview.voice?.enable_backchannel ? 'Enabled' : 'Disabled'}</div>
-            {Object.entries(preview.voice?.pronunciation_guidance || {}).map(([word, guide]) => (
-              <div className="rounded border border-zinc-900 p-2 text-xs" key={word}>
-                <div className="font-medium text-zinc-300">{word}</div>
-                <div className="text-zinc-500">{guide}</div>
-              </div>
-            ))}
-            {Object.entries(preview.dynamic_variables || {}).map(([key, value]) => (
-              <div className="rounded border border-zinc-900 p-2 text-xs" key={key}>
-                <div className="font-mono text-zinc-500">{key}</div>
-                <div className="text-zinc-200">{value}</div>
-              </div>
-            ))}
-          </div>
-          {preview.missing_dynamic_variables?.length ? <div className="mt-3 text-sm text-red-300">Missing: {preview.missing_dynamic_variables.join(', ')}</div> : null}
-        </details>
-      </section>
-
-      <section className="card">
-        <h2 className="text-lg font-semibold">Internal Test</h2>
-        <p className="mt-1 text-sm text-zinc-400">Use only your own approved test number. The exact confirmation is required before Voryx asks Retell to place a real phone call.</p>
-        <div className="mt-4 grid gap-3 md:grid-cols-2">
-          <label className="space-y-1 text-sm">Test recipient name<input className="input" value={recipientName} onChange={(event) => setRecipientName(event.target.value)} /></label>
-          <label className="space-y-1 text-sm" htmlFor="internal-test-phone">Test phone number<input id="internal-test-phone" className="input" aria-invalid={readiness.blockers.some((item) => item.field === 'phone_number') ? 'true' : 'false'} aria-describedby="internal-test-phone-errors" placeholder="+14165551234" value={phoneNumber} onChange={(event) => setPhoneNumber(event.target.value)} />{readiness.blockers.filter((item) => item.field === 'phone_number').length ? <span id="internal-test-phone-errors" className="block text-xs text-red-300">{readiness.blockers.filter((item) => item.field === 'phone_number').map((item) => item.message).join(' ')}</span> : null}</label>
-          <label className="space-y-1 text-sm">Insurance interest<input className="input" value={insuranceInterest} onChange={(event) => setInsuranceInterest(event.target.value)} /></label>
-          <label className="space-y-1 text-sm" htmlFor="internal-test-confirmation">Confirmation<input id="internal-test-confirmation" className="input" aria-invalid={readiness.blockers.some((item) => item.field === 'confirmation_text') ? 'true' : 'false'} aria-describedby="internal-test-confirmation-errors" placeholder={workspace.confirmation_required} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} />{readiness.blockers.filter((item) => item.field === 'confirmation_text').length ? <span id="internal-test-confirmation-errors" className="block text-xs text-red-300">{readiness.blockers.filter((item) => item.field === 'confirmation_text').map((item) => item.message).join(' ')}</span> : null}</label>
-        </div>
-        <div className="mt-4 grid gap-2 md:grid-cols-2">
-          {(readiness.checks || []).map((item) => <div className="rounded border border-zinc-800 px-3 py-2 text-sm" key={item.code}><div className="flex items-start justify-between gap-3"><span>{item.label}</span><span className={item.ready ? 'text-emerald-300' : 'text-red-300'}>{item.ready ? 'Ready' : `Blocked — ${item.message}`}</span></div></div>)}
-        </div>
-        <div className="mt-4 space-y-2">
-          <button type="button" className="btn" disabled={!canPlaceCall} aria-describedby="internal-test-button-reasons" title={readiness.ready ? 'Ready to place one internal test call.' : readiness.blockers.map((item) => item.message).join(' ')} onClick={() => void placeCall()}>Place internal test call</button>
-          <div id="internal-test-button-reasons" className="text-sm text-zinc-400">{busy ? 'One internal test request is in progress.' : readiness.ready ? 'Ready. The valid number will be allowlisted atomically and only one call will be requested.' : readiness.blockers.map((item) => item.message).join(' ') || 'Checking readiness.'}</div>
-        </div>
-        <details className="mt-3 rounded border border-zinc-800 p-3">
-          <summary className="cursor-pointer text-sm font-semibold">Advanced internal-test controls</summary>
-          <button type="button" className="btn-secondary mt-3" disabled={!localPhoneValid || busy} aria-describedby="allowlist-only-reason" title={!localPhoneValid ? 'Enter a valid +1 phone number first.' : 'Add this number without placing a call.'} onClick={() => void allowNumber()}>Allowlist internal test number only</button>
-          <div id="allowlist-only-reason" className="mt-2 text-xs text-zinc-500">{!localPhoneValid ? 'Enter a valid +1 phone number first.' : 'This advanced action updates only the internal-test allowlist.'}</div>
-        </details>
-        <div className="mt-3 text-xs text-zinc-500">Allowlisted numbers: {(workspace.settings?.internal_test_numbers_masked || []).join(', ') || 'none'}</div>
-        {message ? <div className="mt-3 rounded border border-emerald-800 bg-emerald-950/30 p-3 text-sm text-emerald-200">{message}</div> : null}
-        {error ? <div className="mt-3 rounded border border-red-800 bg-red-950/30 p-3 text-sm text-red-200">{error}</div> : null}
-      </section>
-
-      <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-        <SectionCard title="Eligible leads">Phone-ready leads require exact-number automated-call consent, proof, DNCL, DNC, calling-window and script approval. Current ready count: {workspace.script_studio?.eligible_lead_count || 0}.</SectionCard>
-        <SectionCard title="Pilot approvals">Automatic queue and schedules remain disabled. Individually approved entries: {(workspace.script_studio?.pilot_queue || []).filter((item: any) => item.status === 'approved').length}.</SectionCard>
-        <SectionCard title="Conversation flow">Ava uses a structured Allstate sales flow with explicit renewal, objection, callback, appointment, disclosure and DNC stages.</SectionCard>
-        <SectionCard title="Consent and compliance">Prospect calling is disabled until consent, DNC, calling window and provider checks pass.</SectionCard>
-      </section>
-
-      <section className="card">
-        <div className="flex items-center justify-between gap-3">
-          <div><h2 className="text-lg font-semibold">Call History</h2><p className="text-xs text-zinc-500">Campaign usage shown: {money(workspace.campaign_cost?.amount, workspace.campaign_cost?.currency)} ({workspace.campaign_cost?.scope || 'stored calls'})</p></div>
-          <button type="button" className="btn-secondary text-xs" onClick={() => void refresh()}>Refresh</button>
-        </div>
-        <div className="mt-3 table-wrap">
-          <table className="ops-table">
-            <thead><tr><th>Timestamp</th><th>Lead/test recipient</th><th>Status</th><th>Duration</th><th>Cost</th><th>Disposition</th><th>Appointment</th><th>Provider</th><th>Action</th></tr></thead>
-            <tbody>
-              {(workspace.attempts || []).map((attempt) => (
-                <tr key={attempt.id}>
-                  <td><LocalTime value={attempt.requested_at} /></td>
-                  <td>{attempt.to_number_masked || '-'}</td>
-                  <td>{attempt.status}</td>
-                  <td>{attempt.duration_seconds ? `${attempt.duration_seconds}s` : '-'}</td>
-                  <td><span title={attempt.cost?.label}>{money(attempt.cost?.amount, attempt.cost?.currency)}</span></td>
-                  <td>{attempt.disposition?.disposition || attempt.termination_reason || '-'}</td>
-                  <td>{attempt.appointments?.length ? 'Requested' : '-'}</td>
-                  <td>{attempt.provider_call_id ? 'Retell' : '-'}</td>
-                  <td><button type="button" className="btn-secondary text-xs" onClick={() => setSelectedAttemptId(attempt.id)}>Details</button></td>
-                </tr>
-              ))}
-              {!workspace.attempts?.length ? <tr><td colSpan={9} className="text-zinc-400">No call attempts yet</td></tr> : null}
-            </tbody>
-          </table>
+    <div className="space-y-4" data-voryx-calling-workspace>
+      <section className="border-b border-zinc-800 pb-4">
+        <p className="text-sm text-zinc-500">Allstate / Calling</p>
+        <div className="mt-1 flex flex-wrap items-center justify-between gap-3">
+          <div><h1 className="text-2xl font-semibold">AI Calling</h1><p className="text-sm text-zinc-400">Upload approved contacts, validate them, and run the campaign.</p></div>
+          <span className={`text-sm font-medium ${campaignStatus === 'running' ? 'text-emerald-300' : 'text-zinc-300'}`}>{statusLabel(campaignStatus)}</span>
         </div>
       </section>
 
-      {selectedAttempt ? (
-        <section className="card" role="dialog" aria-label="Call details">
-          <div className="flex flex-wrap items-start justify-between gap-3">
-            <div>
-              <h3 className="text-lg font-semibold">Call details</h3>
-              <p className="text-sm text-zinc-400">Status: {selectedAttempt.status} / To: {selectedAttempt.to_number_masked}</p>
-            </div>
-            <div className="flex gap-2">
-              {selectedAttempt.transcript?.recording_url ? <a className="btn-secondary text-xs" href={selectedAttempt.transcript.recording_url}>Recording</a> : null}
-              <button type="button" className="btn-secondary text-xs" onClick={() => setSelectedAttemptId(null)}>Close</button>
-            </div>
-          </div>
-          <div className="mt-3 grid gap-3 md:grid-cols-3">
-            <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Started</div><LocalTime value={selectedAttempt.started_at} /></div>
-            <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Ended</div><LocalTime value={selectedAttempt.ended_at} /></div>
-            <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Disposition</div>{selectedAttempt.disposition?.disposition || '-'}</div>
-            <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Provider cost</div>{money(selectedAttempt.cost?.amount, selectedAttempt.cost?.currency)} <span className="text-xs text-zinc-500">{selectedAttempt.cost?.final ? 'final' : 'estimated'}</span></div>
-            <div className="rounded border border-zinc-800 p-3 text-sm"><div className="text-zinc-500">Cost / connected minute</div>{money(selectedAttempt.cost?.per_connected_minute, selectedAttempt.cost?.currency)}</div>
-          </div>
-          {selectedAttempt.transcript?.summary ? <p className="mt-3 text-sm text-zinc-300">{selectedAttempt.transcript.summary}</p> : null}
-          <div className="mt-3 rounded border border-zinc-800 p-3 text-sm">
-            <div className="flex items-center justify-between"><span className="font-semibold">Sales quality</span><span className={(selectedAttempt.transcript?.sales_score || 0) >= 8 ? 'text-emerald-300' : 'text-amber-300'}>{selectedAttempt.transcript?.sales_score ?? '-'} / 10</span></div>
-            <div className="mt-2 grid gap-2 md:grid-cols-2">
-              {Object.entries(selectedAttempt.transcript?.sales_score_details?.stage_scores || {}).map(([stage, passed]) => <div key={stage} className="flex justify-between rounded border border-zinc-900 px-2 py-1"><span>{stage.replaceAll('_', ' ')}</span><span>{passed ? 'Pass' : 'Missed'}</span></div>)}
-            </div>
-            {selectedAttempt.transcript?.sales_score_details?.missed_questions?.length ? <p className="mt-2 text-amber-300">Missed: {selectedAttempt.transcript.sales_score_details.missed_questions.join(', ')}</p> : null}
-            {selectedAttempt.transcript?.sales_score_details?.critical_failures?.length ? <p className="mt-2 text-red-300">Critical: {selectedAttempt.transcript.sales_score_details.critical_failures.join(', ')}</p> : null}
-            <p className="mt-2 text-zinc-400">Objection: {selectedAttempt.transcript?.sales_score_details?.objection_detected || 'none'} / Close attempted: {selectedAttempt.transcript?.sales_score_details?.close_attempted ? 'yes' : 'no'}</p>
-            <p className="mt-1 text-zinc-400">{selectedAttempt.transcript?.sales_score_details?.improvement_recommendation || 'No score available.'}</p>
-          </div>
-          <details className="mt-3 rounded border border-zinc-800 p-3">
-            <summary className="cursor-pointer text-sm font-semibold">Transcript and speaker segments</summary>
-            {selectedAttempt.transcript?.transcript ? <pre className="mt-3 max-h-72 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-300">{selectedAttempt.transcript.transcript}</pre> : <p className="mt-2 text-sm text-zinc-400">No transcript stored.</p>}
-          </details>
-          <details className="mt-3 rounded border border-zinc-800 p-3">
-            <summary className="cursor-pointer text-sm font-semibold">Objections, extracted fields and DNC</summary>
-            <pre className="mt-3 max-h-72 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-300">{JSON.stringify({
-              objections: selectedAttempt.transcript?.objections || [],
-              extracted_fields: selectedAttempt.transcript?.extracted_fields || {},
-              do_not_call_requested: selectedAttempt.disposition?.do_not_call_requested || false,
-              appointment: selectedAttempt.appointments || [],
-            }, null, 2)}</pre>
-          </details>
-          <details className="mt-3 rounded border border-zinc-800 p-3">
-            <summary className="cursor-pointer text-sm font-semibold">Advanced technical details</summary>
-            <pre className="mt-3 max-h-72 overflow-auto rounded border border-zinc-800 bg-zinc-950 p-3 text-xs text-zinc-300">{JSON.stringify({
-              retell_call_id: selectedAttempt.provider_call_id,
-              provider: 'retell',
-              agent_id: selectedAttempt.provider_agent_id,
-              agent_version: selectedAttempt.provider_agent_version,
-              voice: selectedAttempt.cost?.voice,
-              llm: selectedAttempt.cost?.llm,
-              begin_message: workspace.preview?.begin_message,
-              termination_reason: selectedAttempt.termination_reason,
-              cost: selectedAttempt.cost,
-              provider_receipt: selectedAttempt.provider_receipt,
-            }, null, 2)}</pre>
-          </details>
+      <nav className="flex gap-1 overflow-x-auto border-b border-zinc-800" aria-label="Calling sections">
+        {tabs.map((item) => <button key={item.id} type="button" className={`border-b-2 px-3 py-2 text-sm ${tab === item.id ? 'border-emerald-500 text-zinc-100' : 'border-transparent text-zinc-400'}`} onClick={() => setTab(item.id)}>{item.label}</button>)}
+      </nav>
+
+      <Message value={message} /><Message value={error} error />
+
+      {tab === 'overview' ? <>
+        <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
+          <Metric label="Calling provider" value={workspace.health?.api_authenticated ? 'Connected' : 'Blocked'} />
+          <Metric label="Phone number" value="+1 437-747-5010" />
+          <Metric label="Script" value={published?.version_number === 8 ? 'Ready' : 'Blocked'} />
+          <Metric label="Compliance" value={(workspace.script_studio?.compliance_blockers || []).length ? 'Blocked' : 'Ready'} />
+          <Metric label="Contacts ready" value={readiness.eligible_contacts} />
+          <Metric label="Calls today" value={calling.today.attempts || 0} />
+          <Metric label="Appointments" value={calling.today.appointments || 0} />
+          <Metric label="Callbacks" value={calling.today.callbacks || 0} />
         </section>
-      ) : null}
+        <section className="card" data-voryx-readiness>
+          <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">{readiness.ready ? 'READY TO CALL' : 'NOT READY'}</h2><p className="text-sm text-zinc-400">Only approved contacts that pass every control can enter the queue.</p></div><button type="button" className="btn-secondary" onClick={() => setTab(readiness.blockers[0]?.code === 'consent_source' ? 'settings' : 'contacts')}>{readiness.ready ? 'View contacts' : `Fix ${readiness.blockers[0]?.label || 'readiness'}`}</button></div>
+          <div className="mt-4 grid gap-2 md:grid-cols-2 xl:grid-cols-3">{(readiness.ready ? readiness.checks : readiness.checks.filter((check) => !check.ready)).map((check) => <div key={check.code} className="flex items-center justify-between border-b border-zinc-800 py-2 text-sm"><span>{check.label}</span><span className={check.ready ? 'text-emerald-300' : 'text-amber-300'}>{check.ready ? 'Ready' : 'Blocked'}</span></div>)}</div>
+          <div className="mt-4 grid gap-3 md:grid-cols-3"><Metric label="Daily limit" value={readiness.daily_limit} /><Metric label="Concurrency" value={readiness.concurrency} /><Metric label="Calling now" value={readiness.calling_now ? 'YES' : 'NO'} /></div>
+          {!readiness.calling_now && readiness.next_calling_window ? <p className="mt-3 text-sm text-zinc-400">Next calling window: <LocalTime value={readiness.next_calling_window} /></p> : null}
+        </section>
+      </> : null}
+
+      {tab === 'contacts' ? <>
+        <section className="card" data-voryx-contact-upload>
+          <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">Contacts</h2><p className="text-sm text-zinc-400">Required: first name, phone number, consent timestamp and consent reference.</p></div><button type="button" className="btn-secondary" onClick={() => void downloadApi('/calling/allstate/consented-leads/template.csv?mode=simple', 'allstate-calling-contacts.csv')}>Download Template</button></div>
+          <div className="mt-4 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
+            <label className="text-sm">Consent Source<select data-voryx-consent-source className="input mt-1" value={profileId} onChange={(event) => setProfileId(event.target.value)}><option value="">Select source</option>{sourceProfiles.map((item: any) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
+            <label className="text-sm">CSV file<input className="input mt-1" type="file" accept=".csv,text/csv" onChange={(event) => setFile(event.target.files?.[0] || null)} /></label>
+            <button type="button" className="btn self-end" disabled={busy || !file || !profileId} onClick={() => void upload()}>Upload Contacts</button>
+          </div>
+        </section>
+        {workspace.latest_import ? <section className="card" data-voryx-import-review>
+          <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-lg font-semibold">Import review</h2><p className="text-sm text-zinc-400">{workspace.latest_import.filename} / <LocalTime value={workspace.latest_import.created_at} /></p></div><button type="button" className="btn-secondary" disabled={!workspace.latest_import.blocked && !workspace.latest_import.needs_review} onClick={() => void downloadApi(`/calling/allstate/contacts/imports/${workspace.latest_import?.id}/blocked.csv`, 'allstate-blocked-contacts.csv')}>Download blocked rows</button></div>
+          <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4"><Metric label="Uploaded" value={workspace.latest_import.uploaded} /><Metric label="Ready for AI call" value={workspace.latest_import.ready} /><Metric label="Needs review" value={workspace.latest_import.needs_review} /><Metric label="Blocked" value={workspace.latest_import.blocked} /></div>
+          {blockedReasonRows.length ? <div className="mt-4"><h3 className="text-sm font-semibold">Grouped reasons</h3><div className="mt-2 grid gap-2 md:grid-cols-2">{blockedReasonRows.map(([code, count]: any) => <div className="flex justify-between border-b border-zinc-800 py-2 text-sm" key={code}><span>{statusLabel(code)}</span><span>{count}</span></div>)}</div></div> : null}
+          <div className="mt-4 flex flex-wrap gap-2"><button type="button" className="btn-secondary" disabled={busy} onClick={() => void runDryRun()}>DRY RUN MY CONTACTS</button>{readiness.ready ? <button type="button" className="btn" onClick={() => { setTab('calling'); setShowStart(true); }}>Start calling {readiness.eligible_contacts} eligible contacts</button> : null}</div>
+        </section> : <section className="card text-sm text-zinc-400">No contacts uploaded yet.</section>}
+        {dryRun ? <section className="card border-emerald-900"><h2 className="text-lg font-semibold">Dry run result</h2><p className="text-sm text-emerald-300">No telephone activity occurred.</p><div className="mt-3 grid gap-3 md:grid-cols-3"><Metric label="Uploaded" value={dryRun.uploaded} /><Metric label="Would call" value={dryRun.would_call} /><Metric label="Would block" value={dryRun.would_block} /><Metric label="Would call today" value={dryRun.would_call_today} /><Metric label="First call" value={<LocalTime value={dryRun.first_call} />} /><Metric label="Estimated cost today" value={`${money(dryRun.estimated_cost_usd.low)}–${money(dryRun.estimated_cost_usd.high)}`} /></div></section> : null}
+      </> : null}
+
+      {tab === 'calling' ? <>
+        <section className="card" data-voryx-campaign-controls>
+          <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-lg font-semibold">Allstate Quote Appointment Calling</h2><p className="text-sm text-zinc-400">Status: {statusLabel(campaignStatus)}</p></div><div className="flex flex-wrap gap-2">
+            {['not_started', 'stopped', 'completed'].includes(campaignStatus) ? <button type="button" className="btn" disabled={!readiness.ready || busy} onClick={() => setShowStart(true)}>START CALLING</button> : null}
+            {['running', 'waiting_for_window'].includes(campaignStatus) ? <button type="button" className="btn-secondary" disabled={busy} onClick={() => void campaignAction('pause')}>Pause</button> : null}
+            {campaignStatus === 'paused' ? <button type="button" className="btn" disabled={busy} onClick={() => void campaignAction('resume')}>Resume</button> : null}
+            {['running', 'waiting_for_window', 'paused'].includes(campaignStatus) ? <button type="button" className="btn-secondary" disabled={busy} onClick={() => void campaignAction('stop')}>Stop</button> : null}
+          </div></div>
+          <div className="mt-4 grid gap-3 md:grid-cols-4"><Metric label="Progress" value={`${calling.progress.completed} / ${calling.progress.total}`} /><Metric label="Queued" value={calling.progress.queued} /><Metric label="Calling now" value={calling.progress.calling} /><Metric label="Cost today" value={money(calling.cost_today)} /></div>
+          <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4"><Metric label="Attempts" value={calling.today.attempts || 0} /><Metric label="Answered" value={calling.today.answered || 0} /><Metric label="Appointments" value={calling.today.appointments || 0} /><Metric label="Callbacks" value={calling.today.callbacks || 0} /><Metric label="DNC" value={calling.today.dnc || 0} /><Metric label="No answer" value={calling.today.no_answer || 0} /><Metric label="Avg cost/call" value={money(calling.average_cost)} /></div>
+          {campaignStatus === 'waiting_for_window' ? <p className="mt-4 text-sm text-amber-300">Waiting for the next recipient-local calling window. This is not a failure.</p> : null}
+        </section>
+        {showStart ? <section className="card border-emerald-800" role="dialog" aria-label="Start calling confirmation"><h2 className="text-lg font-semibold">Confirm approved calling campaign</h2><div className="mt-3 grid gap-2 text-sm md:grid-cols-2"><div>Ready contacts: {readiness.eligible_contacts}</div><div>Blocked contacts: {(workspace.latest_import?.blocked || 0) + (workspace.latest_import?.needs_review || 0)}</div><div>From number: +14377475010</div><div>Script: v8</div><div>Calling now: {readiness.calling_now ? 'Yes' : 'No, wait for window'}</div><div>Concurrency: {readiness.concurrency}</div><div>Daily limit: {readiness.daily_limit}</div><div>Maximum calls today: {Math.min(readiness.eligible_contacts, readiness.daily_limit)}</div></div><div className="mt-4 flex gap-2"><button type="button" className="btn" disabled={busy} onClick={() => void startCampaign()}>START APPROVED CALLING CAMPAIGN</button><button type="button" className="btn-secondary" onClick={() => setShowStart(false)}>Cancel</button></div></section> : null}
+      </> : null}
+
+      {tab === 'results' ? <section className="card" data-voryx-call-results>
+        <div className="flex items-center justify-between"><div><h2 className="text-lg font-semibold">Results</h2><p className="text-sm text-zinc-400">Appointments, callbacks, DNC and call outcomes update automatically.</p></div><button type="button" className="btn-secondary" onClick={() => void refresh()}>Refresh</button></div>
+        <div className="table-wrap mt-4"><table className="ops-table"><thead><tr><th>Name</th><th>Status</th><th>Call time</th><th>Duration</th><th>Outcome</th><th>Renewal</th><th>Callback</th><th>Appointment</th><th>Sales score</th><th>Cost</th><th>Details</th></tr></thead><tbody>{calling.queue_items.map((item) => <tr key={item.id}><td>{item.name}</td><td>{statusLabel(item.status)}</td><td><LocalTime value={item.started_at || item.created_at} /></td><td>{item.duration_seconds ? `${item.duration_seconds}s` : '-'}</td><td>{statusLabel(item.outcome || item.disposition)}</td><td>{item.renewal_month || '-'}</td><td><LocalTime value={item.callback_at} /></td><td>{item.appointment ? 'Booked' : '-'}</td><td>{item.sales_score ?? '-'}</td><td>{money(item.cost_usd)}</td><td><button type="button" className="btn-secondary text-xs" onClick={() => setSelectedResult(item)}>View</button></td></tr>)}{!calling.queue_items.length ? <tr><td colSpan={11} className="text-zinc-400">No campaign results yet.</td></tr> : null}</tbody></table></div>
+        {selectedResult ? <div className="mt-4 rounded border border-zinc-800 p-4" role="dialog" aria-label="Result details"><div className="flex items-start justify-between"><div><h3 className="font-semibold">{selectedResult.name}</h3><p className="text-sm text-zinc-400">{statusLabel(selectedResult.outcome || selectedResult.status)}</p></div><button className="btn-secondary" type="button" onClick={() => setSelectedResult(null)}>Close</button></div><div className="mt-3 grid gap-3 md:grid-cols-3"><Metric label="Summary" value={selectedResult.summary || '-'} /><Metric label="Callback" value={selectedResult.callback_at ? <LocalTime value={selectedResult.callback_at} /> : '-'} /><Metric label="Appointment" value={selectedResult.appointment ? 'Booked' : '-'} /><Metric label="Sales quality" value={selectedResult.sales_score ?? '-'} /><Metric label="Cost" value={money(selectedResult.cost_usd)} /></div>{selectedResult.error_message ? <p className="mt-3 text-sm text-red-300">{selectedResult.error_message}</p> : null}{selectedResult.recording_url ? <a className="btn-secondary mt-3 inline-block" href={selectedResult.recording_url}>Recording</a> : null}<details className="mt-3 rounded border border-zinc-800 p-3"><summary className="cursor-pointer text-sm font-medium">Transcript</summary><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap text-xs text-zinc-300">{selectedResult.transcript || 'No transcript stored.'}</pre></details><details className="mt-3 rounded border border-zinc-800 p-3"><summary className="cursor-pointer text-sm font-medium">Advanced provider details</summary><pre className="mt-3 overflow-auto text-xs text-zinc-400">{JSON.stringify(selectedResult.advanced || {}, null, 2)}</pre></details></div> : null}
+      </section> : null}
+
+      {tab === 'script' ? <section className="card"><h2 className="text-lg font-semibold">Script</h2><p className="mt-1 text-sm text-zinc-400">The approved Allstate conversation is live and ready.</p><div className="mt-4 max-w-sm"><Metric label="Script status" value={published ? 'Ready' : 'Blocked'} /></div><details className="mt-4 rounded border border-zinc-800 p-3"><summary className="cursor-pointer text-sm font-semibold">Advanced Script Studio</summary><div className="mt-4"><CallScriptStudio studio={workspace.script_studio} refresh={refresh} /></div></details></section> : null}
+
+      {tab === 'settings' ? <>
+        <section className="card"><h2 className="text-lg font-semibold">Calling limits</h2><p className="text-sm text-zinc-400">Start conservatively. Automatic retries remain off.</p><div className="mt-4 grid gap-3 md:grid-cols-3"><label className="text-sm">Daily call limit<input className="input mt-1" type="number" min={1} max={500} value={dailyLimit} onChange={(event) => setDailyLimit(Number(event.target.value))} /></label><label className="text-sm">Concurrency<select className="input mt-1" value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))}>{[1, 2, 3, 5].map((value) => <option key={value} value={value}>{value}</option>)}</select></label><button type="button" className="btn self-end" disabled={busy} onClick={() => void saveLimits()}>Save limits</button></div></section>
+        <section className="card"><h2 className="text-lg font-semibold">Consent Source</h2><p className="text-sm text-zinc-400">Configure each approved lead source once. Missing permission is never inferred.</p><div className="mt-4 grid gap-3 md:grid-cols-2"><label className="text-sm">Source name<input className="input mt-1" value={profile.name} onChange={(event) => setProfile({ ...profile, name: event.target.value })} /></label><label className="text-sm">Organization represented<input className="input mt-1" value={profile.organization_represented} onChange={(event) => setProfile({ ...profile, organization_represented: event.target.value })} /></label><label className="text-sm md:col-span-2">Exact consent wording<textarea className="input mt-1 min-h-24" value={profile.approved_consent_language} onChange={(event) => setProfile({ ...profile, approved_consent_language: event.target.value })} /></label><label className="text-sm">Proof method<input className="input mt-1" value={profile.consent_proof_method} onChange={(event) => setProfile({ ...profile, consent_proof_method: event.target.value })} /></label><label className="text-sm">Approval evidence<input className="input mt-1" value={profile.source_approval_evidence} onChange={(event) => setProfile({ ...profile, source_approval_evidence: event.target.value })} /></label><label className="text-sm">Effective date<input className="input mt-1" type="datetime-local" value={profile.approval_date} onChange={(event) => setProfile({ ...profile, approval_date: event.target.value })} /></label><label className="text-sm">Expiry (optional)<input className="input mt-1" type="datetime-local" value={profile.expires_at} onChange={(event) => setProfile({ ...profile, expires_at: event.target.value })} /></label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={profile.organization_authorized} onChange={(event) => setProfile({ ...profile, organization_authorized: event.target.checked })} /> Organization is authorized</label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={profile.automated_call_permission} onChange={(event) => setProfile({ ...profile, automated_call_permission: event.target.checked })} /> Automated/synthesized calls permitted</label></div><button type="button" className="btn mt-4" disabled={busy} onClick={() => void saveProfile()}>Save Consent Source</button>{sourceProfiles.length ? <div className="mt-4 text-sm text-zinc-400">Saved sources: {sourceProfiles.map((item: any) => item.name).join(', ')}</div> : null}</section>
+        <details className="card"><summary className="cursor-pointer text-sm font-semibold">Advanced technical details</summary><pre className="mt-4 max-h-96 overflow-auto text-xs text-zinc-400">{JSON.stringify({ baseline: workspace.baseline, health: workspace.health, warnings: workspace.warnings, migration: workspace.agent_migration }, null, 2)}</pre></details>
+      </> : null}
     </div>
   );
 }

@@ -72,18 +72,16 @@ class FrontendRuntimeContractTests(unittest.TestCase):
     def test_calling_panel_renders_backend_readiness_checks_and_blockers(self):
         source = read_frontend("components/AllstateCallingPanel.tsx")
 
-        self.assertIn("/calling/allstate/internal-test-readiness", source)
-        self.assertIn("function normalizeReadiness", source)
-        self.assertIn("READINESS_RESPONSE_INVALID", source)
-        self.assertIn('htmlFor="internal-test-phone"', source)
-        self.assertIn('id="internal-test-phone"', source)
-        self.assertIn('htmlFor="internal-test-confirmation"', source)
-        self.assertIn('id="internal-test-confirmation"', source)
+        self.assertIn("/calling/allstate/contacts/upload", source)
+        self.assertIn("/calling/allstate/dry-run", source)
+        self.assertIn("/calling/allstate/campaign/start", source)
+        self.assertIn("/calling/allstate/campaign/${action}", source)
         self.assertIn("readiness.checks", source)
-        self.assertIn("Blocked —", source)
-        self.assertIn("has_unpublished_changes", source)
-        self.assertIn("<h2 className=\"text-lg font-semibold\">Internal Test</h2>", source)
-        self.assertIn("Advanced internal-test controls", source)
+        self.assertIn("READY TO CALL", source)
+        self.assertIn("DRY RUN MY CONTACTS", source)
+        self.assertIn("START APPROVED CALLING CAMPAIGN", source)
+        self.assertIn("Advanced technical details", source)
+        self.assertNotIn("Place internal test call", source)
 
     def test_publish_does_not_accept_empty_or_unverified_success(self):
         source = read_frontend("components/CallScriptStudio.tsx")

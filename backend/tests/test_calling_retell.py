@@ -241,6 +241,24 @@ class CallingRetellTests(unittest.TestCase):
         self.assertFalse(health['internal_test_ready'])
         self.assertIn('RETELL_AGENT_ID does not match the locked permanent Retell agent', health['blockers'])
 
+    def test_health_reads_the_exact_assigned_agent_version(self):
+        provider = RetellCallingProvider(api_key='test')
+        provider.get_agent = AsyncMock(side_effect=[
+            {'agent_id': 'permanent', 'agent_name': 'Voryx Allstate Quote Appointment Assistant', 'version': 8, 'response_engine': {'type': 'conversation-flow', 'conversation_flow_id': 'flow', 'version': 8}},
+            {'agent_id': 'legacy', 'agent_name': 'Legacy'},
+        ])
+        provider.get_phone_number = AsyncMock(return_value={'inbound_agents': [], 'outbound_agents': [{'agent_id': 'permanent', 'agent_version': 8, 'weight': 1}]})
+        with patch.object(settings, 'retell_agent_id', 'permanent'), \
+             patch.object(settings, 'retell_permanent_agent_id', 'permanent'), \
+             patch.object(settings, 'retell_legacy_agent_id', 'legacy'), \
+             patch.object(settings, 'retell_from_number', '+14377475010'), \
+             patch.object(settings, 'retell_tool_token', 'tool'), \
+             patch.object(settings, 'retell_webhook_api_key', 'webhook'):
+            health = __import__('asyncio').run(provider.health(8))
+        provider.get_agent.assert_any_await('permanent', 8)
+        self.assertEqual(health['response_engine']['version'], 8)
+        self.assertTrue(health['outbound_agent_correctly_assigned'])
+
     def test_successor_health_requires_conversation_flow(self):
         provider = RetellCallingProvider(api_key='test')
         provider.get_agent = AsyncMock(side_effect=[

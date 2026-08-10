@@ -42,6 +42,7 @@ from app.services.calling import (
     normalize_phone,
     valid_us_ca_e164,
 )
+from app.services.calling_eligibility import calling_window, evaluate_calling_lead
 
 PILOT_CONFIRMATION = 'PLACE APPROVED CONSENTED LEAD CALL'
 MAX_PILOT_LEADS = 5
@@ -1741,85 +1742,20 @@ def automatic_system_checks(health: dict, published: CallScriptVersion | None) -
 
 
 def recipient_in_calling_window(timezone: str, now: datetime | None = None) -> tuple[bool, str]:
-    try:
-        zone = ZoneInfo(timezone)
-    except Exception:
-        return False, 'Caller timezone is invalid'
-    instant = now or datetime.now(tz=ZoneInfo('UTC'))
-    if instant.tzinfo is None:
-        instant = instant.replace(tzinfo=ZoneInfo('UTC'))
-    local = instant.astimezone(zone)
-    minute = local.hour * 60 + local.minute
-    if local.weekday() <= 4:
-        allowed = 10 * 60 <= minute < 19 * 60
-    elif local.weekday() == 5:
-        allowed = 10 * 60 + 30 <= minute < 16 * 60
-    else:
-        allowed = False
-    return allowed, f'{local.strftime("%A %Y-%m-%d %H:%M")} {local.tzname()}'
+    allowed, _, label = calling_window(timezone, now=now)
+    return allowed, label
 
 
 def evaluate_lead(db: Session, lead: ConsentedCallingLead, items: list[CallComplianceItem] | None = None, now: datetime | None = None) -> tuple[str, list[str]]:
-    now = now or _now()
-    reasons = []
-    phone = normalize_phone(lead.phone_number)
-    if not valid_us_ca_e164(phone):
-        reasons.append('Invalid US/Canada E.164 phone number')
-    if phone != normalize_phone(lead.consented_number):
-        reasons.append('Called number does not exactly match consented number')
-    if lead.consent_status != 'verified':
-        reasons.append('Consent status is not verified')
-    if not lead.automated_or_synthesized_call_consent:
-        reasons.append('Automated or synthesized call consent is missing')
-    if not lead.organization_authorized:
-        reasons.append('Consent does not document authorization for the identified organization')
-    if not lead.consent_source or not lead.consent_timestamp:
-        reasons.append('Consent source or timestamp is missing')
-    if not lead.consent_text or not lead.consent_proof:
-        reasons.append('Documentary consent text or proof is missing')
-    if lead.consent_withdrawn:
-        reasons.append('Consent was withdrawn')
-    if lead.consent_expiry and lead.consent_expiry <= now:
-        reasons.append('Consent is expired')
-    if lead.dncl_status != 'clear':
-        reasons.append('DNCL review is not clear')
-    if not lead.internal_dnc_clear:
-        reasons.append('Internal DNC review is not clear')
-    if not lead.suppression_clear:
-        reasons.append('Suppression review is not clear')
-    suppression = db.scalar(select(SuppressionEntry).where(
-        SuppressionEntry.company_id == lead.company_id,
-        SuppressionEntry.kind == 'phone',
-        SuppressionEntry.value == phone,
-    ))
-    if suppression:
-        reasons.append('Number is present in Voryx suppression')
-    in_window, local_label = recipient_in_calling_window(lead.timezone, now)
-    if not in_window:
-        reasons.append(f'Outside calling window ({local_label})')
-    published = db.scalar(select(CallScriptVersion).where(
-        CallScriptVersion.campaign_id == lead.campaign_id,
-        CallScriptVersion.status == 'published',
-    ))
-    if not published:
-        reasons.append('Approved published script is required')
-    checklist = items if items is not None else ensure_compliance_items(db)
-    reasons.extend(compliance_blockers(checklist, now))
-    if reasons:
-        if any('Invalid' in reason for reason in reasons):
-            status = 'Invalid number'
-        elif any('DNC' in reason or 'suppression' in reason.lower() for reason in reasons):
-            status = 'DNC blocked'
-        elif any('Outside calling window' in reason for reason in reasons):
-            status = 'Outside calling window'
-        elif any('script' in reason.lower() for reason in reasons):
-            status = 'Script approval required'
-        elif lead.consent_status == 'under_review':
-            status = 'Consent under review'
-        else:
-            status = 'Consent incomplete'
-    else:
-        status = 'Ready for pilot'
+    result = evaluate_calling_lead(db, lead, now=now, require_window=True, legacy_compatible=True)
+    status_map = {
+        'ready': 'Ready for pilot',
+        'review': 'Consent under review',
+        'waiting': 'Outside calling window',
+        'blocked': 'Blocked',
+    }
+    status = status_map[result.classification]
+    reasons = [item.message for item in result.blockers]
     lead.eligibility_status = status
     lead.eligibility_reasons = sorted(set(reasons))
     lead.updated_at = _now()
@@ -1846,6 +1782,7 @@ def lead_payload(lead: ConsentedCallingLead) -> dict:
         'automated_or_synthesized_call_consent': lead.automated_or_synthesized_call_consent,
         'organization_authorized': lead.organization_authorized,
         'consent_proof': lead.consent_proof,
+        'consent_reference': lead.consent_reference,
         'consent_withdrawn': lead.consent_withdrawn,
         'consent_expiry': lead.consent_expiry,
         'renewal_month': lead.renewal_month,
@@ -1885,6 +1822,7 @@ def consent_source_profile_payload(profile: ConsentSourceProfile) -> dict:
     return {
         'id': profile.id,
         'name': profile.name,
+        'organization_represented': profile.organization_represented,
         'approved_consent_language': profile.approved_consent_language,
         'organization_authorized': profile.organization_authorized,
         'automated_call_permission': profile.automated_call_permission,
@@ -1916,6 +1854,7 @@ def create_consent_source_profile(db: Session, payload: dict, user: User) -> Con
     ))
     values = {
         'name': str(payload['name']).strip(),
+        'organization_represented': str(payload.get('organization_represented') or 'Allstate').strip(),
         'approved_consent_language': str(payload['approved_consent_language']).strip(),
         'organization_authorized': _parse_bool(payload.get('organization_authorized')),
         'automated_call_permission': _parse_bool(payload.get('automated_call_permission')),
@@ -1998,6 +1937,7 @@ def preview_simple_consent_rows(
             'automated_or_synthesized_call_consent': profile.automated_call_permission,
             'organization_authorized': profile.organization_authorized,
             'consent_proof': f'{profile.consent_proof_method}: {str(raw.get("consent_reference") or "").strip()}',
+            'consent_reference': str(raw.get('consent_reference') or '').strip(),
             'consent_withdrawn': False,
             'renewal_month': str(raw.get('renewal_month') or '').strip() or None,
             'preferred_call_time': str(raw.get('preferred_call_time') or '').strip() or None,
@@ -2074,6 +2014,7 @@ def import_consented_leads(db: Session, rows: list[dict], user_id: str) -> dict:
                 'automated_or_synthesized_call_consent': _parse_bool(raw.get('automated_or_synthesized_call_consent')),
                 'organization_authorized': _parse_bool(raw.get('organization_authorized')),
                 'consent_proof': str(raw.get('consent_proof')).strip(),
+                'consent_reference': str(raw.get('consent_reference') or raw.get('consent_proof') or '').strip() or None,
                 'consent_withdrawn': _parse_bool(raw.get('consent_withdrawn')),
                 'consent_expiry': _parse_datetime(raw.get('consent_expiry')),
                 'renewal_month': str(raw.get('renewal_month') or '').strip() or None,

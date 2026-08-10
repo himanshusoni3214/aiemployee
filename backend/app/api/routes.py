@@ -108,6 +108,20 @@ from app.services.calling import (
     validate_tool_token,
     valid_us_ca_e164,
 )
+from app.services.calling_campaign import (
+    START_CONFIRMATION,
+    blocked_rows_csv,
+    campaign_readiness,
+    control_campaign,
+    dry_run_contacts,
+    import_batch_payload,
+    primary_csv_template,
+    queue_summary,
+    retry_failed_item,
+    start_campaign,
+    update_campaign_limits,
+    upload_contacts,
+)
 from app.services.call_script_studio import (
     PILOT_CONFIRMATION,
     approve_locked_content,
@@ -2094,6 +2108,14 @@ def _calling_settings_payload(row: CallCampaignSettings) -> dict:
         'transcription_enabled': row.transcription_enabled,
         'call_recording_disclosure_enabled': row.call_recording_disclosure_enabled,
         'appointment_booking_enabled': row.appointment_booking_enabled,
+        'campaign_status': row.campaign_status,
+        'baseline_version': row.baseline_version,
+        'automatic_retry_enabled': row.automatic_retry_enabled,
+        'status_changed_at': row.status_changed_at,
+        'started_at': row.started_at,
+        'paused_at': row.paused_at,
+        'stopped_at': row.stopped_at,
+        'completed_at': row.completed_at,
         'updated_at': row.updated_at,
     }
 
@@ -2159,6 +2181,12 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
         .where(ConsentSourceProfile.campaign_id == ALLSTATE_CAMPAIGN_ID)
         .order_by(ConsentSourceProfile.created_at.desc())
     ).all()
+    latest_import = db.scalar(
+        select(CallContactImportBatch)
+        .where(CallContactImportBatch.campaign_id == ALLSTATE_CAMPAIGN_ID)
+        .order_by(CallContactImportBatch.created_at.desc())
+        .limit(1)
+    )
     consented_leads = db.scalars(
         select(ConsentedCallingLead)
         .where(ConsentedCallingLead.campaign_id == ALLSTATE_CAMPAIGN_ID)
@@ -2189,13 +2217,19 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
         warnings.append('Required dynamic variables are missing')
     if str((health.get('response_engine') or {}).get('type') or '') != 'conversation-flow':
         warnings.append('Published agent is not using the structured Conversation Flow')
+    readiness = campaign_readiness(db, health)
+    queue = queue_summary(db)
     db.commit()
     return {
         'company_id': ALLSTATE_COMPANY_ID,
         'campaign_id': ALLSTATE_CAMPAIGN_ID,
         'confirmation_required': CONVERSATION_FLOW_INTERNAL_CONFIRMATION,
-        'prospect_calling_enabled': False,
+        'prospect_calling_enabled': row.prospect_calling_enabled,
         'batch_calling_enabled': False,
+        'baseline': settings.allstate_calling_baseline,
+        'readiness': readiness,
+        'latest_import': import_batch_payload(db, latest_import),
+        'calling': queue,
         'settings': _calling_settings_payload(row),
         'health': health,
         'preview': preview,
@@ -2227,7 +2261,7 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
             'automatic_system_checks': automatic_system_checks(health, published_script),
             'consent_source_profiles': [consent_source_profile_payload(item) for item in source_profiles],
             'consented_leads': [lead_payload(item) for item in consented_leads],
-            'eligible_lead_count': sum(1 for item in consented_leads if item.eligibility_status == 'Ready for pilot'),
+            'eligible_lead_count': readiness['eligible_contacts'],
             'pilot_queue': [
                 pilot_payload(item, leads_by_id[item.lead_id])
                 for item in pilot_entries
@@ -2245,8 +2279,8 @@ async def allstate_calling_workspace(db: Session=Depends(get_db), user: User=Dep
                 'confirmation_required': PILOT_CONFIRMATION,
             },
             'cost_projection': cost_projection(db),
-            'prospect_calling_globally_enabled': False,
-            'automatic_queue_enabled': False,
+            'prospect_calling_globally_enabled': row.prospect_calling_enabled,
+            'automatic_queue_enabled': row.automated_queue_enabled,
         },
     }
 
@@ -2529,12 +2563,100 @@ def save_allstate_consent_source_profile(payload: dict=Body(...), db: Session=De
 
 @router.get('/calling/allstate/consented-leads/template.csv')
 def download_allstate_consented_lead_template(mode: str=Query(default='simple', pattern='^(simple|advanced)$'), user: User=Depends(current_user)):
-    content = consent_csv_template(mode)
+    content = primary_csv_template() if mode == 'simple' else consent_csv_template(mode)
     return Response(
         content=content,
         media_type='text/csv',
         headers={'Content-Disposition': f'attachment; filename=\"allstate-consented-leads-{mode}.csv\"'},
     )
+
+@router.post('/calling/allstate/contacts/upload')
+async def upload_allstate_contacts(
+    profile_id: str=Form(...),
+    file: UploadFile=File(...),
+    db: Session=Depends(get_db),
+    user: User=Depends(require_write),
+):
+    profile = db.get(ConsentSourceProfile, profile_id)
+    if not profile or profile.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(400, 'Select a valid Consent Source Profile')
+    if not str(file.filename or '').lower().endswith('.csv'):
+        raise HTTPException(400, 'Upload a CSV file')
+    try:
+        content = (await file.read()).decode('utf-8-sig')
+        batch = upload_contacts(db, profile=profile, content=content, filename=str(file.filename), user=user)
+    except (UnicodeDecodeError, ValueError) as exc:
+        db.rollback()
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    db.refresh(batch)
+    return {'ok': True, 'import': import_batch_payload(db, batch)}
+
+@router.get('/calling/allstate/contacts/imports/{batch_id}/blocked.csv')
+def download_allstate_blocked_contacts(batch_id: str, db: Session=Depends(get_db), user: User=Depends(current_user)):
+    batch = db.get(CallContactImportBatch, batch_id)
+    if not batch or batch.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Contact import not found')
+    return Response(
+        content=blocked_rows_csv(db, batch.id),
+        media_type='text/csv',
+        headers={'Content-Disposition': f'attachment; filename="allstate-blocked-{batch.id}.csv"'},
+    )
+
+@router.post('/calling/allstate/dry-run')
+async def dry_run_allstate_contacts(db: Session=Depends(get_db), user: User=Depends(require_write)):
+    published = ensure_script_studio(db, user.id)
+    health = await calling_provider().health(published.retell_agent_version)
+    result = dry_run_contacts(db, health)
+    db.commit()
+    return {'ok': True, 'dry_run': result}
+
+@router.post('/calling/allstate/campaign/start')
+async def start_allstate_campaign(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    published = ensure_script_studio(db, user.id)
+    health = await calling_provider().health(published.retell_agent_version)
+    try:
+        result = start_campaign(
+            db, user, health, str(payload.get('confirmation') or ''),
+            execution_mode=str(payload.get('execution_mode') or 'live'),
+            defer_mock_seconds=int(payload.get('defer_mock_seconds') or 0),
+        )
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    db.commit()
+    return result
+
+@router.post('/calling/allstate/campaign/{action}')
+def control_allstate_campaign(action: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    try:
+        result = control_campaign(db, user, action)
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(409, str(exc)) from exc
+    db.commit()
+    return result
+
+@router.patch('/calling/allstate/campaign/settings')
+def update_allstate_campaign_settings(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):
+    try:
+        row = update_campaign_limits(db, payload)
+    except ValueError as exc:
+        raise HTTPException(400, str(exc)) from exc
+    db.commit()
+    return {'ok': True, 'settings': _calling_settings_payload(row)}
+
+@router.post('/calling/allstate/queue/{item_id}/retry')
+def retry_allstate_failed_call(item_id: str, db: Session=Depends(get_db), user: User=Depends(require_write)):
+    item = db.get(CallQueueItem, item_id)
+    if not item or item.campaign_id != ALLSTATE_CAMPAIGN_ID:
+        raise HTTPException(404, 'Call queue item not found')
+    try:
+        retry_failed_item(db, item)
+    except ValueError as exc:
+        raise HTTPException(409, str(exc)) from exc
+    db.commit()
+    return {'ok': True, 'status': item.status}
 
 @router.post('/calling/allstate/consented-leads/preview')
 def preview_allstate_consented_leads(payload: dict=Body(...), db: Session=Depends(get_db), user: User=Depends(require_write)):

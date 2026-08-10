@@ -22,6 +22,7 @@ from app.models.entities import (
     CallTranscript,
     Campaign,
     Company,
+    ConsentedCallingLead,
     LeadPhoneConsent,
     RetellWebhookEvent,
     SuppressionEntry,
@@ -362,6 +363,24 @@ class RetellCallingProvider:
     async def get_call(self, call_id: str) -> dict:
         return await self._request('GET', f'/v2/get-call/{call_id}')
 
+    async def create_batch(self, *, name: str, tasks: list[dict], trigger_timestamp: int | None = None, call_time_window: dict | None = None) -> dict:
+        payload: dict[str, Any] = {
+            'name': name,
+            'from_number': normalize_phone(settings.retell_from_number),
+            'tasks': tasks,
+        }
+        if trigger_timestamp is not None:
+            payload['trigger_timestamp'] = trigger_timestamp
+        if call_time_window:
+            payload['call_time_window'] = call_time_window
+        return await self._request('POST', '/create-batch-call', payload)
+
+    async def get_batch(self, batch_call_id: str) -> dict:
+        raise CallingProviderError(f'Retell does not expose a supported get-batch-call API for {batch_call_id}')
+
+    async def cancel_batch(self, batch_call_id: str) -> dict:
+        raise CallingProviderError(f'Retell does not expose a supported cancel-batch-call API for {batch_call_id}')
+
     async def get_conversation_flow(self, conversation_flow_id: str, version: int | None = None) -> dict:
         params = {'version': version} if version is not None else None
         return await self._request('GET', f'/get-conversation-flow/{conversation_flow_id}', params=params)
@@ -424,7 +443,8 @@ class RetellCallingProvider:
             blockers.append('RETELL_AGENT_ID missing')
         elif self.api_key:
             try:
-                agent_payload = await self.get_agent(agent_id)
+                requested_version = int(configured_agent_version) if configured_agent_version.isdigit() else None
+                agent_payload = await self.get_agent(agent_id, requested_version)
                 agent_exists = True
                 if agent_payload.get('agent_name') != ALLSTATE_AGENT_NAME:
                     blockers.append('Configured Retell agent is not the Voryx Allstate agent')
@@ -697,7 +717,7 @@ def ensure_allstate_calling_campaign(db: Session, user_id: str | None = None) ->
             timezone='America/Toronto',
             allowed_calling_days=[],
             allowed_calling_hours={},
-            daily_call_limit=0,
+            daily_call_limit=20,
             hourly_call_limit=0,
             concurrent_call_limit=1,
             internal_test_enabled=True,
@@ -708,6 +728,9 @@ def ensure_allstate_calling_campaign(db: Session, user_id: str | None = None) ->
             transcription_enabled=True,
             call_recording_disclosure_enabled=True,
             appointment_booking_enabled=True,
+            campaign_status='not_started',
+            baseline_version='v8',
+            automatic_retry_enabled=False,
             created_at=now,
             updated_at=now,
         )
@@ -717,9 +740,9 @@ def ensure_allstate_calling_campaign(db: Session, user_id: str | None = None) ->
         desired_values = {
             'provider_agent_id': settings.retell_agent_id or settings_row.provider_agent_id,
             'from_number': normalize_phone(settings.retell_from_number) or settings_row.from_number,
-            'prospect_calling_enabled': False,
-            'automated_queue_enabled': False,
             'concurrent_call_limit': max(1, settings_row.concurrent_call_limit or 1),
+            'daily_call_limit': settings_row.daily_call_limit or 20,
+            'baseline_version': 'v8',
             'call_recording_disclosure_enabled': bool(
                 settings_row.call_recording_disclosure_enabled
                 or settings_row.recording_enabled
@@ -1103,6 +1126,11 @@ def process_retell_webhook(db: Session, raw_body: bytes, payload: dict) -> dict:
             _sync_attempt_from_call_payload(db, attempt, call_payload)
             if event_type in TERMINAL_STATUS_MAP:
                 attempt.status = TERMINAL_STATUS_MAP[event_type]
+            # Production sessions disable autoflush; persist the new disposition/transcript
+            # before queue reconciliation queries for them.
+            db.flush()
+            from app.services.calling_campaign import reconcile_queue_from_attempt
+            reconcile_queue_from_attempt(db, attempt)
         event.processing_status = 'processed'
         event.processed_at = now
     except Exception as exc:
@@ -1121,7 +1149,7 @@ def quote_appointment_slots(db: Session, payload: dict | None = None, now: datet
     if isinstance(payload.get('args'), dict):
         payload = payload['args']
     attempt = db.get(CallAttempt, str(payload.get('voryx_call_attempt_id') or ''))
-    if not attempt or attempt.campaign_id != ALLSTATE_CAMPAIGN_ID or not attempt.internal_test:
+    if not attempt or attempt.campaign_id != ALLSTATE_CAMPAIGN_ID or attempt.mode not in {'internal_test', 'consented_pilot', 'consented_campaign'}:
         return {'ok': False, 'blocker': 'call_attempt_not_found'}
     local_now = (now or _now()).replace(tzinfo=ZoneInfo('UTC')).astimezone(ZoneInfo('America/Toronto'))
     candidates = []
@@ -1174,6 +1202,14 @@ def book_quote_appointment(db: Session, payload: dict) -> dict:
     disposition.appointment_booked = True
     disposition.disposition = 'appointment_requested'
     disposition.updated_at = _now()
+    if attempt.consented_calling_lead_id:
+        lead = db.get(ConsentedCallingLead, attempt.consented_calling_lead_id)
+        if lead:
+            lead.eligibility_status = 'Appointment booked'
+            lead.approved_for_call = False
+            lead.updated_at = _now()
+    from app.services.calling_campaign import complete_appointment_queue
+    complete_appointment_queue(db, attempt.id)
     return {'ok': True, 'appointment_id': appointment.id, 'status': appointment.status}
 
 
@@ -1196,4 +1232,14 @@ def mark_do_not_call(db: Session, payload: dict) -> dict:
     disposition.disposition = 'do_not_call'
     disposition.notes = str(payload.get('reason') or disposition.notes or '')
     disposition.updated_at = _now()
-    return {'ok': True, 'suppressed': True}
+    if attempt.consented_calling_lead_id:
+        lead = db.get(ConsentedCallingLead, attempt.consented_calling_lead_id)
+        if lead:
+            lead.consent_withdrawn = True
+            lead.eligibility_status = 'DNC blocked'
+            lead.eligibility_reasons = ['Caller requested do not call']
+            lead.approved_for_call = False
+            lead.updated_at = _now()
+    from app.services.calling_campaign import suppress_queued_phone
+    cancelled = suppress_queued_phone(db, phone, str(payload.get('reason') or 'Caller requested do not call'))
+    return {'ok': True, 'suppressed': True, 'cancelled_queue_items': cancelled}
