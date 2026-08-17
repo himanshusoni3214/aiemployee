@@ -7,7 +7,7 @@ import { auditDir, requiredEnv } from '../src/env';
 
 
 const runId = `QA-CALLING-${Date.now()}`;
-const profileName = `${runId} approved synthetic source`;
+const profileName = 'Allstate approved web leads';
 const qaPhones = ['+16475550101', '+14165550102', '+12125550103'];
 
 
@@ -75,25 +75,27 @@ test('Allstate calling product completes no-call production workflow', async ({ 
     attemptsBefore = Number((await client.query("select count(*)::int as count from call_attempts where campaign_id = 'campaign-allstate-quote-calling' and internal_test = false")).rows[0].count);
     await login(page);
 
-    const profileResult = await browserApi(page, 'POST', '/calling/allstate/consent-source-profiles', {
-      name: profileName,
-      organization_represented: 'Allstate',
-      approved_consent_language: 'Synthetic QA consent for automated Allstate test workflow validation only.',
-      organization_authorized: true,
-      automated_call_permission: true,
-      consent_proof_method: 'Synthetic QA reference',
-      source_approval_evidence: `${runId} no-call QA evidence`,
-      approval_date: '2026-08-08T12:00:00',
-      default_province: 'Ontario',
-      default_timezone: 'America/Toronto',
-    });
-    ids.profile = profileResult.profile.id;
-
     await page.goto('/calling', { waitUntil: 'networkidle' });
     await expect(page.getByRole('heading', { name: 'AI Calling', exact: true })).toBeVisible();
     await expect(page.getByText('Connected', { exact: true })).toBeVisible();
     await expect(page.getByText('+1 437-747-5010', { exact: true })).toBeVisible();
     await page.screenshot({ path: path.join(screenshots, 'calling-overview.png'), fullPage: true });
+
+    await page.getByRole('button', { name: 'Settings', exact: true }).click();
+    await page.locator('select[data-voryx-source-preset]').selectOption('allstate_web');
+    await page.locator('select[data-voryx-consent-wording-preset]').selectOption('web_form');
+    await page.locator('select[data-voryx-proof-preset]').selectOption('web_form');
+    await page.locator('select[data-voryx-evidence-preset]').selectOption('consent_reference');
+    await page.getByLabel('Organization is authorized', { exact: true }).check();
+    await page.getByLabel('Automated/synthesized calls are permitted', { exact: true }).check();
+    await page.getByRole('button', { name: 'Save Consent Source', exact: true }).click();
+    await expect(page.getByText('Consent Source saved.', { exact: true })).toBeVisible();
+    const savedProfile = (await client.query('select id, approved_consent_language, consent_proof_method, source_approval_evidence from consent_source_profiles where name = $1 order by created_at desc limit 1', [profileName])).rows[0];
+    expect(savedProfile.approved_consent_language).toContain('automated or synthesized calls');
+    expect(savedProfile.consent_proof_method).toContain('Web form submission');
+    expect(savedProfile.source_approval_evidence).toContain('consent_reference');
+    ids.profile = savedProfile.id;
+    await page.screenshot({ path: path.join(screenshots, 'calling-consent-source-presets.png'), fullPage: true });
 
     await page.getByRole('button', { name: 'Contacts', exact: true }).click();
     const downloadPromise = page.waitForEvent('download');

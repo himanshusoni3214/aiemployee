@@ -119,6 +119,54 @@ const tabs: Array<{ id: Tab; label: string }> = [
   { id: 'settings', label: 'Settings' },
 ];
 
+const sourceOptions = [
+  { value: 'allstate_web', label: 'Allstate approved web leads' },
+  { value: 'customer_callback', label: 'Customer callback requests' },
+  { value: 'existing_customer', label: 'Existing customer inquiries' },
+  { value: 'documented_referral', label: 'Referrals with documented permission' },
+  { value: 'other', label: 'Other' },
+];
+
+const organizationOptions = [
+  { value: 'Allstate', label: 'Allstate' },
+  { value: 'Himanshu Soni, Allstate Sales Agent', label: 'Himanshu Soni, Allstate Sales Agent' },
+  { value: 'other', label: 'Other' },
+];
+
+const consentWordingOptions = [
+  {
+    value: 'web_form',
+    label: 'Web form - automated call consent',
+    wording: 'I agree to receive automated or synthesized calls from Himanshu Soni, an Allstate Sales Agent, at the phone number I provided about insurance products or services.',
+  },
+  {
+    value: 'callback_request',
+    label: 'Customer requested an automated callback',
+    wording: 'I request and consent to an automated or synthesized callback from Himanshu Soni, an Allstate Sales Agent, at the phone number I provided about insurance products or services.',
+  },
+  {
+    value: 'recorded_verbal',
+    label: 'Recorded verbal consent',
+    wording: 'I consent to receive automated or synthesized calls from Himanshu Soni, an Allstate Sales Agent, at this phone number about insurance products or services.',
+  },
+  { value: 'other', label: 'Other - enter exact wording', wording: '' },
+];
+
+const proofOptions = [
+  { value: 'web_form', label: 'Web form submission', stored: 'Web form submission linked by consent reference' },
+  { value: 'crm_record', label: 'CRM consent record', stored: 'CRM consent record linked by consent reference' },
+  { value: 'recorded_call', label: 'Recorded phone consent', stored: 'Recorded phone consent linked by consent reference' },
+  { value: 'signed_form', label: 'Signed form', stored: 'Signed consent form linked by consent reference' },
+  { value: 'other', label: 'Other', stored: '' },
+];
+
+const evidenceOptions = [
+  { value: 'consent_reference', label: 'Consent reference in uploaded CSV', stored: 'Per-lead consent evidence is linked by consent_reference in the uploaded CSV' },
+  { value: 'crm_record', label: 'CRM record ID in consent reference', stored: 'Per-lead CRM record ID is supplied in consent_reference' },
+  { value: 'web_submission', label: 'Web submission ID in consent reference', stored: 'Per-lead web submission ID is supplied in consent_reference' },
+  { value: 'other', label: 'Other', stored: '' },
+];
+
 function money(value?: number | null) {
   return new Intl.NumberFormat(undefined, { style: 'currency', currency: 'USD' }).format(value || 0);
 }
@@ -149,10 +197,16 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   const [selectedResult, setSelectedResult] = useState<QueueItem | null>(null);
   const [dailyLimit, setDailyLimit] = useState(initialWorkspace.settings?.daily_call_limit || 20);
   const [concurrency, setConcurrency] = useState(initialWorkspace.settings?.concurrent_call_limit || 1);
+  const [sourcePreset, setSourcePreset] = useState('');
+  const [organizationPreset, setOrganizationPreset] = useState('Allstate');
+  const [consentWordingPreset, setConsentWordingPreset] = useState('');
+  const [proofPreset, setProofPreset] = useState('');
+  const [evidencePreset, setEvidencePreset] = useState('consent_reference');
+  const [hasExpiry, setHasExpiry] = useState(false);
   const [profile, setProfile] = useState({
     name: '', organization_represented: 'Allstate', approved_consent_language: '',
     organization_authorized: false, automated_call_permission: false,
-    consent_proof_method: '', source_approval_evidence: '', approval_date: '',
+    consent_proof_method: '', source_approval_evidence: evidenceOptions[0].stored, approval_date: '',
     expires_at: '', default_province: 'Ontario', default_timezone: 'America/Toronto',
   });
 
@@ -213,10 +267,48 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   }
 
   async function saveProfile() {
+    const approvalDate = profile.approval_date || new Date().toISOString();
+    if (!profile.name || !profile.organization_represented || !profile.approved_consent_language || !profile.consent_proof_method || !profile.source_approval_evidence) {
+      setError('Select the lead source, consent wording, proof method and evidence location.');
+      return;
+    }
+    if (!profile.organization_authorized || !profile.automated_call_permission) {
+      setError('Confirm organization authorization and automated-call permission.');
+      return;
+    }
     const result = await perform(() => api('/calling/allstate/consent-source-profiles', {
-      method: 'POST', body: JSON.stringify(profile),
+      method: 'POST', body: JSON.stringify({ ...profile, approval_date: approvalDate, expires_at: hasExpiry ? profile.expires_at : '' }),
     }), 'Consent Source saved.');
     if (result?.profile?.id) setProfileId(result.profile.id);
+  }
+
+  function chooseSource(value: string) {
+    setSourcePreset(value);
+    const selected = sourceOptions.find((item) => item.value === value);
+    setProfile((current) => ({ ...current, name: value === 'other' ? '' : selected?.label || '' }));
+  }
+
+  function chooseOrganization(value: string) {
+    setOrganizationPreset(value);
+    setProfile((current) => ({ ...current, organization_represented: value === 'other' ? '' : value }));
+  }
+
+  function chooseConsentWording(value: string) {
+    setConsentWordingPreset(value);
+    const selected = consentWordingOptions.find((item) => item.value === value);
+    setProfile((current) => ({ ...current, approved_consent_language: selected?.wording || '' }));
+  }
+
+  function chooseProof(value: string) {
+    setProofPreset(value);
+    const selected = proofOptions.find((item) => item.value === value);
+    setProfile((current) => ({ ...current, consent_proof_method: selected?.stored || '' }));
+  }
+
+  function chooseEvidence(value: string) {
+    setEvidencePreset(value);
+    const selected = evidenceOptions.find((item) => item.value === value);
+    setProfile((current) => ({ ...current, source_approval_evidence: selected?.stored || '' }));
   }
 
   const calling: CallingState = workspace.calling || { status: 'not_started', progress: { completed: 0, total: 0, queued: 0, calling: 0 }, today: { attempts: 0, answered: 0, appointments: 0, callbacks: 0, dnc: 0, no_answer: 0 }, queue_items: [], callbacks: [], cost_today: 0, average_cost: 0 };
@@ -304,7 +396,56 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
 
       {tab === 'settings' ? <>
         <section className="card"><h2 className="text-lg font-semibold">Calling limits</h2><p className="text-sm text-zinc-400">Start conservatively. Automatic retries remain off.</p><div className="mt-4 grid gap-3 md:grid-cols-3"><label className="text-sm">Daily call limit<input className="input mt-1" type="number" min={1} max={500} value={dailyLimit} onChange={(event) => setDailyLimit(Number(event.target.value))} /></label><label className="text-sm">Concurrency<select className="input mt-1" value={concurrency} onChange={(event) => setConcurrency(Number(event.target.value))}>{[1, 2, 3, 5].map((value) => <option key={value} value={value}>{value}</option>)}</select></label><button type="button" className="btn self-end" disabled={busy} onClick={() => void saveLimits()}>Save limits</button></div></section>
-        <section className="card"><h2 className="text-lg font-semibold">Consent Source</h2><p className="text-sm text-zinc-400">Configure each approved lead source once. Missing permission is never inferred.</p><div className="mt-4 grid gap-3 md:grid-cols-2"><label className="text-sm">Source name<input className="input mt-1" value={profile.name} onChange={(event) => setProfile({ ...profile, name: event.target.value })} /></label><label className="text-sm">Organization represented<input className="input mt-1" value={profile.organization_represented} onChange={(event) => setProfile({ ...profile, organization_represented: event.target.value })} /></label><label className="text-sm md:col-span-2">Exact consent wording<textarea className="input mt-1 min-h-24" value={profile.approved_consent_language} onChange={(event) => setProfile({ ...profile, approved_consent_language: event.target.value })} /></label><label className="text-sm">Proof method<input className="input mt-1" value={profile.consent_proof_method} onChange={(event) => setProfile({ ...profile, consent_proof_method: event.target.value })} /></label><label className="text-sm">Approval evidence<input className="input mt-1" value={profile.source_approval_evidence} onChange={(event) => setProfile({ ...profile, source_approval_evidence: event.target.value })} /></label><label className="text-sm">Effective date<input className="input mt-1" type="datetime-local" value={profile.approval_date} onChange={(event) => setProfile({ ...profile, approval_date: event.target.value })} /></label><label className="text-sm">Expiry (optional)<input className="input mt-1" type="datetime-local" value={profile.expires_at} onChange={(event) => setProfile({ ...profile, expires_at: event.target.value })} /></label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={profile.organization_authorized} onChange={(event) => setProfile({ ...profile, organization_authorized: event.target.checked })} /> Organization is authorized</label><label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={profile.automated_call_permission} onChange={(event) => setProfile({ ...profile, automated_call_permission: event.target.checked })} /> Automated/synthesized calls permitted</label></div><button type="button" className="btn mt-4" disabled={busy} onClick={() => void saveProfile()}>Save Consent Source</button>{sourceProfiles.length ? <div className="mt-4 text-sm text-zinc-400">Saved sources: {sourceProfiles.map((item: any) => item.name).join(', ')}</div> : null}</section>
+        <section className="card" data-voryx-consent-source-setup>
+          <h2 className="text-lg font-semibold">Consent Source</h2>
+          <p className="text-sm text-zinc-400">Set this once for each approved lead source.</p>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <label className="text-sm">Lead source
+              <select data-voryx-source-preset className="input mt-1" value={sourcePreset} onChange={(event) => chooseSource(event.target.value)}>
+                <option value="">Select</option>
+                {sourceOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+            </label>
+            {sourcePreset === 'other' ? <label className="text-sm">Source name<input className="input mt-1" value={profile.name} onChange={(event) => setProfile({ ...profile, name: event.target.value })} /></label> : null}
+
+            <label className="text-sm">Organization represented
+              <select data-voryx-organization-preset className="input mt-1" value={organizationPreset} onChange={(event) => chooseOrganization(event.target.value)}>
+                {organizationOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+            </label>
+            {organizationPreset === 'other' ? <label className="text-sm">Organization name<input className="input mt-1" value={profile.organization_represented} onChange={(event) => setProfile({ ...profile, organization_represented: event.target.value })} /></label> : null}
+
+            <label className="text-sm md:col-span-2">Consent wording used
+              <select data-voryx-consent-wording-preset className="input mt-1" value={consentWordingPreset} onChange={(event) => chooseConsentWording(event.target.value)}>
+                <option value="">Select</option>
+                {consentWordingOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+            </label>
+            {consentWordingPreset === 'other' ? <label className="text-sm md:col-span-2">Exact consent wording<textarea className="input mt-1 min-h-24" value={profile.approved_consent_language} onChange={(event) => setProfile({ ...profile, approved_consent_language: event.target.value })} /></label> : null}
+
+            <label className="text-sm">Consent proof
+              <select data-voryx-proof-preset className="input mt-1" value={proofPreset} onChange={(event) => chooseProof(event.target.value)}>
+                <option value="">Select</option>
+                {proofOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+            </label>
+            {proofPreset === 'other' ? <label className="text-sm">Proof method<input className="input mt-1" value={profile.consent_proof_method} onChange={(event) => setProfile({ ...profile, consent_proof_method: event.target.value })} /></label> : null}
+
+            <label className="text-sm">Evidence location
+              <select data-voryx-evidence-preset className="input mt-1" value={evidencePreset} onChange={(event) => chooseEvidence(event.target.value)}>
+                {evidenceOptions.map((item) => <option key={item.value} value={item.value}>{item.label}</option>)}
+              </select>
+            </label>
+            {evidencePreset === 'other' ? <label className="text-sm">Evidence reference<input className="input mt-1" value={profile.source_approval_evidence} onChange={(event) => setProfile({ ...profile, source_approval_evidence: event.target.value })} /></label> : null}
+
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={profile.organization_authorized} onChange={(event) => setProfile({ ...profile, organization_authorized: event.target.checked })} /> Organization is authorized</label>
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={profile.automated_call_permission} onChange={(event) => setProfile({ ...profile, automated_call_permission: event.target.checked })} /> Automated/synthesized calls are permitted</label>
+            <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={hasExpiry} onChange={(event) => setHasExpiry(event.target.checked)} /> Consent source has an expiry date</label>
+            {hasExpiry ? <label className="text-sm">Expiry date<input className="input mt-1" type="datetime-local" value={profile.expires_at} onChange={(event) => setProfile({ ...profile, expires_at: event.target.value })} /></label> : null}
+          </div>
+          <button type="button" className="btn mt-4" disabled={busy} onClick={() => void saveProfile()}>Save Consent Source</button>
+          {sourceProfiles.length ? <div className="mt-4 text-sm text-zinc-400">Saved sources: {sourceProfiles.map((item: any) => item.name).join(', ')}</div> : null}
+        </section>
         <details className="card"><summary className="cursor-pointer text-sm font-semibold">Advanced technical details</summary><pre className="mt-4 max-h-96 overflow-auto text-xs text-zinc-400">{JSON.stringify({ baseline: workspace.baseline, health: workspace.health, warnings: workspace.warnings, migration: workspace.agent_migration }, null, 2)}</pre></details>
       </> : null}
     </div>

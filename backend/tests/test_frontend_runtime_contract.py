@@ -83,6 +83,26 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("Advanced technical details", source)
         self.assertNotIn("Place internal test call", source)
 
+    def test_calling_consent_source_uses_presets_with_conditional_other_fields(self):
+        source = read_frontend("components/AllstateCallingPanel.tsx")
+
+        for contract in [
+            "data-voryx-consent-source-setup",
+            "data-voryx-source-preset",
+            "data-voryx-organization-preset",
+            "data-voryx-consent-wording-preset",
+            "data-voryx-proof-preset",
+            "data-voryx-evidence-preset",
+            "sourcePreset === 'other'",
+            "organizationPreset === 'other'",
+            "consentWordingPreset === 'other'",
+            "proofPreset === 'other'",
+            "evidencePreset === 'other'",
+            "Automated/synthesized calls are permitted",
+        ]:
+            self.assertIn(contract, source)
+        self.assertNotIn('>Effective date<input', source)
+
     def test_publish_does_not_accept_empty_or_unverified_success(self):
         source = read_frontend("components/CallScriptStudio.tsx")
 
