@@ -316,7 +316,7 @@ export default async function CampaignsPage({ searchParams }: { searchParams?: P
                         <h3 className="text-sm font-semibold">Raw Employees</h3>
                         <div className="mt-2 grid gap-1 text-xs text-zinc-400">{employees.filter((item) => item.campaign_id === campaign.id && item.status !== 'Archived').map((item) => <div key={item.id}>{item.name} / {item.employee_type} / {item.status} / {item.hermes_job_id || 'no Hermes job'}</div>)}</div>
                       </section>
-                      <ModelPolicyPanel scope="company" companyId={campaign.company_id} title="Model Policy" compact />
+                      <ModelPolicyPanel scope="company" companyId={campaign.company_id} title="Hermes Model Policy (does not control Retell calling)" compact />
                     </div>
                   </details>
                 </div>

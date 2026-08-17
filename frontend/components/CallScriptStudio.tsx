@@ -478,7 +478,8 @@ export function CallScriptStudio({ studio, refresh, onDirtyChange }: { studio?: 
         <div className="text-right text-sm">
           <div>Live: v{studio.published_version.version_number}</div>
           <div className="text-zinc-500">Retell agent {studio.live_retell_preview?.agent_version ?? '-'} / flow {studio.live_retell_preview?.flow_version ?? '-'}</div>
-          <div className="text-zinc-500">Live {projection.live_model} / post-call {projection.post_call_model}</div>
+          <div className="text-zinc-500">Retell live {projection.live_model} / post-call {projection.post_call_model}</div>
+          <div className="max-w-72 text-xs text-zinc-600">Retell voice models are separate from the Voryx/Hermes model policy.</div>
         </div>
       </div>
 

@@ -466,6 +466,18 @@ def validate_script_content(source: CallScriptVersion | dict) -> dict[str, list[
                 add(f'voice_settings.{field}', f'{label} cannot claim Ava is human.')
             if any(term in lower for term in ("i'm an ai", 'i am an ai', 'automated assistant', 'artificial intelligence')):
                 add(f'voice_settings.{field}', f'{label} cannot proactively announce automation.')
+        internal_lower = opening['confirmed_person_internal'].lower()
+        if not any(term in internal_lower for term in ('internal test', 'test of his quote appointment workflow')):
+            add(
+                'voice_settings.confirmed_person_internal',
+                'Confirmed-person internal introduction must identify the internal workflow test.',
+            )
+        consented_lower = opening['confirmed_person_consented'].lower()
+        if 'permission to be contacted' not in consented_lower:
+            add(
+                'voice_settings.confirmed_person_consented',
+                'Confirmed-person prospect introduction must reference permission to be contacted.',
+            )
         if not opening['wrong_person_response']:
             add('voice_settings.wrong_person_response', 'Wrong-person response is required.')
 

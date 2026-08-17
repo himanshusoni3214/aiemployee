@@ -62,7 +62,17 @@ test('Allstate calling product completes no-call production workflow', async ({ 
   page.on('requestfailed', (request) => {
     const failure = request.failure()?.errorText || '';
     const url = new URL(request.url());
-    const benignAbort = request.method() === 'GET' && failure.includes('ERR_ABORTED') && (url.searchParams.has('_rsc') || request.resourceType() === 'document');
+    const reloadCancelledWorkspaceRead = (
+      request.method() === 'GET'
+      && failure.includes('ERR_ABORTED')
+      && url.origin === 'https://ops.themealz.com'
+      && url.pathname === '/api/calling/allstate'
+    );
+    const benignAbort = request.method() === 'GET' && failure.includes('ERR_ABORTED') && (
+      url.searchParams.has('_rsc')
+      || request.resourceType() === 'document'
+      || reloadCancelledWorkspaceRead
+    );
     if (!benignAbort) failedRequests.push(`${request.method()} ${request.url()} ${failure}`.trim());
   });
   page.on('response', (response) => {

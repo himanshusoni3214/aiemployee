@@ -317,6 +317,13 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   const sourceProfiles = workspace.script_studio?.consent_source_profiles || [];
   const published = workspace.script_studio?.published_version;
   const blockedReasonRows = useMemo(() => Object.entries(workspace.latest_import?.reason_counts || {}).sort((a: any, b: any) => b[1] - a[1]), [workspace.latest_import]);
+  const missingConsentEvidence = Boolean(
+    workspace.latest_import?.reason_counts?.CONSENT_REFERENCE_MISSING
+    || workspace.latest_import?.reason_counts?.CONSENT_TIMESTAMP_MISSING,
+  );
+  const startBlockerMessage = missingConsentEvidence
+    ? 'Start Calling is blocked: uploaded rows need a consent timestamp and consent reference. Correct those two CSV columns and upload again.'
+    : `Start Calling is blocked: ${readiness.blockers.map((item) => item.label).join(', ') || 'calling readiness is incomplete'}.`;
 
   return (
     <div className="space-y-4" data-voryx-calling-workspace>
@@ -367,6 +374,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
           <div className="mt-4 grid grid-cols-2 gap-3 lg:grid-cols-4"><Metric label="Uploaded" value={workspace.latest_import.uploaded} /><Metric label="Ready for AI call" value={workspace.latest_import.ready} /><Metric label="Needs review" value={workspace.latest_import.needs_review} /><Metric label="Blocked" value={workspace.latest_import.blocked} /></div>
           {blockedReasonRows.length ? <div className="mt-4"><h3 className="text-sm font-semibold">Grouped reasons</h3><div className="mt-2 grid gap-2 md:grid-cols-2">{blockedReasonRows.map(([code, count]: any) => <div className="flex justify-between border-b border-zinc-800 py-2 text-sm" key={code}><span>{statusLabel(code)}</span><span>{count}</span></div>)}</div></div> : null}
           <div className="mt-4 flex flex-wrap gap-2"><button type="button" className="btn-secondary" disabled={busy} onClick={() => void runDryRun()}>DRY RUN MY CONTACTS</button>{readiness.ready ? <button type="button" className="btn" onClick={() => { setTab('calling'); setShowStart(true); }}>Start calling {readiness.eligible_contacts} eligible contacts</button> : null}</div>
+          {!readiness.ready ? <p className="mt-3 text-sm text-amber-300" data-voryx-start-calling-blocker>{startBlockerMessage}</p> : null}
         </section> : <section className="card text-sm text-zinc-400">No contacts uploaded yet.</section>}
         {dryRun ? <section className="card border-emerald-900"><h2 className="text-lg font-semibold">Dry run result</h2><p className="text-sm text-emerald-300">No telephone activity occurred.</p><div className="mt-3 grid gap-3 md:grid-cols-3"><Metric label="Uploaded" value={dryRun.uploaded} /><Metric label="Would call" value={dryRun.would_call} /><Metric label="Would block" value={dryRun.would_block} /><Metric label="Would call today" value={dryRun.would_call_today} /><Metric label="First call" value={<LocalTime value={dryRun.first_call} />} /><Metric label="Estimated cost today" value={`${money(dryRun.estimated_cost_usd.low)}–${money(dryRun.estimated_cost_usd.high)}`} /></div></section> : null}
       </> : null}
@@ -374,11 +382,12 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
       {tab === 'calling' ? <>
         <section className="card" data-voryx-campaign-controls>
           <div className="flex flex-wrap items-start justify-between gap-3"><div><h2 className="text-lg font-semibold">Allstate Quote Appointment Calling</h2><p className="text-sm text-zinc-400">Status: {statusLabel(campaignStatus)}</p></div><div className="flex flex-wrap gap-2">
-            {['not_started', 'stopped', 'completed'].includes(campaignStatus) ? <button type="button" className="btn" disabled={!readiness.ready || busy} onClick={() => setShowStart(true)}>START CALLING</button> : null}
+            {['not_started', 'stopped', 'completed'].includes(campaignStatus) ? <button type="button" className="btn" disabled={!readiness.ready || busy} title={!readiness.ready ? startBlockerMessage : undefined} onClick={() => setShowStart(true)}>START CALLING</button> : null}
             {['running', 'waiting_for_window'].includes(campaignStatus) ? <button type="button" className="btn-secondary" disabled={busy} onClick={() => void campaignAction('pause')}>Pause</button> : null}
             {campaignStatus === 'paused' ? <button type="button" className="btn" disabled={busy} onClick={() => void campaignAction('resume')}>Resume</button> : null}
             {['running', 'waiting_for_window', 'paused'].includes(campaignStatus) ? <button type="button" className="btn-secondary" disabled={busy} onClick={() => void campaignAction('stop')}>Stop</button> : null}
           </div></div>
+          {!readiness.ready && ['not_started', 'stopped', 'completed'].includes(campaignStatus) ? <p className="mt-3 text-sm text-amber-300" data-voryx-start-calling-blocker>{startBlockerMessage}</p> : null}
           <div className="mt-4 grid gap-3 md:grid-cols-4"><Metric label="Progress" value={`${calling.progress.completed} / ${calling.progress.total}`} /><Metric label="Queued" value={calling.progress.queued} /><Metric label="Calling now" value={calling.progress.calling} /><Metric label="Cost today" value={money(calling.cost_today)} /></div>
           <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4"><Metric label="Attempts" value={calling.today.attempts || 0} /><Metric label="Answered" value={calling.today.answered || 0} /><Metric label="Appointments" value={calling.today.appointments || 0} /><Metric label="Callbacks" value={calling.today.callbacks || 0} /><Metric label="DNC" value={calling.today.dnc || 0} /><Metric label="No answer" value={calling.today.no_answer || 0} /><Metric label="Avg cost/call" value={money(calling.average_cost)} /></div>
           {campaignStatus === 'waiting_for_window' ? <p className="mt-4 text-sm text-amber-300">Waiting for the next recipient-local calling window. This is not a failure.</p> : null}

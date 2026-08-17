@@ -148,6 +148,31 @@ class CallScriptStudioTests(unittest.TestCase):
             'wrong_person_response': DEFAULT_WRONG_PERSON_RESPONSE,
         }
 
+    def test_confirm_first_requires_mode_specific_introductions_before_publish(self):
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
+            user = self.seed(db)
+            ensure_script_studio(db, user.id)
+            draft = create_draft(db, user.id)
+            self.configure_confirm_first(draft)
+            draft.voice_settings = {
+                **draft.voice_settings,
+                'confirmed_person_internal': (
+                    'Hi {{customer_name}}, this is Ava calling on behalf of Himanshu Soni, '
+                    'an Allstate Sales Agent. Do you have thirty seconds?'
+                ),
+                'confirmed_person_consented': (
+                    'Hi {{customer_name}}, this is Ava calling on behalf of Himanshu Soni, '
+                    'an Allstate Sales Agent. Do you have thirty seconds?'
+                ),
+            }
+
+            errors = validate_script_content(draft)
+
+            self.assertIn('voice_settings.confirmed_person_internal', errors)
+            self.assertIn('internal workflow test', errors['voice_settings.confirmed_person_internal'][0])
+            self.assertIn('voice_settings.confirmed_person_consented', errors)
+            self.assertIn('permission to be contacted', errors['voice_settings.confirmed_person_consented'][0])
+
     def test_confirm_first_node_patch_adds_stateful_identity_and_separate_endings(self):
         with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
             user = self.seed(db)
