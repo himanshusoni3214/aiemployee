@@ -862,8 +862,8 @@ async def authorize_internal_test_call(
         blockers.append('RETELL_INTERNAL_TEST_MODE is not enabled')
     if not row.internal_test_enabled:
         blockers.append('Internal test calling is disabled for this campaign')
-    if row.prospect_calling_enabled or row.automated_queue_enabled:
-        blockers.append('Prospect or automated calling must remain disabled for this milestone')
+    if row.automated_queue_enabled or row.campaign_status in {'running', 'waiting_for_window'}:
+        blockers.append('Pause the bulk calling queue before placing an internal test call')
     if confirmation not in INTERNAL_CONFIRMATIONS:
         blockers.append(f'Confirmation must exactly match {CONVERSATION_FLOW_INTERNAL_CONFIRMATION}')
     if not valid_us_ca_e164(phone):

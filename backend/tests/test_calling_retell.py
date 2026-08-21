@@ -202,6 +202,35 @@ class CallingRetellTests(unittest.TestCase):
             self.assertIn('Phone number is not on the internal-test allowlist', allowlist_blockers)
             self.assertEqual(db.scalars(select(CallAttempt)).all(), [])
 
+    def test_internal_test_requires_bulk_queue_to_be_paused(self):
+        engine = create_engine('sqlite://')
+        Base.metadata.create_all(engine)
+        session_factory = sessionmaker(bind=engine)
+        provider = MockCallingProvider()
+        with session_factory() as db, patch.object(settings, 'retell_internal_test_mode', True):
+            user = User(id='admin', email='admin@example.com', password_hash='x', role=Role.admin)
+            db.add(user)
+            ensure_allstate_calling_campaign(db, user.id)
+            campaign = db.scalar(select(CallCampaignSettings))
+            campaign.prospect_calling_enabled = True
+            campaign.automated_queue_enabled = True
+            campaign.campaign_status = 'waiting_for_window'
+            blocked, blockers, _ = __import__('asyncio').run(authorize_internal_test_call(
+                db, user, '+14165550123', CONVERSATION_FLOW_INTERNAL_CONFIRMATION,
+                provider, allow_atomic_allowlist=True,
+            ))
+            self.assertFalse(blocked)
+            self.assertIn('Pause the bulk calling queue', ' '.join(blockers))
+
+            campaign.automated_queue_enabled = False
+            campaign.campaign_status = 'paused'
+            allowed, paused_blockers, _ = __import__('asyncio').run(authorize_internal_test_call(
+                db, user, '+14165550123', CONVERSATION_FLOW_INTERNAL_CONFIRMATION,
+                provider, allow_atomic_allowlist=True,
+            ))
+            self.assertTrue(allowed)
+            self.assertEqual(paused_blockers, [])
+
     def test_provider_has_no_agent_creation_method(self):
         self.assertFalse(hasattr(RetellCallingProvider, 'create_agent'))
 

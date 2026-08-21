@@ -80,8 +80,12 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("READY TO CALL", source)
         self.assertIn("DRY RUN MY CONTACTS", source)
         self.assertIn("START APPROVED CALLING CAMPAIGN", source)
+        self.assertIn("data-voryx-internal-test-tool", source)
+        self.assertIn("/calling/allstate/internal-test-readiness", source)
+        self.assertIn("/calling/allstate/internal-test-call", source)
+        self.assertIn("Call this test number once", source)
+        self.assertIn("Scheduled for", source)
         self.assertIn("Advanced technical details", source)
-        self.assertNotIn("Place internal test call", source)
 
     def test_calling_consent_source_uses_presets_with_conditional_other_fields(self):
         source = read_frontend("components/AllstateCallingPanel.tsx")

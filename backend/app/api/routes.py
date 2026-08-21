@@ -2826,6 +2826,17 @@ async def _allstate_internal_test_readiness(
 
     checks = [
         {
+            'code': 'BULK_QUEUE_ACTIVE',
+            'field': None,
+            'label': 'Bulk queue paused',
+            'ready': bool(not row.automated_queue_enabled and row.campaign_status not in {'running', 'waiting_for_window'}),
+            'message': (
+                'Ready'
+                if not row.automated_queue_enabled and row.campaign_status not in {'running', 'waiting_for_window'}
+                else 'Pause the bulk calling queue before placing an internal test call.'
+            ),
+        },
+        {
             'code': 'PHONE_REQUIRED' if not phone_number.strip() else 'PHONE_INVALID',
             'field': 'phone_number',
             'label': 'Valid +1 E.164 number',

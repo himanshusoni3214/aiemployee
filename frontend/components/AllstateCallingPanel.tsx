@@ -45,6 +45,7 @@ type QueueItem = {
   status: string;
   outcome?: string | null;
   created_at?: string | null;
+  scheduled_after?: string | null;
   started_at?: string | null;
   completed_at?: string | null;
   duration_seconds?: number | null;
@@ -63,6 +64,12 @@ type QueueItem = {
   failure_code?: string | null;
   error_message?: string | null;
   advanced?: Record<string, unknown>;
+};
+
+type InternalTestReadiness = {
+  ready: boolean;
+  blockers: Array<{ code: string; field?: string | null; message: string }>;
+  checks: Array<{ code: string; label: string; ready: boolean; message: string }>;
 };
 
 type CallingState = {
@@ -198,6 +205,11 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   const [selectedResult, setSelectedResult] = useState<QueueItem | null>(null);
   const [dailyLimit, setDailyLimit] = useState(initialWorkspace.settings?.daily_call_limit || 20);
   const [concurrency, setConcurrency] = useState(initialWorkspace.settings?.concurrent_call_limit || 1);
+  const [testPhone, setTestPhone] = useState('');
+  const [testName, setTestName] = useState('Himanshu');
+  const [testConsent, setTestConsent] = useState(false);
+  const [testReadiness, setTestReadiness] = useState<InternalTestReadiness | null>(null);
+  const [testCallResult, setTestCallResult] = useState<any>(null);
   const [sourcePreset, setSourcePreset] = useState('');
   const [organizationPreset, setOrganizationPreset] = useState('Allstate');
   const [consentWordingPreset, setConsentWordingPreset] = useState('');
@@ -253,7 +265,43 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   }
 
   async function campaignAction(action: 'pause' | 'resume' | 'stop') {
+    setTestReadiness(null);
     await perform(() => api(`/calling/allstate/campaign/${action}`, { method: 'POST' }), `Campaign ${action} succeeded.`);
+  }
+
+  async function checkInternalTestReadiness() {
+    if (!testPhone || !testConsent) { setError('Enter your test number and confirm that you agree to receive one internal test call.'); return; }
+    setBusy(true); setError(''); setMessage('');
+    try {
+      const confirmation = workspace.confirmation_required || 'PLACE CONVERSATION-FLOW INTERNAL TEST CALL';
+      const result = await api(`/calling/allstate/internal-test-readiness?phone_number=${encodeURIComponent(testPhone)}&confirmation_text=${encodeURIComponent(confirmation)}&has_unpublished_changes=false`);
+      setTestReadiness(result);
+      if (result.ready) setMessage('Internal test is ready. No call has been placed yet.');
+    } catch (reason: any) {
+      console.error('Internal test readiness failed', reason);
+      setError(reason?.message || 'Internal test readiness check failed');
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function placeInternalTestCall() {
+    if (!testReadiness?.ready || !testConsent) { setError('Check test readiness before placing the call.'); return; }
+    const result = await perform(() => api('/calling/allstate/internal-test-call', {
+      method: 'POST',
+      body: JSON.stringify({
+        phone_number: testPhone,
+        recipient_name: testName || 'Himanshu',
+        insurance_interest: 'Auto and property insurance',
+        booking_timezone: 'America/Toronto',
+        confirmation_text: workspace.confirmation_required || 'PLACE CONVERSATION-FLOW INTERNAL TEST CALL',
+        has_unpublished_changes: false,
+      }),
+    }), 'One internal test call was started. The bulk queue remains paused.');
+    if (result) {
+      setTestCallResult(result);
+      setTestReadiness(null);
+    }
   }
 
   async function startCampaign() {
@@ -317,6 +365,11 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   const calling: CallingState = workspace.calling || { status: 'not_started', progress: { completed: 0, total: 0, queued: 0, calling: 0 }, today: { attempts: 0, answered: 0, appointments: 0, callbacks: 0, dnc: 0, no_answer: 0 }, queue_items: [], callbacks: [], cost_today: 0, average_cost: 0 };
   const readiness: Readiness = workspace.readiness || { ready: false, checks: [], blockers: [{ code: 'workspace', label: 'Calling workspace' }], eligible_contacts: 0, calling_now: false, daily_limit: 20, concurrency: 1, confirmation_required: 'START APPROVED CALLING CAMPAIGN' };
   const campaignStatus = calling.status || workspace.settings?.campaign_status || 'not_started';
+  const bulkQueueActive = ['running', 'waiting_for_window'].includes(campaignStatus);
+  const nextBulkCallAt = calling.queue_items
+    .filter((item) => item.status === 'queued' && item.scheduled_after)
+    .map((item) => item.scheduled_after as string)
+    .sort()[0];
   const sourceProfiles = workspace.script_studio?.consent_source_profiles || [];
   const published = workspace.script_studio?.published_version;
   const blockedReasonRows = useMemo(() => Object.entries(workspace.latest_import?.reason_counts || {}).sort((a: any, b: any) => b[1] - a[1]), [workspace.latest_import]);
@@ -398,13 +451,33 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
           <div className="mt-4 grid gap-3 md:grid-cols-4"><Metric label="Progress" value={`${calling.progress.completed} / ${calling.progress.total}`} /><Metric label="Queued" value={calling.progress.queued} /><Metric label="Calling now" value={calling.progress.calling} /><Metric label="Cost today" value={money(calling.cost_today)} /></div>
           <div className="mt-4 grid grid-cols-2 gap-3 md:grid-cols-4"><Metric label="Attempts" value={calling.today.attempts || 0} /><Metric label="Answered" value={calling.today.answered || 0} /><Metric label="Appointments" value={calling.today.appointments || 0} /><Metric label="Callbacks" value={calling.today.callbacks || 0} /><Metric label="DNC" value={calling.today.dnc || 0} /><Metric label="No answer" value={calling.today.no_answer || 0} /><Metric label="Avg cost/call" value={money(calling.average_cost)} /></div>
           {campaignStatus === 'waiting_for_window' ? <p className="mt-4 text-sm text-amber-300">Waiting for the next recipient-local calling window. This is not a failure.</p> : null}
+          {campaignStatus === 'waiting_for_window' && nextBulkCallAt ? <p className="mt-1 text-sm text-zinc-300">First queued call is scheduled for <LocalTime value={nextBulkCallAt} />.</p> : null}
+        </section>
+        <section className="card" data-voryx-internal-test-tool>
+          <div className="flex flex-wrap items-start justify-between gap-3">
+            <div><h2 className="text-lg font-semibold">Test one call before bulk</h2><p className="text-sm text-zinc-400">Calls only the number entered below. It never adds prospect contacts or starts the bulk queue.</p></div>
+            {bulkQueueActive ? <button type="button" className="btn-secondary" disabled={busy} onClick={() => void campaignAction('pause')}>Pause bulk for test</button> : null}
+          </div>
+          {bulkQueueActive ? <p className="mt-3 text-sm text-amber-300">Pause the bulk queue before testing. Your {calling.progress.queued} queued contacts will remain saved.</p> : null}
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            <label className="text-sm">Test recipient name<input className="input mt-1" value={testName} onChange={(event) => { setTestName(event.target.value); setTestReadiness(null); }} /></label>
+            <label className="text-sm">Test phone number<input className="input mt-1" type="tel" placeholder="+14165551234" value={testPhone} onChange={(event) => { setTestPhone(event.target.value); setTestReadiness(null); }} /></label>
+            <label className="flex items-start gap-2 text-sm md:col-span-2"><input className="mt-1" type="checkbox" checked={testConsent} onChange={(event) => { setTestConsent(event.target.checked); setTestReadiness(null); }} /><span>I confirm this is my or my authorized test number, and I agree to receive one recorded/transcribed internal test call.</span></label>
+          </div>
+          <div className="mt-4 flex flex-wrap gap-2">
+            <button type="button" className="btn-secondary" disabled={busy || !testPhone || !testConsent} onClick={() => void checkInternalTestReadiness()}>Check test readiness</button>
+            <button type="button" className="btn" disabled={busy || !testReadiness?.ready || bulkQueueActive} onClick={() => void placeInternalTestCall()}>Call this test number once</button>
+          </div>
+          {testReadiness && !testReadiness.ready ? <div className="mt-3 rounded border border-amber-800 bg-amber-950/20 p-3 text-sm text-amber-200"><div className="font-medium">Test call is not ready</div>{testReadiness.blockers.map((item) => <div key={item.code}>{item.message}</div>)}</div> : null}
+          {testReadiness?.ready ? <p className="mt-3 text-sm text-emerald-300">Ready for one internal test call. Bulk calling remains separate.</p> : null}
+          {testCallResult ? <p className="mt-3 text-sm text-emerald-300">Test call started. Attempt: {testCallResult.call_attempt_id}</p> : null}
         </section>
         {showStart ? <section className="card border-emerald-800" role="dialog" aria-label="Start calling confirmation"><h2 className="text-lg font-semibold">Confirm approved calling campaign</h2><div className="mt-3 grid gap-2 text-sm md:grid-cols-2"><div>Ready contacts: {readiness.eligible_contacts}</div><div>Blocked contacts: {(workspace.latest_import?.blocked || 0) + (workspace.latest_import?.needs_review || 0)}</div><div>From number: +14377475010</div><div>Script: v8</div><div>Calling now: {readiness.calling_now ? 'Yes' : 'No, wait for window'}</div><div>Concurrency: {readiness.concurrency}</div><div>Daily limit: {readiness.daily_limit}</div><div>Maximum calls today: {Math.min(readiness.eligible_contacts, readiness.daily_limit)}</div></div><div className="mt-4 flex gap-2"><button type="button" className="btn" disabled={busy} onClick={() => void startCampaign()}>START APPROVED CALLING CAMPAIGN</button><button type="button" className="btn-secondary" onClick={() => setShowStart(false)}>Cancel</button></div></section> : null}
       </> : null}
 
       {tab === 'results' ? <section className="card" data-voryx-call-results>
         <div className="flex items-center justify-between"><div><h2 className="text-lg font-semibold">Results</h2><p className="text-sm text-zinc-400">Appointments, callbacks, DNC and call outcomes update automatically.</p></div><button type="button" className="btn-secondary" onClick={() => void refresh()}>Refresh</button></div>
-        <div className="table-wrap mt-4"><table className="ops-table"><thead><tr><th>Name</th><th>Status</th><th>Call time</th><th>Duration</th><th>Outcome</th><th>Renewal</th><th>Callback</th><th>Appointment</th><th>Sales score</th><th>Cost</th><th>Details</th></tr></thead><tbody>{calling.queue_items.map((item) => <tr key={item.id}><td>{item.name}</td><td>{statusLabel(item.status)}</td><td><LocalTime value={item.started_at || item.created_at} /></td><td>{item.duration_seconds ? `${item.duration_seconds}s` : '-'}</td><td>{statusLabel(item.outcome || item.disposition)}</td><td>{item.renewal_month || '-'}</td><td><LocalTime value={item.callback_at} /></td><td>{item.appointment ? 'Booked' : '-'}</td><td>{item.sales_score ?? '-'}</td><td>{money(item.cost_usd)}</td><td><button type="button" className="btn-secondary text-xs" onClick={() => setSelectedResult(item)}>View</button></td></tr>)}{!calling.queue_items.length ? <tr><td colSpan={11} className="text-zinc-400">No campaign results yet.</td></tr> : null}</tbody></table></div>
+        <div className="table-wrap mt-4"><table className="ops-table"><thead><tr><th>Name</th><th>Status</th><th>Scheduled for</th><th>Call time</th><th>Duration</th><th>Outcome</th><th>Renewal</th><th>Callback</th><th>Appointment</th><th>Sales score</th><th>Cost</th><th>Details</th></tr></thead><tbody>{calling.queue_items.map((item) => <tr key={item.id}><td>{item.name}</td><td>{statusLabel(item.status)}</td><td><LocalTime value={item.scheduled_after} /></td><td><LocalTime value={item.started_at} /></td><td>{item.duration_seconds ? `${item.duration_seconds}s` : '-'}</td><td>{statusLabel(item.outcome || item.disposition)}</td><td>{item.renewal_month || '-'}</td><td><LocalTime value={item.callback_at} /></td><td>{item.appointment ? 'Booked' : '-'}</td><td>{item.sales_score ?? '-'}</td><td>{money(item.cost_usd)}</td><td><button type="button" className="btn-secondary text-xs" onClick={() => setSelectedResult(item)}>View</button></td></tr>)}{!calling.queue_items.length ? <tr><td colSpan={12} className="text-zinc-400">No campaign results yet.</td></tr> : null}</tbody></table></div>
         {selectedResult ? <div className="mt-4 rounded border border-zinc-800 p-4" role="dialog" aria-label="Result details"><div className="flex items-start justify-between"><div><h3 className="font-semibold">{selectedResult.name}</h3><p className="text-sm text-zinc-400">{statusLabel(selectedResult.outcome || selectedResult.status)}</p></div><button className="btn-secondary" type="button" onClick={() => setSelectedResult(null)}>Close</button></div><div className="mt-3 grid gap-3 md:grid-cols-3"><Metric label="Summary" value={selectedResult.summary || '-'} /><Metric label="Callback" value={selectedResult.callback_at ? <LocalTime value={selectedResult.callback_at} /> : '-'} /><Metric label="Appointment" value={selectedResult.appointment ? 'Booked' : '-'} /><Metric label="Sales quality" value={selectedResult.sales_score ?? '-'} /><Metric label="Cost" value={money(selectedResult.cost_usd)} /></div>{selectedResult.error_message ? <p className="mt-3 text-sm text-red-300">{selectedResult.error_message}</p> : null}{selectedResult.recording_url ? <a className="btn-secondary mt-3 inline-block" href={selectedResult.recording_url}>Recording</a> : null}<details className="mt-3 rounded border border-zinc-800 p-3"><summary className="cursor-pointer text-sm font-medium">Transcript</summary><pre className="mt-3 max-h-72 overflow-auto whitespace-pre-wrap text-xs text-zinc-300">{selectedResult.transcript || 'No transcript stored.'}</pre></details><details className="mt-3 rounded border border-zinc-800 p-3"><summary className="cursor-pointer text-sm font-medium">Advanced provider details</summary><pre className="mt-3 overflow-auto text-xs text-zinc-400">{JSON.stringify(selectedResult.advanced || {}, null, 2)}</pre></details></div> : null}
       </section> : null}
 

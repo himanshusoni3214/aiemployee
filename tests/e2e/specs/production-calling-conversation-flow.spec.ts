@@ -156,6 +156,8 @@ test('Allstate calling product completes no-call production workflow', async ({ 
 
     await page.reload({ waitUntil: 'networkidle' });
     await page.getByRole('button', { name: 'Calling', exact: true }).click();
+    await expect(page.locator('[data-voryx-internal-test-tool]')).toBeVisible();
+    await expect(page.getByRole('button', { name: 'Call this test number once', exact: true })).toBeDisabled();
     await page.getByRole('button', { name: 'Pause', exact: true }).click();
     await expect(page.getByText('Campaign pause succeeded.', { exact: true })).toBeVisible();
     expect((await client.query('select campaign_status from call_campaign_settings where campaign_id = $1', ['campaign-allstate-quote-calling'])).rows[0].campaign_status).toBe('paused');
