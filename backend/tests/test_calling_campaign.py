@@ -81,16 +81,45 @@ class CallingCampaignTests(unittest.TestCase):
         db.flush()
         return user, profile, campaign, script
 
-    def upload(self, db, user, profile, rows):
+    def upload(self, db, user, profile, rows, *, batch_consent_attested=False):
         columns = ['first_name', 'phone_number', 'consent_timestamp', 'consent_reference', 'is_test']
         content = ','.join(columns) + '\n' + '\n'.join(','.join(str(row.get(key, '')) for key in columns) for row in rows)
-        return upload_contacts(db, profile=profile, content=content, filename='qa.csv', user=user)
+        return upload_contacts(
+            db, profile=profile, content=content, filename='qa.csv', user=user,
+            batch_consent_attested=batch_consent_attested,
+        )
 
     def test_primary_template_is_small_and_business_facing(self):
         header = primary_csv_template().splitlines()[0].split(',')
-        self.assertEqual(header[:4], ['first_name', 'phone_number', 'consent_timestamp', 'consent_reference'])
+        self.assertEqual(header[:2], ['first_name', 'phone_number'])
+        self.assertNotIn('consent_timestamp', header)
+        self.assertNotIn('consent_reference', header)
         self.assertNotIn('retell_agent_id', header)
         self.assertNotIn('dncl_status', header)
+
+    def test_batch_attestation_creates_traceable_consent_without_per_row_columns(self):
+        content = 'first_name,phone_number,is_test\nBatch QA,6479169693,true\n'
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-v8'):
+            user, profile, _, _ = self.seed(db)
+            batch = upload_contacts(
+                db, profile=profile, content=content, filename='batch-qa.csv', user=user,
+                batch_consent_attested=True,
+            )
+            self.assertEqual((batch.ready_count, batch.review_count, batch.blocked_count), (1, 0, 0))
+            lead = db.scalar(select(ConsentedCallingLead))
+            self.assertEqual(lead.consent_type, 'express_automated_call_batch_attested')
+            self.assertTrue(lead.consent_reference.startswith(f'voryx-upload:{batch.id}:row:'))
+            self.assertIsNotNone(lead.consent_timestamp)
+            self.assertIn('batch attested by admin', lead.consent_proof)
+
+    def test_missing_per_row_consent_still_requires_review_without_attestation(self):
+        content = 'first_name,phone_number\nReview QA,6479169693\n'
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-v8'):
+            user, profile, _, _ = self.seed(db)
+            batch = upload_contacts(db, profile=profile, content=content, filename='review.csv', user=user)
+            self.assertEqual((batch.ready_count, batch.review_count, batch.blocked_count), (0, 1, 0))
+            self.assertEqual(batch.reason_counts['CONSENT_REFERENCE_MISSING'], 1)
+            self.assertEqual(batch.reason_counts['CONSENT_TIMESTAMP_MISSING'], 1)
 
     def test_canadian_numbers_are_normalized_and_non_canadian_blocked(self):
         self.assertTrue(is_canadian_e164('+16479169693'))

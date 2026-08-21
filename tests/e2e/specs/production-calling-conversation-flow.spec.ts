@@ -113,18 +113,20 @@ test('Allstate calling product completes no-call production workflow', async ({ 
     const download = await downloadPromise;
     const templatePath = path.join(downloads, 'allstate-calling-contacts.csv');
     await download.saveAs(templatePath);
-    expect((await readFile(templatePath, 'utf8')).split('\n')[0].trim()).toBe('first_name,phone_number,consent_timestamp,consent_reference,last_name,product_interest,renewal_month,preferred_call_time,timezone,notes');
+    expect((await readFile(templatePath, 'utf8')).split('\n')[0].trim()).toBe('first_name,phone_number,last_name,product_interest,renewal_month,preferred_call_time,timezone,notes');
 
     const consentSource = page.locator('select[data-voryx-consent-source]');
     await expect(consentSource).toBeVisible();
     if (await consentSource.inputValue() !== ids.profile) await consentSource.selectOption(ids.profile!);
     await expect(consentSource).toHaveValue(ids.profile!);
     await page.getByLabel('CSV file', { exact: true }).setInputFiles(syntheticCsv);
+    await page.getByText('I confirm every number in this file gave prior express consent', { exact: false }).click();
+    await expect(page.locator('input[data-voryx-batch-consent]')).toBeChecked();
     await page.getByRole('button', { name: 'Upload Contacts', exact: true }).click();
     await expect(page.getByText('Contacts uploaded and validated.', { exact: true })).toBeVisible();
     await expect(page.locator('[data-voryx-import-review]')).toContainText('Uploaded4');
-    await expect(page.locator('[data-voryx-import-review]')).toContainText('Ready for AI call1');
-    await expect(page.locator('[data-voryx-import-review]')).toContainText('Needs review1');
+    await expect(page.locator('[data-voryx-import-review]')).toContainText('Ready for AI call2');
+    await expect(page.locator('[data-voryx-import-review]')).toContainText('Needs review0');
     await expect(page.locator('[data-voryx-import-review]')).toContainText('Blocked2');
     await page.screenshot({ path: path.join(screenshots, 'calling-contact-review.png'), fullPage: true });
 
@@ -245,12 +247,15 @@ test('Allstate calling product completes no-call production workflow', async ({ 
 
     await writeFile(path.join(auditDir(), 'CALLING_PRODUCT_EVIDENCE.json'), JSON.stringify({
       runId, ids, attemptsBefore, attemptsAfter, realCallsPlaced: 0,
-      checks: ['template', 'upload', 'normalization', 'duplicate', 'missing consent', 'non-Canadian block', 'dry run', 'mock queue', 'pause', 'resume', 'stop', 'results', 'callback', 'renewal callback', 'appointment', 'dnc'],
+      checks: ['template', 'upload', 'batch consent attestation', 'normalization', 'duplicate', 'non-Canadian block', 'dry run', 'mock queue', 'pause', 'resume', 'stop', 'results', 'callback', 'renewal callback', 'appointment', 'dnc'],
     }, null, 2));
   } finally {
     await client.query('begin');
     try {
-      if (ids.lead) await client.query("delete from call_queue_items where canonical_lead_id = $1 and execution_mode = 'mock'", [ids.lead]);
+      const importedLeadIds = ids.batch
+        ? (await client.query('select canonical_lead_id from call_contact_import_rows where batch_id = $1 and canonical_lead_id is not null', [ids.batch])).rows.map((row) => row.canonical_lead_id)
+        : [];
+      if (importedLeadIds.length) await client.query("delete from call_queue_items where canonical_lead_id = any($1::varchar[]) and execution_mode = 'mock'", [importedLeadIds]);
       await client.query('delete from call_queue_items where dedupe_key like $1', [`${runId}:%`]);
       await client.query('delete from call_appointments where call_attempt_id = any($1::varchar[])', [ids.attempts]);
       await client.query('delete from call_dispositions where call_attempt_id = any($1::varchar[])', [ids.attempts]);
@@ -263,7 +268,7 @@ test('Allstate calling product completes no-call production workflow', async ({ 
         await client.query('delete from call_contact_import_rows where batch_id = $1 and is_test = true', [ids.batch]);
         await client.query('delete from call_contact_import_batches where id = $1 and filename = $2', [ids.batch, `${runId}.csv`]);
       }
-      if (ids.lead) await client.query('delete from consented_calling_leads where id = $1 and is_test = true', [ids.lead]);
+      if (importedLeadIds.length) await client.query('delete from consented_calling_leads where id = any($1::varchar[]) and is_test = true', [importedLeadIds]);
       if (ids.profile) await client.query('delete from consent_source_profiles where id = $1 and name = $2', [ids.profile, profileName]);
       await client.query("update call_campaign_settings set campaign_status = 'not_started', prospect_calling_enabled = false, automated_queue_enabled = false where campaign_id = 'campaign-allstate-quote-calling'");
       await client.query('commit');

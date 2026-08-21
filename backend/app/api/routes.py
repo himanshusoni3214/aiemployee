@@ -2573,6 +2573,7 @@ def download_allstate_consented_lead_template(mode: str=Query(default='simple', 
 @router.post('/calling/allstate/contacts/upload')
 async def upload_allstate_contacts(
     profile_id: str=Form(...),
+    batch_consent_attested: bool=Form(False),
     file: UploadFile=File(...),
     db: Session=Depends(get_db),
     user: User=Depends(require_write),
@@ -2584,7 +2585,14 @@ async def upload_allstate_contacts(
         raise HTTPException(400, 'Upload a CSV file')
     try:
         content = (await file.read()).decode('utf-8-sig')
-        batch = upload_contacts(db, profile=profile, content=content, filename=str(file.filename), user=user)
+        batch = upload_contacts(
+            db,
+            profile=profile,
+            content=content,
+            filename=str(file.filename),
+            user=user,
+            batch_consent_attested=batch_consent_attested,
+        )
     except (UnicodeDecodeError, ValueError) as exc:
         db.rollback()
         raise HTTPException(400, str(exc)) from exc

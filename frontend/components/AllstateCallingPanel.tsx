@@ -192,6 +192,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   const [error, setError] = useState('');
   const [file, setFile] = useState<File | null>(null);
   const [profileId, setProfileId] = useState(initialWorkspace.script_studio?.consent_source_profiles?.[0]?.id || '');
+  const [batchConsentConfirmed, setBatchConsentConfirmed] = useState(false);
   const [dryRun, setDryRun] = useState<any>(null);
   const [showStart, setShowStart] = useState(false);
   const [selectedResult, setSelectedResult] = useState<QueueItem | null>(null);
@@ -238,9 +239,11 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   }
 
   async function upload() {
-    if (!file || !profileId) { setError('Select a Consent Source and CSV file.'); return; }
+    if (!file || !profileId || !batchConsentConfirmed) { setError('Select a Consent Source, choose a CSV file, and confirm consent for the uploaded numbers.'); return; }
     const body = new FormData();
-    body.append('profile_id', profileId); body.append('file', file);
+    body.append('profile_id', profileId);
+    body.append('batch_consent_attested', 'true');
+    body.append('file', file);
     await perform(() => api('/calling/allstate/contacts/upload', { method: 'POST', body }), 'Contacts uploaded and validated.');
   }
 
@@ -322,7 +325,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
     || workspace.latest_import?.reason_counts?.CONSENT_TIMESTAMP_MISSING,
   );
   const startBlockerMessage = missingConsentEvidence
-    ? 'Start Calling is blocked: uploaded rows need a consent timestamp and consent reference. Correct those two CSV columns and upload again.'
+    ? 'Start Calling is blocked: confirm that every uploaded number has prior express consent, then upload the file again.'
     : `Start Calling is blocked: ${readiness.blockers.map((item) => item.label).join(', ') || 'calling readiness is incomplete'}.`;
 
   return (
@@ -362,11 +365,15 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
 
       {tab === 'contacts' ? <>
         <section className="card" data-voryx-contact-upload>
-          <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">Contacts</h2><p className="text-sm text-zinc-400">Required: first name, phone number, consent timestamp and consent reference.</p></div><button type="button" className="btn-secondary" onClick={() => void downloadApi('/calling/allstate/consented-leads/template.csv?mode=simple', 'allstate-calling-contacts.csv')}>Download Template</button></div>
+          <div className="flex flex-wrap items-center justify-between gap-3"><div><h2 className="text-lg font-semibold">Contacts</h2><p className="text-sm text-zinc-400">Required: first name and Canadian phone number.</p></div><button type="button" className="btn-secondary" onClick={() => void downloadApi('/calling/allstate/consented-leads/template.csv?mode=simple', 'allstate-calling-contacts.csv')}>Download Template</button></div>
           <div className="mt-4 grid gap-3 md:grid-cols-[1fr_1fr_auto]">
             <label className="text-sm">Consent Source<select data-voryx-consent-source className="input mt-1" value={profileId} onChange={(event) => setProfileId(event.target.value)}><option value="">Select source</option>{sourceProfiles.map((item: any) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label>
             <label className="text-sm">CSV file<input className="input mt-1" type="file" accept=".csv,text/csv" onChange={(event) => setFile(event.target.files?.[0] || null)} /></label>
-            <button type="button" className="btn self-end" disabled={busy || !file || !profileId} onClick={() => void upload()}>Upload Contacts</button>
+            <button type="button" className="btn self-end" disabled={busy || !file || !profileId || !batchConsentConfirmed} onClick={() => void upload()}>Upload Contacts</button>
+            <label className="flex items-start gap-2 text-sm md:col-span-3">
+              <input data-voryx-batch-consent type="checkbox" className="mt-1" checked={batchConsentConfirmed} onChange={(event) => setBatchConsentConfirmed(event.target.checked)} />
+              <span>I confirm every number in this file gave prior express consent for automated or synthesized calls from the organization in the selected Consent Source, and the source record can be produced.</span>
+            </label>
           </div>
         </section>
         {workspace.latest_import ? <section className="card" data-voryx-import-review>

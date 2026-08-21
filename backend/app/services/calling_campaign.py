@@ -46,7 +46,9 @@ from app.services.calling_eligibility import (
 
 
 START_CONFIRMATION = 'START APPROVED CALLING CAMPAIGN'
-PRIMARY_COLUMNS = ['first_name', 'phone_number', 'consent_timestamp', 'consent_reference']
+REQUIRED_COLUMNS = ['first_name', 'phone_number']
+CONSENT_COLUMNS = ['consent_timestamp', 'consent_reference']
+PRIMARY_COLUMNS = REQUIRED_COLUMNS + CONSENT_COLUMNS
 OPTIONAL_COLUMNS = [
     'last_name', 'product_interest', 'renewal_month', 'preferred_call_time',
     'timezone', 'notes',
@@ -75,7 +77,7 @@ def _local_day_bounds(timezone_name: str, now: datetime | None = None) -> tuple[
 
 def primary_csv_template() -> str:
     output = io.StringIO()
-    csv.DictWriter(output, fieldnames=PRIMARY_COLUMNS + OPTIONAL_COLUMNS).writeheader()
+    csv.DictWriter(output, fieldnames=REQUIRED_COLUMNS + OPTIONAL_COLUMNS).writeheader()
     return output.getvalue()
 
 
@@ -112,11 +114,12 @@ def upload_contacts(
     content: str,
     filename: str,
     user: User,
+    batch_consent_attested: bool = False,
 ) -> CallContactImportBatch:
     rows = [dict(item) for item in csv.DictReader(io.StringIO(content))]
     if not rows:
         raise ValueError('CSV contains no contact rows')
-    missing_headers = [column for column in PRIMARY_COLUMNS if column not in (rows[0] or {})]
+    missing_headers = [column for column in REQUIRED_COLUMNS if column not in (rows[0] or {})]
     if missing_headers:
         raise ValueError(f'Missing required columns: {", ".join(missing_headers)}')
     now = _now()
@@ -139,8 +142,12 @@ def upload_contacts(
         first_name = str(raw.get('first_name') or '').strip()
         raw_phone = str(raw.get('phone_number') or '').strip()
         phone = normalize_phone(raw_phone)
-        consent_reference = str(raw.get('consent_reference') or '').strip()
-        consent_timestamp = _parse_timestamp(raw.get('consent_timestamp'))
+        supplied_consent_reference = str(raw.get('consent_reference') or '').strip()
+        supplied_consent_timestamp = _parse_timestamp(raw.get('consent_timestamp'))
+        consent_reference = supplied_consent_reference or (
+            f'voryx-upload:{batch.id}:row:{row_number}' if batch_consent_attested else ''
+        )
+        consent_timestamp = supplied_consent_timestamp or (now if batch_consent_attested else None)
         raw_is_test = str(raw.get('is_test') or '').strip().lower() in {'1', 'true', 'yes'}
         reasons: list[tuple[str, str, str]] = list(profile_reasons)
         if not first_name:
@@ -187,14 +194,23 @@ def upload_contacts(
                 province=profile.default_province or 'Ontario',
                 product_interest=str(raw.get('product_interest') or 'Auto and property insurance').strip(),
                 consent_status='verified',
-                consent_type='express_automated_call',
+                consent_type=(
+                    'express_automated_call_batch_attested'
+                    if batch_consent_attested and not supplied_consent_reference
+                    else 'express_automated_call'
+                ),
                 consent_source=profile.name,
                 consent_text=profile.approved_consent_language,
                 consent_timestamp=consent_timestamp,
                 consented_number=phone,
                 automated_or_synthesized_call_consent=True,
                 organization_authorized=True,
-                consent_proof=f'{profile.consent_proof_method}: {consent_reference}',
+                consent_proof=(
+                    f'{profile.consent_proof_method}: {consent_reference}; '
+                    f'batch attested by {user.id} at {now.isoformat()} UTC'
+                    if batch_consent_attested and not supplied_consent_reference
+                    else f'{profile.consent_proof_method}: {consent_reference}'
+                ),
                 consent_reference=consent_reference,
                 consent_withdrawn=False,
                 renewal_month=str(raw.get('renewal_month') or '').strip() or None,
@@ -228,6 +244,10 @@ def upload_contacts(
             'phone_number': phone if is_canadian_e164(phone) else None,
             'consent_timestamp': consent_timestamp.isoformat() if consent_timestamp else None,
             'consent_reference': consent_reference or None,
+            'batch_consent_attested': batch_consent_attested,
+            'batch_attested_at': now.isoformat() if batch_consent_attested else None,
+            'batch_attested_by': user.id if batch_consent_attested else None,
+            'source_profile_id': profile.id,
             'product_interest': str(raw.get('product_interest') or 'Auto and property insurance').strip(),
             'renewal_month': str(raw.get('renewal_month') or '').strip() or None,
             'preferred_call_time': str(raw.get('preferred_call_time') or '').strip() or None,
