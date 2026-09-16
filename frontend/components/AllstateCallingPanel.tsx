@@ -372,6 +372,9 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
     .sort()[0];
   const sourceProfiles = workspace.script_studio?.consent_source_profiles || [];
   const published = workspace.script_studio?.published_version;
+  const completedContacts = (workspace.script_studio?.consented_leads || []).filter(
+    (lead: any) => lead.eligibility_status === 'Completed',
+  ).length;
   const blockedReasonRows = useMemo(() => Object.entries(workspace.latest_import?.reason_counts || {}).sort((a: any, b: any) => b[1] - a[1]), [workspace.latest_import]);
   const missingConsentEvidence = Boolean(
     workspace.latest_import?.reason_counts?.CONSENT_REFERENCE_MISSING
@@ -379,6 +382,8 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
   );
   const startBlockerMessage = missingConsentEvidence
     ? 'Start Calling is blocked: confirm that every uploaded number has prior express consent, then upload the file again.'
+    : !readiness.eligible_contacts && completedContacts
+      ? `${completedContacts} uploaded contact${completedContacts === 1 ? ' has' : 's have'} already completed a call. Upload new consented contacts for bulk calling, or use Test one call before bulk to call your own authorized test number again.`
     : `Start Calling is blocked: ${readiness.blockers.map((item) => item.label).join(', ') || 'calling readiness is incomplete'}.`;
 
   return (
@@ -401,9 +406,10 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
         <section className="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
           <Metric label="Calling provider" value={workspace.health?.api_authenticated ? 'Connected' : 'Blocked'} />
           <Metric label="Phone number" value="+1 437-747-5010" />
-          <Metric label="Script" value={published?.version_number === 8 ? 'Ready' : 'Blocked'} />
+          <Metric label="Script" value={published?.status === 'published' ? `Ready (v${published.version_number})` : 'Blocked'} />
           <Metric label="Compliance" value={(workspace.script_studio?.compliance_blockers || []).length ? 'Blocked' : 'Ready'} />
           <Metric label="Contacts ready" value={readiness.eligible_contacts} />
+          <Metric label="Contacts completed" value={completedContacts} />
           <Metric label="Calls today" value={calling.today.attempts || 0} />
           <Metric label="Appointments" value={calling.today.appointments || 0} />
           <Metric label="Callbacks" value={calling.today.callbacks || 0} />
@@ -472,7 +478,7 @@ export function AllstateCallingPanel({ initialWorkspace }: { initialWorkspace: C
           {testReadiness?.ready ? <p className="mt-3 text-sm text-emerald-300">Ready for one internal test call. Bulk calling remains separate.</p> : null}
           {testCallResult ? <p className="mt-3 text-sm text-emerald-300">Test call started. Attempt: {testCallResult.call_attempt_id}</p> : null}
         </section>
-        {showStart ? <section className="card border-emerald-800" role="dialog" aria-label="Start calling confirmation"><h2 className="text-lg font-semibold">Confirm approved calling campaign</h2><div className="mt-3 grid gap-2 text-sm md:grid-cols-2"><div>Ready contacts: {readiness.eligible_contacts}</div><div>Blocked contacts: {(workspace.latest_import?.blocked || 0) + (workspace.latest_import?.needs_review || 0)}</div><div>From number: +14377475010</div><div>Script: v8</div><div>Calling now: {readiness.calling_now ? 'Yes' : 'No, wait for window'}</div><div>Concurrency: {readiness.concurrency}</div><div>Daily limit: {readiness.daily_limit}</div><div>Maximum calls today: {Math.min(readiness.eligible_contacts, readiness.daily_limit)}</div></div><div className="mt-4 flex gap-2"><button type="button" className="btn" disabled={busy} onClick={() => void startCampaign()}>START APPROVED CALLING CAMPAIGN</button><button type="button" className="btn-secondary" onClick={() => setShowStart(false)}>Cancel</button></div></section> : null}
+        {showStart ? <section className="card border-emerald-800" role="dialog" aria-label="Start calling confirmation"><h2 className="text-lg font-semibold">Confirm approved calling campaign</h2><div className="mt-3 grid gap-2 text-sm md:grid-cols-2"><div>Ready contacts: {readiness.eligible_contacts}</div><div>Blocked contacts: {(workspace.latest_import?.blocked || 0) + (workspace.latest_import?.needs_review || 0)}</div><div>From number: +14377475010</div><div>Script: v{published?.version_number || '-'}</div><div>Calling now: {readiness.calling_now ? 'Yes' : 'No, wait for window'}</div><div>Concurrency: {readiness.concurrency}</div><div>Daily limit: {readiness.daily_limit}</div><div>Maximum calls today: {Math.min(readiness.eligible_contacts, readiness.daily_limit)}</div></div><div className="mt-4 flex gap-2"><button type="button" className="btn" disabled={busy} onClick={() => void startCampaign()}>START APPROVED CALLING CAMPAIGN</button><button type="button" className="btn-secondary" onClick={() => setShowStart(false)}>Cancel</button></div></section> : null}
       </> : null}
 
       {tab === 'results' ? <section className="card" data-voryx-call-results>

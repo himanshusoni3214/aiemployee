@@ -28,6 +28,7 @@ from app.services.call_script_studio import ensure_compliance_items, ensure_scri
 from app.services.calling import ensure_allstate_calling_campaign, mark_do_not_call, process_retell_webhook
 from app.services.calling_campaign import (
     START_CONFIRMATION,
+    campaign_readiness,
     control_campaign,
     primary_csv_template,
     process_next_queue_item,
@@ -96,6 +97,27 @@ class CallingCampaignTests(unittest.TestCase):
         self.assertNotIn('consent_reference', header)
         self.assertNotIn('retell_agent_id', header)
         self.assertNotIn('dncl_status', header)
+
+    def test_readiness_tracks_current_published_retell_versions_not_v8(self):
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-v12'):
+            _, _, campaign, script = self.seed(db)
+            script.version_number = 12
+            script.retell_agent_id = 'agent-v12'
+            script.retell_agent_version = 12
+            script.retell_flow_version = 14
+            campaign.provider_agent_id = 'agent-v12'
+            campaign.baseline_version = 'v12'
+            result = campaign_readiness(db, {
+                'api_authenticated': True,
+                'agent_exists': True,
+                'outbound_agent_correctly_assigned': True,
+                'outbound_agents': [{'agent_id': 'agent-v12', 'agent_version': 12, 'weight': 1}],
+                'response_engine': {'type': 'conversation-flow', 'version': 14},
+                'tool_token_configured': True,
+                'webhook_signature_key_configured': True,
+            })
+            script_check = next(item for item in result['checks'] if item['code'] == 'script')
+            self.assertTrue(script_check['ready'])
 
     def test_batch_attestation_creates_traceable_consent_without_per_row_columns(self):
         content = 'first_name,phone_number,is_test\nBatch QA,6479169693,true\n'

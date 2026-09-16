@@ -85,6 +85,9 @@ class FrontendRuntimeContractTests(unittest.TestCase):
         self.assertIn("/calling/allstate/internal-test-call", source)
         self.assertIn("Call this test number once", source)
         self.assertIn("Scheduled for", source)
+        self.assertIn("Contacts completed", source)
+        self.assertIn("already completed a call", source)
+        self.assertNotIn("published?.version_number === 8", source)
         self.assertIn("Advanced technical details", source)
 
     def test_calling_consent_source_uses_presets_with_conditional_other_fields(self):

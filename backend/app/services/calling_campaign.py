@@ -398,10 +398,21 @@ def campaign_readiness(db: Session, health: dict) -> dict:
     )) or 0)
     timezone_name = row.timezone if row else 'America/Toronto'
     in_window, next_window, _ = calling_window(timezone_name, row)
+    outbound = health.get('outbound_agents') or []
+    script_ready = bool(
+        script
+        and (script.retell_agent_version or 0) > 0
+        and (script.retell_flow_version or 0) > 0
+        and len(outbound) == 1
+        and outbound[0].get('agent_id') == script.retell_agent_id
+        and int(outbound[0].get('agent_version') or -1) == int(script.retell_agent_version or -2)
+        and (health.get('response_engine') or {}).get('type') == 'conversation-flow'
+        and int((health.get('response_engine') or {}).get('version') or -1) == int(script.retell_flow_version or -2)
+    )
     checks = [
         ('provider', 'Provider', bool(health.get('api_authenticated') and health.get('agent_exists'))),
         ('caller_id', 'Caller ID', bool(health.get('outbound_agent_correctly_assigned'))),
-        ('script', 'Script', bool(script and script.version_number == 8 and script.retell_agent_version == 8 and script.retell_flow_version == 8 and (health.get('response_engine') or {}).get('type') == 'conversation-flow' and int((health.get('response_engine') or {}).get('version') or 0) == 8)),
+        ('script', 'Script', script_ready),
         ('compliance', 'Compliance', compliance >= 19),
         ('consent_source', 'Consent source', profile_ready),
         ('contacts', 'Contacts uploaded', bool(leads)),

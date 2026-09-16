@@ -3,6 +3,7 @@ import hashlib
 import hmac
 import json
 import re
+import time
 from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -583,6 +584,20 @@ class RetellCallingProvider:
     def verify_webhook(self, raw_body: bytes, signature: str | None) -> bool:
         if not signature or not self.webhook_key:
             return False
+        match = re.fullmatch(r'v=(\d+),d=([0-9a-fA-F]+)', signature.strip())
+        if match:
+            timestamp = int(match.group(1))
+            if abs(int(time.time() * 1000) - timestamp) > 5 * 60 * 1000:
+                return False
+            digest = hmac.new(
+                self.webhook_key.encode(),
+                raw_body + match.group(1).encode(),
+                hashlib.sha256,
+            ).hexdigest()
+            return hmac.compare_digest(digest, match.group(2).lower())
+
+        # Retain compatibility with callbacks signed before Retell introduced
+        # timestamped replay protection.
         digest = hmac.new(self.webhook_key.encode(), raw_body, hashlib.sha256).digest()
         candidates = {
             digest.hex(),

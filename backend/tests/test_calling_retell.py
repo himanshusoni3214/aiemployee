@@ -114,6 +114,17 @@ class CallingRetellTests(unittest.TestCase):
         self.assertTrue(provider.verify_webhook(raw, f'sha256={digest}'))
         self.assertFalse(provider.verify_webhook(raw, 'bad-signature'))
 
+    def test_retell_signature_accepts_current_timestamped_format_and_rejects_replay(self):
+        raw = b'{"event":"call_ended","call":{"call_id":"call_test"}}'
+        key = 'webhook-secret'
+        timestamp = 1_789_000_000_000
+        digest = hmac.new(key.encode(), raw + str(timestamp).encode(), hashlib.sha256).hexdigest()
+        provider = RetellCallingProvider(api_key='', webhook_key=key)
+        with patch('app.services.calling.time.time', return_value=timestamp / 1000):
+            self.assertTrue(provider.verify_webhook(raw, f'v={timestamp},d={digest}'))
+        with patch('app.services.calling.time.time', return_value=(timestamp + 301_000) / 1000):
+            self.assertFalse(provider.verify_webhook(raw, f'v={timestamp},d={digest}'))
+
     def test_mock_provider_is_explicitly_mocked(self):
         provider = MockCallingProvider()
         self.assertTrue(provider.verify_webhook(b'{}', 'test-valid'))

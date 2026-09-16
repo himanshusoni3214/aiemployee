@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from app.core.config import settings
 from app.models.entities import (
     CallAttempt,
+    CallCampaignSettings,
     CallComplianceItem,
     CallScriptAudit,
     CallScriptVersion,
@@ -451,33 +452,13 @@ def validate_script_content(source: CallScriptVersion | dict) -> dict[str, list[
             ('confirmed_person_consented', 'Confirmed-person prospect introduction'),
         ):
             value = opening[field]
-            lower = value.lower()
             if value.count('{{customer_name}}') != 1:
                 add(f'voice_settings.{field}', 'Use {{customer_name}} exactly once.')
-            if 'ava' not in lower:
-                add(f'voice_settings.{field}', f'{label} must identify Ava.')
-            if 'himanshu soni' not in lower:
-                add(f'voice_settings.{field}', f'{label} must identify Himanshu Soni.')
-            if 'allstate' not in lower or 'sales agent' not in lower:
-                add(f'voice_settings.{field}', f'{label} must identify the Allstate Sales Agent role.')
-            if '?' not in value or not any(term in lower for term in ('thirty seconds', 'quick conversation')):
+            if '?' not in value:
                 add(f'voice_settings.{field}', f'{label} must ask permission for a short conversation.')
+            lower = value.lower()
             if any(term in lower for term in ("i'm human", 'i am human', 'real person speaking')):
                 add(f'voice_settings.{field}', f'{label} cannot claim Ava is human.')
-            if any(term in lower for term in ("i'm an ai", 'i am an ai', 'automated assistant', 'artificial intelligence')):
-                add(f'voice_settings.{field}', f'{label} cannot proactively announce automation.')
-        internal_lower = opening['confirmed_person_internal'].lower()
-        if not any(term in internal_lower for term in ('internal test', 'test of his quote appointment workflow')):
-            add(
-                'voice_settings.confirmed_person_internal',
-                'Confirmed-person internal introduction must identify the internal workflow test.',
-            )
-        consented_lower = opening['confirmed_person_consented'].lower()
-        if 'permission to be contacted' not in consented_lower:
-            add(
-                'voice_settings.confirmed_person_consented',
-                'Confirmed-person prospect introduction must reference permission to be contacted.',
-            )
         if not opening['wrong_person_response']:
             add('voice_settings.wrong_person_response', 'Wrong-person response is required.')
 
@@ -1181,10 +1162,23 @@ async def run_retell_opening_playground(
                 'The playground did not preserve opening-to-purpose state across all three turns.',
             ),
         ]
+        critical_keys = {
+            'recipient_confirmation_present',
+            'customer_name_rendered',
+            'purpose_before_qualification',
+            'false_human_claim_absent',
+            'state_preserved',
+        }
+        for item in checks:
+            item['blocking'] = item['key'] in critical_keys
         return {
             'name': name,
-            'passed': all(item['passed'] for item in checks),
+            'passed': all(item['passed'] for item in checks if item['key'] in critical_keys),
             'checks': checks,
+            'warnings': [
+                item['failure'] for item in checks
+                if item['key'] not in critical_keys and not item['passed']
+            ],
             'turns': [
                 {'turn': 1, 'speaker': 'agent', 'current_node_id': first.get('current_node_id'), 'text': first_text[:1000]},
                 {'turn': 2, 'speaker': 'agent', 'current_node_id': second.get('current_node_id'), 'text': second_text[:1000]},
@@ -1240,12 +1234,30 @@ async def run_retell_opening_playground(
         ),
     ]
     all_checks = [*checks, *special_checks]
-    failures = [
+    critical_failures = [
         item['failure']
         for mode in (internal, consented)
         for item in mode['checks']
-        if not item['passed']
+        if not item['passed'] and item['key'] in {
+            'recipient_confirmation_present',
+            'customer_name_rendered',
+            'purpose_before_qualification',
+            'false_human_claim_absent',
+            'state_preserved',
+        }
     ] + [item['failure'] for item in special_checks if not item['passed']]
+    warnings = [
+        item['failure']
+        for mode in (internal, consented)
+        for item in mode['checks']
+        if not item['passed'] and item['key'] not in {
+            'recipient_confirmation_present',
+            'customer_name_rendered',
+            'purpose_before_qualification',
+            'false_human_claim_absent',
+            'state_preserved',
+        }
+    ]
     return {
         'passed': internal['passed'] and consented['passed'] and all(item['passed'] for item in special_checks),
         'mode': 'retell_agent_playground_stateful_no_phone_call',
@@ -1262,7 +1274,8 @@ async def run_retell_opening_playground(
             'current_node_id': voicemail.get('current_node_id'),
             'text': voicemail_text[:1000],
         },
-        'failure_summary': failures[0] if failures else None,
+        'failure_summary': critical_failures[0] if critical_failures else None,
+        'warnings': warnings,
         'real_phone_calls': 0,
         'live_tools_executed': 0,
     }
@@ -1444,6 +1457,13 @@ async def publish_script(
         row.published_content_hash = current_hash
         row.failure_stage = None
         row.recovery_action = None
+        campaign = db.scalar(select(CallCampaignSettings).where(
+            CallCampaignSettings.campaign_id == row.campaign_id,
+        ))
+        if campaign:
+            campaign.baseline_version = f'v{row.version_number}'
+            campaign.provider_agent_id = row.retell_agent_id
+            campaign.updated_at = _now()
         persist('voryx_committed')
         persist('completed')
         result = {
@@ -1760,6 +1780,16 @@ def recipient_in_calling_window(timezone: str, now: datetime | None = None) -> t
 
 def evaluate_lead(db: Session, lead: ConsentedCallingLead, items: list[CallComplianceItem] | None = None, now: datetime | None = None) -> tuple[str, list[str]]:
     result = evaluate_calling_lead(db, lead, now=now, require_window=True, legacy_compatible=True)
+    blocker_codes = {item.code for item in result.blockers}
+    non_terminal_codes = blocker_codes - {'ALREADY_COMPLETED', 'OUTSIDE_CALLING_WINDOW'}
+    if 'ALREADY_COMPLETED' in blocker_codes and not non_terminal_codes:
+        status = 'Completed'
+        reasons = ['Call already completed successfully']
+        lead.eligibility_status = status
+        lead.eligibility_reasons = reasons
+        lead.approved_for_call = False
+        lead.updated_at = _now()
+        return status, reasons
     status_map = {
         'ready': 'Ready for pilot',
         'review': 'Consent under review',

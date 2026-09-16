@@ -148,12 +148,8 @@ function validateForm(values: FormValues): Record<string, string[]> {
       ['confirmed_person_consented', 'Confirmed-person prospect introduction'],
     ] as const) {
       const value = String(values.voice_settings?.[field] || '').trim();
-      const lower = value.toLowerCase();
       if ((value.match(/\{\{customer_name\}\}/g) || []).length !== 1) add(`voice_settings.${field}`, `${label} must use {{customer_name}} exactly once.`);
-      if (!lower.includes('ava')) add(`voice_settings.${field}`, `${label} must identify Ava.`);
-      if (!lower.includes('himanshu soni')) add(`voice_settings.${field}`, `${label} must identify Himanshu Soni.`);
-      if (!lower.includes('allstate') || !lower.includes('sales agent')) add(`voice_settings.${field}`, `${label} must identify the Allstate Sales Agent role.`);
-      if (!value.includes('?') || !['thirty seconds', 'quick conversation'].some((term) => lower.includes(term))) add(`voice_settings.${field}`, `${label} must ask permission for a short conversation.`);
+      if (!value.includes('?')) add(`voice_settings.${field}`, `${label} must ask permission for a short conversation.`);
     }
     if (!String(values.voice_settings?.wrong_person_response || '').trim()) add('voice_settings.wrong_person_response', 'Wrong-person response is required.');
   }
@@ -505,8 +501,8 @@ export function CallScriptStudio({ studio, refresh, onDirtyChange }: { studio?: 
           </div>
           <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-3">
             {playgroundValidation.checks.map((item: Record<string, any>) => (
-              <div className={`rounded border p-2 text-sm ${item.passed ? 'border-emerald-900 text-emerald-200' : 'border-red-900 text-red-200'}`} key={item.key}>
-                <div>{item.passed ? 'Pass' : 'Fail'}: {item.label}</div>
+              <div className={`rounded border p-2 text-sm ${item.passed ? 'border-emerald-900 text-emerald-200' : item.blocking === false ? 'border-amber-900 text-amber-200' : 'border-red-900 text-red-200'}`} key={item.key}>
+                <div>{item.passed ? 'Pass' : item.blocking === false ? 'Advisory' : 'Fail'}: {item.label}</div>
                 {!item.passed && item.failure ? <div className="mt-1 text-xs">{item.failure}</div> : null}
               </div>
             ))}

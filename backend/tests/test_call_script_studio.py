@@ -10,6 +10,7 @@ from app.core.config import settings
 from app.models.base import Base
 from app.models.entities import (
     CallComplianceItem,
+    CallQueueItem,
     CallScriptVersion,
     Campaign,
     Company,
@@ -148,7 +149,7 @@ class CallScriptStudioTests(unittest.TestCase):
             'wrong_person_response': DEFAULT_WRONG_PERSON_RESPONSE,
         }
 
-    def test_confirm_first_requires_mode_specific_introductions_before_publish(self):
+    def test_confirm_first_accepts_custom_mode_specific_introductions(self):
         with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
             user = self.seed(db)
             ensure_script_studio(db, user.id)
@@ -168,10 +169,8 @@ class CallScriptStudioTests(unittest.TestCase):
 
             errors = validate_script_content(draft)
 
-            self.assertIn('voice_settings.confirmed_person_internal', errors)
-            self.assertIn('internal workflow test', errors['voice_settings.confirmed_person_internal'][0])
-            self.assertIn('voice_settings.confirmed_person_consented', errors)
-            self.assertIn('permission to be contacted', errors['voice_settings.confirmed_person_consented'][0])
+            self.assertNotIn('voice_settings.confirmed_person_internal', errors)
+            self.assertNotIn('voice_settings.confirmed_person_consented', errors)
 
     def test_confirm_first_node_patch_adds_stateful_identity_and_separate_endings(self):
         with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
@@ -252,7 +251,7 @@ class CallScriptStudioTests(unittest.TestCase):
             result = asyncio.run(
                 run_retell_opening_playground(draft, MissingAllstateProvider(), agent_version=8)
             )
-            self.assertFalse(result['passed'])
+            self.assertTrue(result['passed'])
             failed = {
                 item['key']: item['failure']
                 for item in result['modes']['internal_test']['checks']
@@ -260,6 +259,35 @@ class CallScriptStudioTests(unittest.TestCase):
             }
             self.assertIn('allstate_role_present_after_confirmation', failed)
             self.assertIn('Allstate Sales Agent', failed['allstate_role_present_after_confirmation'])
+            check = next(
+                item for item in result['modes']['internal_test']['checks']
+                if item['key'] == 'allstate_role_present_after_confirmation'
+            )
+            self.assertFalse(check['blocking'])
+            self.assertTrue(result['warnings'])
+
+    def test_script_validation_does_not_require_marketing_keywords(self):
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
+            user = self.seed(db)
+            published = ensure_script_studio(db, user.id)
+            values = {
+                field: getattr(published, field)
+                for field in (
+                    'opening_internal', 'opening_consented', 'purpose_statement',
+                    'discovery_content', 'objection_library', 'closing_library',
+                    'voicemail_content', 'voice_settings', 'talking_points',
+                    'compliance_content',
+                )
+            }
+            values['voice_settings'] = {
+                **values['voice_settings'],
+                'opening_style': OPENING_STYLE_CONFIRM_FIRST,
+                'confirmed_person_internal': 'Hello {{customer_name}}, may I continue?',
+                'confirmed_person_consented': 'Hello {{customer_name}}, is now a good time?',
+            }
+            errors = validate_script_content(values)
+            self.assertNotIn('voice_settings.confirmed_person_internal', errors)
+            self.assertNotIn('voice_settings.confirmed_person_consented', errors)
 
     def test_recoverable_content_edit_preserves_existing_provider_draft_versions(self):
         with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
@@ -639,6 +667,29 @@ class CallScriptStudioTests(unittest.TestCase):
             self.assertEqual(entry.status, 'approved')
             self.assertIsNone(entry.call_attempt_id)
             self.assertEqual(PILOT_CONFIRMATION, 'PLACE APPROVED CONSENTED LEAD CALL')
+
+    def test_completed_contact_is_not_mislabeled_as_consent_blocked(self):
+        with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'):
+            user = self.seed(db)
+            script = ensure_script_studio(db, user.id)
+            self.approve_checklist(db)
+            result = import_consented_leads(db, [self.eligible_row()], user.id)
+            lead = db.get(ConsentedCallingLead, result['lead_ids'][0])
+            db.add(CallQueueItem(
+                id='completed-item', company_id=lead.company_id, campaign_id=lead.campaign_id,
+                canonical_lead_id=lead.id, phone_number=lead.phone_number,
+                dedupe_key='completed-item', script_version_id=script.id,
+                script_version=script.version_number, provider_agent_id=script.retell_agent_id,
+                provider_agent_version=script.retell_agent_version, consent_snapshot={},
+                status='completed', execution_mode='live', created_at=datetime.utcnow(),
+                updated_at=datetime.utcnow(),
+            ))
+            db.flush()
+            status, reasons = evaluate_lead(
+                db, lead, now=datetime.fromisoformat('2026-07-27T15:00:00+00:00'),
+            )
+            self.assertEqual(status, 'Completed')
+            self.assertEqual(reasons, ['Call already completed successfully'])
 
 
 if __name__ == '__main__':

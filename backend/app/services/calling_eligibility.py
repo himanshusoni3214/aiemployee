@@ -180,8 +180,8 @@ def evaluate_calling_lead(
     if not published:
         blockers.append(_blocker('SCRIPT_NOT_PUBLISHED', 'Approved live script is missing'))
     elif not legacy_compatible or campaign:
-        if published.version_number != 8 or (published.retell_agent_version or 0) != 8 or (published.retell_flow_version or 0) != 8:
-            blockers.append(_blocker('BASELINE_DRIFT', 'Published voice baseline is not v8'))
+        if (published.retell_agent_version or 0) <= 0 or (published.retell_flow_version or 0) <= 0:
+            blockers.append(_blocker('BASELINE_DRIFT', 'Published voice baseline is missing Retell version evidence'))
         if published.retell_agent_id != settings.retell_agent_id:
             blockers.append(_blocker('AGENT_DRIFT', 'Published script is assigned to the wrong Retell agent'))
     if not campaign and not legacy_compatible:
@@ -189,8 +189,9 @@ def evaluate_calling_lead(
     elif campaign:
         if normalize_phone(campaign.from_number or '') != normalize_phone(settings.retell_from_number):
             blockers.append(_blocker('CALLER_ID_DRIFT', 'Configured caller ID does not match the approved number'))
-        if campaign.baseline_version != 'v8':
-            blockers.append(_blocker('BASELINE_DRIFT', 'Campaign voice baseline is not v8'))
+        expected_baseline = f'v{published.version_number}' if published else None
+        if expected_baseline and campaign.baseline_version != expected_baseline:
+            blockers.append(_blocker('BASELINE_DRIFT', f'Campaign voice baseline does not match published {expected_baseline}'))
         if require_campaign_running and campaign.campaign_status not in RUNNING_CAMPAIGN_STATUSES:
             blockers.append(_blocker('CAMPAIGN_NOT_RUNNING', f'Campaign is {campaign.campaign_status}'))
 
