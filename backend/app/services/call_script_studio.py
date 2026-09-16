@@ -1,4 +1,5 @@
 import csv
+import copy
 import hashlib
 import io
 import json
@@ -39,6 +40,7 @@ from app.services.calling import (
     CALL_ACTIVE_STATUSES,
     RetellCallingProvider,
     calling_provider,
+    current_local_dynamic_variables,
     masked_phone,
     normalize_phone,
     valid_us_ca_e164,
@@ -114,6 +116,11 @@ KNOWN_TEMPLATE_VARIABLES = REQUIRED_VARIABLES | {
     'recording_disclosure',
     'consent_validated_for_called_number',
     'voryx_call_attempt_id',
+    'current_local_date',
+    'current_local_time',
+    'current_local_month',
+    'current_local_year',
+    'current_local_weekday',
 }
 NODE_FIELD_MAP = {
     'opening_internal': 'opening',
@@ -250,7 +257,7 @@ DEFAULT_OBJECTIONS = [
     ('quote_now', 'Quote now', ['Give me a quote now'], 'neutral', 'Himanshu must provide the quote directly as the licensed agent.', 'Would a brief appointment work?', 'appointment_close', 1),
     ('scam', 'Scam concern', ['Is this a scam?'], 'hard', 'I will not request payment, banking details, government ID, or policy credentials.', 'Would you prefer a direct callback from Himanshu?', 'trust', 0),
     ('first_not_interested', 'First not interested', ["I'm not interested"], 'neutral', 'I understand. Before I let you go, when was coverage last reviewed?', 'When was the last coverage review?', 'neutral_reframe', 1),
-    ('second_refusal', 'Second refusal', ['No, still not interested'], 'hard', 'Understood. Thank you for your time.', '', 'end', 0),
+    ('second_refusal', 'Second refusal', ['No, still not interested'], 'hard', 'Understood. Thank you for your time.', '', 'declined_end', 0),
     ('dnc', 'Do not call', ['Do not call me'], 'DNC', 'Understood. I will mark this number not to be contacted again. Thank you.', '', 'dnc', 0),
 ]
 
@@ -264,7 +271,7 @@ SCENARIOS = [
     ('speak_to_spouse', 'I need to speak to my spouse', 'soft_reframe'),
     ('price_only', 'I only care about price', 'soft_reframe'),
     ('first_not_interested', "I'm not interested", 'neutral_reframe'),
-    ('second_refusal', "I'm not interested", 'end'),
+    ('second_refusal', "I'm not interested", 'declined_end'),
     ('dnc', 'Do not call me', 'dnc'),
     ('appointment_accepted', 'I want an appointment', 'appointment_close'),
     ('slots_rejected', 'Neither slot works, call near renewal', 'renewal_capture'),
@@ -310,7 +317,7 @@ def _default_script() -> dict:
         },
         'objection_library': _default_objections(),
         'closing_library': {
-            'appointment': 'It sounds like a short review would at least give you a clearer comparison. Would a weekday evening or a weekend morning be easier?',
+            'appointment': 'A short review will give you a clear comparison before you decide.',
             'appointment_slots': 'Himanshu has {{slot_one}} or {{slot_two}} available. Which works better?',
             'renewal_callback': 'Would you prefer Himanshu to reconnect at the beginning of that month or about two weeks before renewal?',
             'busy_callback': 'No problem. Would later today or another day be better for a brief call with Himanshu?',
@@ -853,15 +860,37 @@ def expected_retell_node_texts(row: CallScriptVersion) -> dict[str, str]:
             str(discovery.get(key) or '')
             for key in ('product_interest', 'coverage_review', 'renewal')
         ).strip(),
-        'appointment_close': str(closing.get('appointment') or ''),
-        'renewal_callback': str(closing.get('renewal_callback') or ''),
-        'busy_callback': str(closing.get('busy_callback') or ''),
+        'appointment_close': (
+            'The customer is ready for a quote conversation. Call voryx_get_quote_slots immediately, '
+            'before saying anything about schedule, with the immutable {{voryx_call_attempt_id}}. '
+            'Do not ask broad weekday-versus-weekend preference. After the tool returns, briefly say: '
+            f'"{str(closing.get("appointment") or "")}" Offer exactly the returned slots. '
+            'Ask only which slot works. Do not ask another qualification question in this node; a general '
+            'insurance review can be booked even if product type is unknown. If a slot is accepted, call voryx_book_quote_appointment '
+            'with the same immutable call-attempt ID. After the booking tool returns, do not ask if the '
+            'customer needs anything else; transition immediately to Appointment Tool Result. If slot lookup fails, apologize once and ask for '
+            'one specific preferred date and time; never restart discovery or renewal questions.'
+        ).strip(),
+        'renewal_callback': (
+            f'{str(closing.get("renewal_callback") or "")} Use the renewal timing already provided. '
+            'Ask for one specific callback date and time or daypart, and confirm permission once. '
+            'The callback reason is the insurance review; do not ask the customer to explain it.'
+        ).strip(),
+        'busy_callback': (
+            f'{str(closing.get("busy_callback") or "")} Capture one specific day and time and confirm '
+            'permission once. The active insurance conversation is the callback reason; do not ask for it. '
+            'After a slot-tool failure, create a human follow-up request without returning to renewal discovery.'
+        ).strip(),
         'soft_reframe': ' '.join(
             f"{item.get('name')}: {item.get('response')} {item.get('follow_up_question')}"
             for item in row.objection_library or []
             if item.get('active', True) and item.get('classification') not in {'hard', 'DNC'}
         ).strip(),
-        'end': row.voicemail_content or '',
+        'declined_end': 'Understood. Thank you for your time, and have a good day.',
+        'appointment_end': 'You are all set. Himanshu will speak with you at the confirmed time. Thank you.',
+        'callback_end': 'Thank you. Himanshu will reconnect at the time you confirmed.',
+        'trust_end': 'I understand. You can verify Allstate and Himanshu Soni independently before deciding whether to continue. Thank you.',
+        'dnc_end': 'Your do-not-call request has been recorded. Goodbye.',
     }
     opening = opening_settings(row)
     if opening['opening_style'] == OPENING_STYLE_CONFIRM_FIRST:
@@ -882,6 +911,43 @@ def verify_retell_node_texts(row: CallScriptVersion, flow: dict) -> dict:
                 'expected': expected_text,
                 'actual': actual,
             })
+    patched = retell_node_patch(row, flow)
+    patched_by_id = {node.get('id'): node for node in patched.get('nodes') or []}
+    if flow.get('global_prompt') != GLOBAL_PROMPT:
+        mismatches.append({'node_id': 'global_prompt', 'expected': GLOBAL_PROMPT, 'actual': flow.get('global_prompt')})
+    for node_id, expected_node in patched_by_id.items():
+        actual_node = by_id.get(node_id) or {}
+        fields = ['type', 'edges', 'tool_ids', 'global_node_setting', 'else_edge']
+        if node_id not in expected:
+            fields.append('instruction')
+        for field in fields:
+            if expected_node.get(field) != actual_node.get(field):
+                mismatches.append({
+                    'node_id': node_id,
+                    'field': field,
+                    'expected': expected_node.get(field),
+                    'actual': actual_node.get(field),
+                })
+    tools = {str(tool.get('name')): tool for tool in flow.get('tools') or []}
+    expected_tools = {tool['name']: tool for tool in custom_tools('verification-token')}
+    for name in ('voryx_get_quote_slots', 'voryx_book_quote_appointment', 'voryx_mark_do_not_call'):
+        actual_tool = tools.get(name) or {}
+        attempt_id = ((actual_tool.get('parameters') or {}).get('properties') or {}).get('voryx_call_attempt_id') or {}
+        if attempt_id.get('const') != '{{voryx_call_attempt_id}}':
+            mismatches.append({
+                'node_id': f'tool:{name}',
+                'field': 'voryx_call_attempt_id.const',
+                'expected': '{{voryx_call_attempt_id}}',
+                'actual': attempt_id.get('const'),
+            })
+        expected_speak = expected_tools[name]['speak_after_execution']
+        if actual_tool.get('speak_after_execution') != expected_speak:
+            mismatches.append({
+                'node_id': f'tool:{name}',
+                'field': 'speak_after_execution',
+                'expected': expected_speak,
+                'actual': actual_tool.get('speak_after_execution'),
+            })
     return {
         'passed': not mismatches,
         'verified_nodes': sorted(expected),
@@ -890,32 +956,31 @@ def verify_retell_node_texts(row: CallScriptVersion, flow: dict) -> dict:
 
 
 def retell_node_patch(row: CallScriptVersion, live_flow: dict) -> dict:
-    nodes = [dict(node) for node in live_flow.get('nodes') or []]
+    live_nodes = copy.deepcopy(live_flow.get('nodes') or [])
+    live_by_id = {node.get('id'): node for node in live_nodes}
+    canonical_nodes = copy.deepcopy(flow_nodes())
+    canonical_ids = {node.get('id') for node in canonical_nodes}
+    nodes = canonical_nodes + [
+        node for node in live_nodes
+        if node.get('id') not in canonical_ids and node.get('id') != 'end'
+    ]
     by_id = {node.get('id'): node for node in nodes}
     expected = expected_retell_node_texts(row)
     opening = opening_settings(row)
-    allowed_new_nodes = (
-        {'wrong_person_end', 'voicemail_end'}
-        if opening['opening_style'] == OPENING_STYLE_CONFIRM_FIRST
-        else set()
-    )
-    missing = sorted(set(expected) - set(by_id) - allowed_new_nodes)
-    if missing:
-        raise ValueError(f'Retell flow is missing mapped nodes: {", ".join(missing)}')
     if opening['opening_style'] == OPENING_STYLE_CONFIRM_FIRST:
         for node_id, name, text, y in (
             ('wrong_person_end', 'Wrong Person Ending', opening['wrong_person_response'], -220),
             ('voicemail_end', 'Voicemail Ending', row.voicemail_content or '', 220),
         ):
+            node = by_id.get(node_id) or {
+                'id': node_id,
+                'name': name,
+                'type': 'end',
+                'speak_during_execution': True,
+                'instruction': {'type': 'static_text', 'text': text},
+                'display_position': {'x': 300, 'y': y},
+            }
             if node_id not in by_id:
-                node = {
-                    'id': node_id,
-                    'name': name,
-                    'type': 'end',
-                    'speak_during_execution': True,
-                    'instruction': {'type': 'static_text', 'text': text},
-                    'display_position': {'x': 300, 'y': y},
-                }
                 nodes.append(node)
                 by_id[node_id] = node
         opening_node = by_id.get('opening') or {}
@@ -937,7 +1002,24 @@ def retell_node_patch(row: CallScriptVersion, live_flow: dict) -> dict:
         instruction = dict(node.get('instruction') or {})
         instruction['text'] = text
         node['instruction'] = instruction
-    return {'nodes': nodes}
+    tools = copy.deepcopy(live_flow.get('tools') or [])
+    canonical_tools = {tool['name']: tool for tool in custom_tools('patch-token')}
+    for tool in tools:
+        if tool.get('name') not in {'voryx_get_quote_slots', 'voryx_book_quote_appointment', 'voryx_mark_do_not_call'}:
+            continue
+        parameters = dict(tool.get('parameters') or {})
+        properties = dict(parameters.get('properties') or {})
+        attempt_id = dict(properties.get('voryx_call_attempt_id') or {})
+        attempt_id.update({
+            'type': 'string',
+            'const': '{{voryx_call_attempt_id}}',
+            'description': 'The exact immutable Voryx call-attempt ID for this call.',
+        })
+        properties['voryx_call_attempt_id'] = attempt_id
+        parameters['properties'] = properties
+        tool['parameters'] = parameters
+        tool['speak_after_execution'] = canonical_tools[tool['name']]['speak_after_execution']
+    return {'global_prompt': GLOBAL_PROMPT, 'tools': tools, 'nodes': nodes}
 
 
 def _agent_text(messages: list[dict]) -> str:
@@ -979,6 +1061,7 @@ async def run_retell_opening_playground(
     opening = opening_settings(row)
 
     def variables(internal_test: bool) -> dict[str, str]:
+        now = _now()
         return {
             'customer_name': 'Himanshu',
             'assistant_name': 'Ava',
@@ -990,13 +1073,14 @@ async def run_retell_opening_playground(
             'call_purpose': 'Internal playground validation with no telephone call',
             'insurance_interest': 'Auto and property insurance',
             'consent_source': 'Internal self-test' if internal_test else 'Approved consent record',
-            'consent_date': _now().date().isoformat(),
+            'consent_date': now.date().isoformat(),
             'booking_timezone': 'America/Toronto',
             'internal_test': 'true' if internal_test else 'false',
             'recording_disclosure_enabled': 'true',
             'recording_disclosure': 'This internal test may be recorded and transcribed.',
             'consent_validated_for_called_number': 'true',
             'voryx_call_attempt_id': 'playground-no-phone-call',
+            **current_local_dynamic_variables('America/Toronto', now),
         }
 
     async def complete(
@@ -2275,6 +2359,7 @@ async def place_approved_pilot_call(
         'callback_date': '',
         'callback_time': '',
         'voryx_call_attempt_id': attempt.id,
+        **current_local_dynamic_variables(lead.timezone, now),
     }
     try:
         receipt = await provider.place_call(

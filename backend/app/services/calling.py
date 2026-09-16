@@ -74,6 +74,11 @@ REQUIRED_DYNAMIC_VARIABLES = [
     'recording_disclosure',
     'consent_validated_for_called_number',
     'voryx_call_attempt_id',
+    'current_local_date',
+    'current_local_time',
+    'current_local_month',
+    'current_local_year',
+    'current_local_weekday',
 ]
 ALLSTATE_VOICE_ID = 'retell-Della'
 ALLSTATE_VOICE_NAME = 'Della'
@@ -786,6 +791,22 @@ def call_settings(db: Session) -> CallCampaignSettings:
     return row
 
 
+def current_local_dynamic_variables(
+    timezone: str = 'America/Toronto',
+    now: datetime | None = None,
+) -> dict[str, str]:
+    now = now or _now()
+    utc_now = now.replace(tzinfo=ZoneInfo('UTC')) if now.tzinfo is None else now.astimezone(ZoneInfo('UTC'))
+    local_now = utc_now.astimezone(ZoneInfo(timezone))
+    return {
+        'current_local_date': local_now.date().isoformat(),
+        'current_local_time': local_now.strftime('%Y-%m-%d %H:%M %Z'),
+        'current_local_month': local_now.strftime('%B'),
+        'current_local_year': str(local_now.year),
+        'current_local_weekday': local_now.strftime('%A'),
+    }
+
+
 def internal_test_dynamic_variables(
     call_attempt_id: str,
     payload: dict | None = None,
@@ -798,6 +819,7 @@ def internal_test_dynamic_variables(
         call_settings_row.call_recording_disclosure_enabled
         and (call_settings_row.recording_enabled or call_settings_row.transcription_enabled)
     )
+    timezone = str(payload.get('booking_timezone') or 'America/Toronto')
     values = {
         'customer_name': str(payload.get('recipient_name') or 'Himanshu'),
         'assistant_name': 'Ava',
@@ -810,12 +832,13 @@ def internal_test_dynamic_variables(
         'insurance_interest': str(payload.get('insurance_interest') or 'Auto and home insurance'),
         'consent_source': 'Internal self-test entered in Voryx',
         'consent_date': _local_date(str(payload.get('booking_timezone') or 'America/Toronto'), now),
-        'booking_timezone': str(payload.get('booking_timezone') or 'America/Toronto'),
+        'booking_timezone': timezone,
         'internal_test': 'true',
         'recording_disclosure_enabled': 'true' if disclosure_enabled else 'false',
         'recording_disclosure': ALLSTATE_RECORDING_DISCLOSURE if disclosure_enabled else '',
         'consent_validated_for_called_number': 'true',
         'voryx_call_attempt_id': call_attempt_id,
+        **current_local_dynamic_variables(timezone, now),
     }
     return {key: str(values[key]) for key in REQUIRED_DYNAMIC_VARIABLES}
 

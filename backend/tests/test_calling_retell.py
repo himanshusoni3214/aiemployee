@@ -131,7 +131,11 @@ class CallingRetellTests(unittest.TestCase):
         self.assertFalse(provider.verify_webhook(b'{}', 'wrong'))
 
     def test_internal_test_dynamic_variables_are_allstate_specific(self):
-        values = internal_test_dynamic_variables('attempt-1', {'recipient_name': 'Himanshu'})
+        values = internal_test_dynamic_variables(
+            'attempt-1',
+            {'recipient_name': 'Himanshu'},
+            datetime(2026, 9, 16, 2, 45),
+        )
         self.assertEqual(sorted(values), sorted(REQUIRED_DYNAMIC_VARIABLES))
         self.assertEqual(values['assistant_name'], 'Ava')
         self.assertEqual(values['agent_name'], 'Himanshu Soni')
@@ -142,6 +146,10 @@ class CallingRetellTests(unittest.TestCase):
         self.assertEqual(values['recording_disclosure_enabled'], 'true')
         self.assertEqual(values['recording_disclosure'], ALLSTATE_RECORDING_DISCLOSURE)
         self.assertEqual(values['consent_validated_for_called_number'], 'true')
+        self.assertEqual(values['current_local_date'], '2026-09-15')
+        self.assertEqual(values['current_local_month'], 'September')
+        self.assertEqual(values['current_local_year'], '2026')
+        self.assertEqual(values['current_local_weekday'], 'Tuesday')
 
     def test_preview_begin_message_is_not_generic(self):
         preview = internal_test_preview_payload('attempt-1')

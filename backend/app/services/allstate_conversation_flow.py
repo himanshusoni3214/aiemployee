@@ -2,7 +2,7 @@ import re
 from typing import Any
 
 
-FLOW_TITLE = 'Voryx Allstate Sales Conversation Flow V2'
+FLOW_TITLE = 'Voryx Allstate Sales Conversation Flow V3'
 LIVE_MODEL = 'gpt-4.1-mini'
 POST_CALL_MODEL = 'gpt-4.1-nano'
 
@@ -38,6 +38,8 @@ REQUIRED_LOGICAL_NODES = {
 }
 
 GLOBAL_PROMPT = """You are Ava, a professional calling assistant for Himanshu Soni, an Allstate Sales Agent in Scarborough, Ontario. Your job is to create interest in a licensed-agent second opinion and arrange a specific appointment or callback.
+
+The authoritative current local date and time is {{current_time_America/Toronto}}. Resolve today, tomorrow, next week, this month and next year from that value. Never guess a month. Ask one short clarification only when a precise date is genuinely ambiguous. A renewal next week, this month, overdue, or within about 45 days is an immediate quote signal: capture the insurance product if still unknown, then move directly to appointment booking. Do not continue general discovery after that signal.
 
 Be warm, confident, attentive and consultative. Use one question at a time and one or two short sentences per response. Do not sound rushed, aggressive, excessively cheerful or passive. Acknowledge briefly, then advance the active node.
 
@@ -93,7 +95,13 @@ def custom_tools(tool_token: str) -> list[dict]:
             'speak_after_execution': True,
             'parameters': {
                 'type': 'object',
-                'properties': {'voryx_call_attempt_id': {'type': 'string'}},
+                'properties': {
+                    'voryx_call_attempt_id': {
+                        'type': 'string',
+                        'const': '{{voryx_call_attempt_id}}',
+                        'description': 'The exact immutable Voryx call-attempt ID for this call.',
+                    },
+                },
                 'required': ['voryx_call_attempt_id'],
             },
         },
@@ -106,11 +114,15 @@ def custom_tools(tool_token: str) -> list[dict]:
             'method': 'POST',
             'headers': header,
             'args_at_root': True,
-            'speak_after_execution': True,
+            'speak_after_execution': False,
             'parameters': {
                 'type': 'object',
                 'properties': {
-                    'voryx_call_attempt_id': {'type': 'string'},
+                    'voryx_call_attempt_id': {
+                        'type': 'string',
+                        'const': '{{voryx_call_attempt_id}}',
+                        'description': 'The exact immutable Voryx call-attempt ID for this call.',
+                    },
                     'appointment_date': {'type': 'string'},
                     'appointment_time': {'type': 'string'},
                     'timezone': {'type': 'string'},
@@ -138,7 +150,11 @@ def custom_tools(tool_token: str) -> list[dict]:
             'parameters': {
                 'type': 'object',
                 'properties': {
-                    'voryx_call_attempt_id': {'type': 'string'},
+                    'voryx_call_attempt_id': {
+                        'type': 'string',
+                        'const': '{{voryx_call_attempt_id}}',
+                        'description': 'The exact immutable Voryx call-attempt ID for this call.',
+                    },
                     'phone_number': {'type': 'string'},
                     'reason': {'type': 'string'},
                 },
@@ -186,14 +202,28 @@ def flow_nodes() -> list[dict]:
     renewal = conversation_node(
         'renewal_capture',
         'Renewal Date Capture',
-        """Ask: "When does the policy normally renew?" Capture a month. Clarify vague answers: fall means ask September, October or November; later this year means ask which month; a relative period means calculate and confirm the approximate month. If they cannot remember, ask whether a reminder closer to renewal would help. A request to call near renewal stays here until renewal month is known, then routes to Renewal Callback.""",
+        """Ask: "When does the policy normally renew?" Use {{current_time_America/Toronto}} as the only date reference. Resolve relative answers such as next week or next month without guessing. Confirm the resolved date or month once. If renewal is next week, this month, overdue, or within about 45 days, say the timing makes a prompt comparison useful and route directly to Appointment Close. Do not ask coverage-review or July-change questions first. If renewal is more than about three months away or recently passed, route to Renewal Timing Value. Use Renewal Callback only when the customer explicitly asks to be contacted later.""",
         [
+            prompt_edge('renewal_imminent', 'Renewal is next week, this month, overdue, or within about 45 days, or customer wants a quote now', 'appointment_close'),
             prompt_edge('renewal_callback', 'Customer requests contact near renewal and renewal month has been captured', 'renewal_callback'),
-            prompt_edge('renewal_captured', 'Renewal month is captured or legitimately unavailable after clarification', 'coverage_review'),
+            prompt_edge('renewal_distant_or_passed', 'Renewal is more than about three months away, next year, or recently passed', 'renewal_timing_value'),
+            prompt_edge('renewal_captured', 'Renewal month is captured, is not imminent, and no timing-specific route applies', 'coverage_review'),
             prompt_edge('renewal_objection', 'Customer raises another objection', 'objection_classifier'),
         ],
         900,
         0,
+    )
+    renewal_timing_value = conversation_node(
+        'renewal_timing_value',
+        'Renewal Timing Value',
+        """Tailor one brief response to the timing, then offer one choice. If renewal recently passed, say a no-obligation second opinion can still identify questions for the next renewal and ask whether a short review would be useful. If renewal is three to twelve months away, say planning early avoids a rushed comparison and ask whether they prefer a short review now or one specific callback closer to renewal. If they want a review now, route to Appointment Close. If they choose later, route to Renewal Callback. Do not pressure and do not restart discovery.""",
+        [
+            prompt_edge('timing_review_now', 'Customer agrees to a quote or review now', 'appointment_close'),
+            prompt_edge('timing_callback', 'Customer asks to reconnect closer to renewal', 'renewal_callback'),
+            prompt_edge('timing_declined', 'Customer declines both options', 'declined_end'),
+        ],
+        1200,
+        -180,
     )
     review = conversation_node(
         'coverage_review',
@@ -224,7 +254,7 @@ def flow_nodes() -> list[dict]:
             prompt_edge('classify_busy', 'Customer says they are busy or requests another time', 'busy_callback'),
             prompt_edge('classify_soft', 'Customer gives a soft objection', 'soft_reframe'),
             prompt_edge('classify_neutral', 'Customer gives a first neutral rejection', 'neutral_reframe'),
-            prompt_edge('classify_end', 'Customer gives a second refusal or hard rejection', 'end'),
+            prompt_edge('classify_end', 'Customer gives a second refusal or hard rejection', 'declined_end'),
         ],
         900,
         300,
@@ -241,7 +271,7 @@ def flow_nodes() -> list[dict]:
             prompt_edge('soft_review', 'Customer engages and coverage review timing is not known', 'coverage_review'),
             prompt_edge('soft_close', 'Customer engages and is ready for a specific close', 'appointment_close'),
             prompt_edge('soft_callback', 'Customer prefers later or near renewal', 'renewal_capture'),
-            prompt_edge('soft_refused', 'Customer refuses again', 'end'),
+            prompt_edge('soft_refused', 'Customer refuses again', 'declined_end'),
         ],
         1200,
         300,
@@ -252,7 +282,7 @@ def flow_nodes() -> list[dict]:
         """For the first neutral rejection only, say: "I understand. Before I let you go, when was the last time someone reviewed the coverages and accident-benefit choices with you?" If they engage, continue to Coverage Review and make one close. If they refuse again, end immediately and politely. Do not add another reframe.""",
         [
             prompt_edge('neutral_engaged', 'Customer answers or agrees to continue', 'coverage_review'),
-            prompt_edge('neutral_refused', 'Customer refuses again', 'end'),
+            prompt_edge('neutral_refused', 'Customer refuses again', 'declined_end'),
         ],
         1200,
         520,
@@ -263,23 +293,23 @@ def flow_nodes() -> list[dict]:
         'type': 'subagent',
         'instruction': {
             'type': 'prompt',
-            'text': """Use: "It sounds like a short review would at least give you a clearer comparison. Would a weekday evening or a weekend morning be easier?" Call voryx_get_quote_slots before naming availability. Offer exactly the two returned slots. If one is accepted, call voryx_book_quote_appointment. Never claim a booking until the tool returns ok. If neither works, ask for a preferred day and time. Final fallback is a specific renewal callback.""",
+            'text': """The customer is ready for a quote conversation. Call voryx_get_quote_slots immediately, before saying anything about schedule, using the immutable {{voryx_call_attempt_id}} supplied to the tool. Do not ask broad weekday-versus-weekend preference. Offer exactly the two returned slots and ask only which slot works. Do not ask another qualification question in this node; a general insurance review can be booked even when product type is not yet captured. If one slot is accepted, call voryx_book_quote_appointment with the same immutable call-attempt ID. After that tool returns, do not ask if the customer needs anything else; transition immediately to Appointment Tool Result. Never claim a booking until the tool returns ok. If slot lookup fails, apologize once, ask for one specific preferred date and time, and route to Busy Callback without retrying or restarting renewal discovery.""",
         },
         'tool_ids': ['tool_voryx_slots', 'tool_voryx_book'],
         'edges': [
             prompt_edge('appointment_result', 'Appointment tool returned a result', 'appointment_result'),
             prompt_edge('appointment_callback', 'Customer prefers a callback or rejects both slots', 'renewal_capture'),
-            prompt_edge('appointment_refused', 'Customer clearly refuses the close', 'end'),
+            prompt_edge('appointment_refused', 'Customer clearly refuses the close', 'declined_end'),
         ],
         'display_position': {'x': 1800, 'y': 0},
     }
     renewal_callback = conversation_node(
         'renewal_callback',
         'Renewal Callback Close',
-        """Confirm the renewal month. Ask: "Would you prefer Himanshu to reconnect at the beginning of that month or about two weeks before renewal?" Then ask: "Would a weekday evening or weekend morning normally be easier?" Capture callback window, daypart, reason, and permission to reconnect. Do not end with vague "later." """,
+        """Use the renewal date or month already provided; never ask for it again. Ask for one specific callback date and preferred time or daypart. The reason is already the insurance quote review, so do not ask the customer to explain it. Confirm permission once. Do not end with vague "later" and do not repeat captured details as new questions.""",
         [
             prompt_edge('renewal_callback_ready', 'Month, callback window, daypart, reason, and permission are captured', 'callback_confirmation'),
-            prompt_edge('renewal_callback_refused', 'Customer refuses to provide timing again', 'end'),
+            prompt_edge('renewal_callback_refused', 'Customer refuses to provide timing again', 'declined_end'),
         ],
         1500,
         380,
@@ -287,10 +317,10 @@ def flow_nodes() -> list[dict]:
     busy_callback = conversation_node(
         'busy_callback',
         'Busy Callback Close',
-        """Say: "No problem. Would later today or another day be better?" Then obtain a specific date, time, or at minimum a weekday-evening or weekend-morning daypart. Confirm permission to reconnect and the reason. Do not treat busy as rejection and do not finish without callback timing unless the customer refuses again.""",
+        """Say: "No problem. What specific day and time should Himanshu call you?" Capture the answer and confirm permission once. Use the active insurance conversation as the callback reason; never ask the customer to supply a reason. If this node follows a slot-tool failure, create a specific human follow-up request rather than looping back into renewal questions.""",
         [
             prompt_edge('busy_callback_ready', 'Specific callback timing or daypart and permission are captured', 'callback_confirmation'),
-            prompt_edge('busy_callback_refused', 'Customer refuses to provide callback timing', 'end'),
+            prompt_edge('busy_callback_refused', 'Customer refuses to provide callback timing', 'declined_end'),
         ],
         600,
         360,
@@ -298,11 +328,11 @@ def flow_nodes() -> list[dict]:
     trust = conversation_node(
         'trust',
         'Trust and Scam Handling',
-        """Acknowledge the concern. Identify Ava as calling on behalf of Himanshu Soni, an Allstate Sales Agent. Say you will not request payment, banking details, government identification, or policy credentials. Offer a direct callback with Himanshu. If consent source or date is unavailable, do not invent it; end and flag consent review. If the concern is recording, explain the internal test may be recorded and transcribed, and end if they do not consent.""",
+        """Answer the exact trust concern in no more than two short sentences. Company concern: identify Allstate and say the customer can independently verify Allstate before continuing. Agent concern: identify Himanshu Soni as the licensed Allstate Sales Agent in Scarborough and offer a direct appointment with him. Scam concern: say Ava will not ask for payment, banking details, government ID, passwords, or policy credentials, and offer a direct callback with Himanshu. Do not argue or restart the introduction. If consent source or date is unavailable, do not invent it. If the concern is recording, explain the recording purpose and end if they do not consent.""",
         [
             prompt_edge('trust_continue', 'Customer is reassured and agrees to continue', 'purpose'),
             prompt_edge('trust_callback', 'Customer wants a direct callback', 'busy_callback'),
-            prompt_edge('trust_end', 'Customer remains uncomfortable or declines recording', 'end'),
+            prompt_edge('trust_end', 'Customer remains uncomfortable or declines recording', 'trust_end'),
         ],
         300,
         360,
@@ -317,7 +347,7 @@ def flow_nodes() -> list[dict]:
         """Answer: "Yes, I'm an automated calling assistant helping Himanshu with initial conversations and scheduling. I can't provide insurance advice or quote prices, but I can arrange a conversation with him." Do not claim to be human. Ask whether the customer is comfortable continuing. Continue only with permission.""",
         [
             prompt_edge('automation_continue', 'Customer agrees to continue', 'purpose'),
-            prompt_edge('automation_end', 'Customer declines or remains uncomfortable', 'end'),
+            prompt_edge('automation_end', 'Customer declines or remains uncomfortable', 'declined_end'),
         ],
         300,
         580,
@@ -335,7 +365,7 @@ def flow_nodes() -> list[dict]:
             'text': 'Say: "Understood. I will mark this number not to be contacted again. Thank you." Immediately invoke voryx_mark_do_not_call. Do not ask another question.',
         },
         'tool_ids': ['tool_voryx_dnc'],
-        'edges': [prompt_edge('dnc_done', 'DNC tool completed or returned a terminal result', 'end')],
+        'edges': [prompt_edge('dnc_done', 'DNC tool completed or returned a terminal result', 'dnc_end')],
         'global_node_setting': {
             'condition': 'Customer says do not call, stop calling, remove my number, or take me off the list',
             'cool_down': 10,
@@ -345,9 +375,9 @@ def flow_nodes() -> list[dict]:
     appointment_result = conversation_node(
         'appointment_result',
         'Appointment Tool Result',
-        """If the booking tool returned ok, confirm the exact booked time and that Himanshu will connect then. If it failed, apologize without claiming a booking and offer a specific callback instead. Never invent or alter the returned slot.""",
+        """If the booking tool returned ok, confirm the exact booked time once and route to Appointment Booked Ending. If it failed, apologize once without claiming a booking and ask for one specific preferred date and time for a human follow-up. Never invent or alter a returned slot and never return to renewal discovery.""",
         [
-            prompt_edge('appointment_confirmed', 'Booking tool returned ok and confirmation was spoken', 'extract_state'),
+            prompt_edge('appointment_confirmed', 'Booking tool returned ok and confirmation was spoken', 'appointment_end'),
             prompt_edge('appointment_failed', 'Booking tool failed or did not confirm', 'busy_callback'),
         ],
         2100,
@@ -356,11 +386,11 @@ def flow_nodes() -> list[dict]:
     callback_confirmation = conversation_node(
         'callback_confirmation',
         'Callback Confirmation',
-        """Repeat the exact callback arrangement: month/date or callback window, preferred daypart/time, reason, and permission to reconnect. Ask the customer to confirm. If any element is missing, ask only for that element before ending. A vague callback is not complete.""",
+        """Repeat the specific callback date and time or daypart once, state that Himanshu will follow up about the insurance review, and ask for confirmation. Do not ask for the reason because it is already known. If a timing element is missing, ask only for that element. A vague callback is incomplete.""",
         [
-            prompt_edge('callback_confirmed', 'Customer confirms complete callback timing and permission', 'extract_state'),
+            prompt_edge('callback_confirmed', 'Customer confirms complete callback timing and permission', 'callback_end'),
             prompt_edge('callback_missing', 'A required callback element remains missing', 'renewal_callback'),
-            prompt_edge('callback_cancelled', 'Customer withdraws callback permission', 'end'),
+            prompt_edge('callback_cancelled', 'Customer withdraws callback permission', 'declined_end'),
         ],
         1800,
         380,
@@ -389,21 +419,54 @@ def flow_nodes() -> list[dict]:
             'model': POST_CALL_MODEL,
             'high_priority': False,
         },
-        'else_edge': prompt_edge('extract_end', 'Else', 'end'),
+        'else_edge': prompt_edge('extract_end', 'Else', 'declined_end'),
         'display_position': {'x': 2350, 'y': 180},
     }
     end = {
-        'id': 'end',
+        'id': 'declined_end',
         'name': 'Compliant Ending',
         'type': 'end',
         'speak_during_execution': True,
-        'instruction': {'type': 'static_text', 'text': 'Thank you for your time.'},
+        'instruction': {'type': 'static_text', 'text': 'Understood. Thank you for your time, and have a good day.'},
         'display_position': {'x': 2600, 'y': 180},
     }
+    appointment_end = {
+        'id': 'appointment_end',
+        'name': 'Appointment Booked Ending',
+        'type': 'end',
+        'speak_during_execution': True,
+        'instruction': {'type': 'static_text', 'text': 'You are all set. Himanshu will speak with you at the confirmed time. Thank you.'},
+        'display_position': {'x': 2600, 'y': -80},
+    }
+    callback_end = {
+        'id': 'callback_end',
+        'name': 'Callback Scheduled Ending',
+        'type': 'end',
+        'speak_during_execution': True,
+        'instruction': {'type': 'static_text', 'text': 'Thank you. Himanshu will reconnect at the time you confirmed.'},
+        'display_position': {'x': 2600, 'y': 80},
+    }
+    trust_end = {
+        'id': 'trust_end',
+        'name': 'Trust Concern Ending',
+        'type': 'end',
+        'speak_during_execution': True,
+        'instruction': {'type': 'static_text', 'text': 'I understand. You can verify Allstate and Himanshu Soni independently before deciding whether to continue. Thank you.'},
+        'display_position': {'x': 2600, 'y': 260},
+    }
+    dnc_end = {
+        'id': 'dnc_end',
+        'name': 'Do Not Call Ending',
+        'type': 'end',
+        'speak_during_execution': True,
+        'instruction': {'type': 'static_text', 'text': 'Your do-not-call request has been recorded. Goodbye.'},
+        'display_position': {'x': 2600, 'y': 400},
+    }
     return [
-        opening, purpose, insurance, renewal, review, july, classifier, soft,
+        opening, purpose, insurance, renewal, renewal_timing_value, review, july, classifier, soft,
         neutral, appointment, renewal_callback, busy_callback, trust, automation,
         dnc, appointment_result, callback_confirmation, extract, end,
+        appointment_end, callback_end, trust_end, dnc_end,
     ]
 
 
@@ -450,10 +513,12 @@ def classify_objection(text: str) -> str | None:
 def expected_next_action(customer_text: str, stage: str = 'opening', objection_count: int = 0) -> dict:
     text = customer_text.lower().strip()
     objection = classify_objection(text)
+    if any(term in text for term in ('who is allstate', 'who is himanshu', 'do not know the company', "don't know the company", 'is this a scam')):
+        return {'next_node': 'trust', 'action': 'answer_specific_trust_concern', 'captures': []}
     if objection == 'dnc':
         return {'next_node': 'dnc', 'action': 'suppress_and_end', 'captures': ['do_not_call']}
     if objection == 'hard' or (objection in {'neutral', 'soft'} and objection_count >= 1):
-        return {'next_node': 'end', 'action': 'end_without_reframe', 'captures': ['hard_rejection']}
+        return {'next_node': 'declined_end', 'action': 'end_without_reframe', 'captures': ['hard_rejection']}
     if stage == 'opening' and text in {'no', 'no.', 'go ahead', 'sure', 'okay'}:
         return {'next_node': 'purpose', 'action': 'explain_purpose', 'captures': ['permission_to_continue']}
     if objection == 'soft' and any(term in text for term in ('busy',)):
@@ -464,6 +529,10 @@ def expected_next_action(customer_text: str, stage: str = 'opening', objection_c
         return {'next_node': 'soft_reframe', 'action': 'one_reframe_then_close', 'captures': ['objection_type']}
     if objection == 'neutral':
         return {'next_node': 'neutral_reframe', 'action': 'one_permission_reframe_then_close', 'captures': ['objection_type']}
+    if any(term in text for term in ('next week', 'this week', 'this month', 'already renewed', 'just renewed', 'renewal is overdue')):
+        return {'next_node': 'appointment_close', 'action': 'fast_track_quote_appointment', 'captures': ['renewal_date_if_known', 'appointment_interest']}
+    if any(term in text for term in ('next year', 'six months', 'four months', '3 months', 'three months')):
+        return {'next_node': 'renewal_timing_value', 'action': 'offer_review_or_timed_callback', 'captures': ['renewal_date_if_known']}
     if 'october' in text:
         return {'next_node': 'coverage_review', 'action': 'store_renewal_month', 'captures': ['renewal_month']}
     if 'appointment' in text or 'slot' in text:

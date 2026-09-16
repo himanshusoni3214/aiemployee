@@ -51,6 +51,7 @@ from app.services.call_script_studio import (
     validate_script_content,
 )
 from app.services.calling import MockCallingProvider
+from app.services.allstate_conversation_flow import conversation_flow_payload
 
 
 class CallScriptStudioTests(unittest.TestCase):
@@ -100,14 +101,22 @@ class CallScriptStudioTests(unittest.TestCase):
         texts = expected_retell_node_texts(row)
         if override:
             texts.update(override)
-        return {
-            'conversation_flow_id': row.conversation_flow_id,
-            'version': version,
-            'nodes': [
-                {'id': node_id, 'instruction': {'type': 'prompt', 'text': text}}
-                for node_id, text in texts.items()
-            ],
-        }
+        payload = conversation_flow_payload('test-token', [])
+        payload.update({'conversation_flow_id': row.conversation_flow_id, 'version': version})
+        by_id = {node['id']: node for node in payload['nodes']}
+        for node_id, text in texts.items():
+            if node_id not in by_id:
+                by_id[node_id] = {
+                    'id': node_id,
+                    'name': node_id.replace('_', ' ').title(),
+                    'type': 'end',
+                    'speak_during_execution': True,
+                    'instruction': {'type': 'static_text', 'text': text},
+                    'display_position': {'x': 300, 'y': 0},
+                }
+                payload['nodes'].append(by_id[node_id])
+            by_id[node_id]['instruction']['text'] = text
+        return payload
 
     def test_baseline_and_draft_are_versioned(self):
         with self.Session() as db, patch.object(settings, 'retell_agent_id', 'agent-fixed'), patch.object(settings, 'retell_agent_version', '0'):

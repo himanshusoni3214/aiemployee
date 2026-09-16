@@ -56,8 +56,15 @@ class AllstateConversationFlowTests(unittest.TestCase):
         extracted = next(node for node in payload['nodes'] if node['id'] == 'extract_state')
         self.assertEqual({item['name'] for item in extracted['variables']}, set(MANDATORY_STATE_VARIABLES))
         self.assertEqual(extracted['model_choice']['model'], POST_CALL_MODEL)
-        self.assertEqual({tool['name'] for tool in payload['tools']}, {'voryx_get_quote_slots', 'voryx_book_quote_appointment', 'voryx_mark_do_not_call'})
+        tools = {tool['name']: tool for tool in payload['tools']}
+        self.assertEqual(set(tools), {'voryx_get_quote_slots', 'voryx_book_quote_appointment', 'voryx_mark_do_not_call'})
+        for tool in tools.values():
+            attempt_id = tool['parameters']['properties']['voryx_call_attempt_id']
+            self.assertEqual(attempt_id['const'], '{{voryx_call_attempt_id}}')
+        self.assertTrue(tools['voryx_get_quote_slots']['speak_after_execution'])
+        self.assertFalse(tools['voryx_book_quote_appointment']['speak_after_execution'])
         self.assertEqual(payload['notes'][0]['content'], FLOW_TITLE)
+        self.assertIn('{{current_time_America/Toronto}}', payload['global_prompt'])
 
     def test_exact_failed_opening_no_means_available(self):
         self.assertEqual(expected_next_action('No.', 'opening')['next_node'], 'purpose')
@@ -85,6 +92,10 @@ class AllstateConversationFlowTests(unittest.TestCase):
             ("Do not call me again.", 'dnc', 'suppress_and_end'),
             ('I want an appointment.', 'appointment_close', 'offer_verified_slots'),
             ('Call me later near renewal.', 'renewal_capture', 'capture_renewal_then_callback'),
+            ('My renewal is next week.', 'appointment_close', 'fast_track_quote_appointment'),
+            ('My renewal is next year.', 'renewal_timing_value', 'offer_review_or_timed_callback'),
+            ("I don't know the company.", 'trust', 'answer_specific_trust_concern'),
+            ('Who is Himanshu?', 'trust', 'answer_specific_trust_concern'),
         ]
         for text, node, action in cases:
             with self.subTest(text=text):
@@ -92,8 +103,20 @@ class AllstateConversationFlowTests(unittest.TestCase):
                 self.assertEqual((result['next_node'], result['action']), (node, action))
 
     def test_second_and_hard_rejection_end_without_reframe(self):
-        self.assertEqual(expected_next_action("No, I'm definitely not interested.", 'objection', 1)['next_node'], 'end')
-        self.assertEqual(expected_next_action('Leave me alone.', 'objection')['next_node'], 'end')
+        self.assertEqual(expected_next_action("No, I'm definitely not interested.", 'objection', 1)['next_node'], 'declined_end')
+        self.assertEqual(expected_next_action('Leave me alone.', 'objection')['next_node'], 'declined_end')
+
+    def test_imminent_renewal_skips_discovery_and_uses_outcome_endings(self):
+        nodes = {node['id']: node for node in flow_nodes()}
+        renewal_edges = {edge['id']: edge['destination_node_id'] for edge in nodes['renewal_capture']['edges']}
+        self.assertEqual(renewal_edges['renewal_imminent'], 'appointment_close')
+        self.assertNotIn('coverage review', nodes['appointment_close']['instruction']['text'].lower())
+        self.assertEqual(nodes['appointment_result']['edges'][0]['destination_node_id'], 'appointment_end')
+        self.assertEqual(nodes['callback_confirmation']['edges'][0]['destination_node_id'], 'callback_end')
+        self.assertNotEqual(
+            nodes['callback_end']['instruction']['text'],
+            nodes['voicemail_end']['instruction']['text'] if 'voicemail_end' in nodes else '',
+        )
 
     def test_flow_does_not_create_voice_agent(self):
         source = conversation_flow_payload('token', ['kb'])
