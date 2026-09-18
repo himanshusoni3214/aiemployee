@@ -17,6 +17,7 @@ from app.services.calling import (
     ALLSTATE_BEGIN_MESSAGE,
     ALLSTATE_RECORDING_DISCLOSURE,
     ALLSTATE_REFINED_PROMPT,
+    ALLSTATE_VOICE_SETTINGS,
     CONVERSATION_FLOW_INTERNAL_CONFIRMATION,
     REQUIRED_DYNAMIC_VARIABLES,
     MockCallingProvider,
@@ -160,6 +161,11 @@ class CallingRetellTests(unittest.TestCase):
         self.assertIn('test of his insurance quote appointment workflow', preview['begin_message'])
         self.assertNotIn('AI assistant', preview['begin_message'])
         self.assertEqual(preview['missing_dynamic_variables'], [])
+
+    def test_voice_turn_taking_favors_faster_responses_and_barge_in(self):
+        self.assertEqual(ALLSTATE_VOICE_SETTINGS['responsiveness'], 0.82)
+        self.assertEqual(ALLSTATE_VOICE_SETTINGS['interruption_sensitivity'], 0.65)
+        self.assertEqual(ALLSTATE_VOICE_SETTINGS['denoising_mode'], 'noise-cancellation')
 
     def test_refined_prompt_answers_automation_truthfully(self):
         self.assertIn("I'm an automated calling assistant", ALLSTATE_REFINED_PROMPT)

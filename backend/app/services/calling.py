@@ -85,8 +85,8 @@ ALLSTATE_VOICE_NAME = 'Della'
 ALLSTATE_VOICE_SETTINGS = {
     'voice_id': ALLSTATE_VOICE_ID,
     'voice_name': ALLSTATE_VOICE_NAME,
-    'responsiveness': 0.78,
-    'interruption_sensitivity': 0.75,
+    'responsiveness': 0.82,
+    'interruption_sensitivity': 0.65,
     'enable_backchannel': True,
     'backchannel_words': ['okay', 'right', 'I understand'],
     'ambient_sound': None,
